@@ -1,5 +1,8 @@
 # serialize.c
 
+[![CI](https://github.com/mas-bandwidth/serialize.c/actions/workflows/ci.yml/badge.svg)](https://github.com/mas-bandwidth/serialize.c/actions/workflows/ci.yml)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+
 A bitpacking serialization library for **C**. Wire compatible with the
 [C++](https://github.com/mas-bandwidth/serialize),
 [C#](https://github.com/mas-bandwidth/serialize.cs),
@@ -80,9 +83,17 @@ The Makefile here is for developing the library itself:
 
 ```
 make test                  # round trip, rejection, and measure-stream tests
+make golden                # the pinned wire vector
 make diff                  # byte-compare against the C++ library
 make test-all-standards    # c89, c99, c11, c17
 ```
+
+CI additionally runs the golden wire test on a **big-endian** machine
+(s390x under qemu). That job earns its place: a round trip test cannot catch
+an endianness bug, because a packer writing the scratch word in the wrong byte
+order would be read back in the same wrong order and every round trip would
+pass while the bytes stayed incompatible with the other four languages. Only a
+pinned golden on a big-endian machine proves the byte order.
 
 `make diff` expects the C++ library as a sibling checkout; override with
 `SERIALIZE_CPP=/path/to/serialize`.
