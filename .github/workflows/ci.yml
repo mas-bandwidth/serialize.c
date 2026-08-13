@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The library's floor is C89 and its ceiling is whatever the compiler offers.
+  # A claim about historical C that nothing checks is not a claim.
+  standards:
+    name: ${{ matrix.os }} / ${{ matrix.std }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-24.04, macos-15 ]
+        std: [ c89, c99, c11, c17 ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: make test CSTD=${{ matrix.std }}
+      - name: Golden wire
+        run: make golden CSTD=${{ matrix.std }}
+
+  # THE job that matters most for this port.
+  #
+  # A round trip test cannot catch an endianness bug: if the packer wrote the
+  # scratch word in the wrong byte order, the reader would read it back in the
+  # same wrong order and every round trip would pass while the bytes were
+  # incompatible with the other four languages. Only a PINNED GOLDEN run on a
+  # big-endian machine proves the byte order is right, and s390x under qemu is
+  # the cheapest big-endian machine there is.
+  big-endian:
+    name: big endian s390x
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install s390x cross toolchain and qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-s390x-linux-gnu qemu-user-static
+
+      # static so the emulated binaries need no s390x sysroot at runtime
+      - name: Build and run the golden wire test
+        run: |
+          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -static -I. \
+            test/golden.c serialize.c -o golden-s390x -lm
+          qemu-s390x-static ./golden-s390x
+          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -static -I. \
+            test/roundtrip.c serialize.c -o roundtrip-s390x -lm
+          qemu-s390x-static ./roundtrip-s390x
+
+  # Byte-compares this library against the C++ one over the same sequence.
+  # The port exists to be wire compatible; everything else is detail.
+  wire-compat:
+    name: wire compatible with the C++ library
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the C++ library
+        run: git clone --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git ../serialize
+      - name: Compare
+        run: make diff
+
+  sanitizers:
+    name: asan + ubsan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: |
+          make test CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
+          make golden CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
+
+  # STANDARD.md here is a VERBATIM VENDORED COPY of the specification in
+  # mas-bandwidth/serialize. A duplicated normative document is the same
+  # failure as a duplicated constant, except it drifts silently.
+  standard:
+    name: STANDARD.md matches upstream
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare against mas-bandwidth/serialize
+        run: |
+          curl -fsSL -o /tmp/upstream-STANDARD.md \
+            https://raw.githubusercontent.com/mas-bandwidth/serialize/main/STANDARD.md
+          diff -u /tmp/upstream-STANDARD.md STANDARD.md
+
+  version:
+    name: version consistency
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the header version matches its parts
+        run: |
+          full=$(sed -nE 's/^#define SERIALIZE_VERSION[[:space:]]+"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' serialize.h)
+          major=$(sed -nE 's/^#define SERIALIZE_VERSION_MAJOR[[:space:]]+([0-9]+).*/\1/p' serialize.h)
+          minor=$(sed -nE 's/^#define SERIALIZE_VERSION_MINOR[[:space:]]+([0-9]+).*/\1/p' serialize.h)
+          patch=$(sed -nE 's/^#define SERIALIZE_VERSION_PATCH[[:space:]]+([0-9]+).*/\1/p' serialize.h)
+          if [ -z "$full" ] || [ -z "$major" ] || [ -z "$minor" ] || [ -z "$patch" ]; then
+            echo "::error::could not extract the version from serialize.h"; exit 1
+          fi
+          if [ "$full" != "$major.$minor.$patch" ]; then
+            echo "::error::SERIALIZE_VERSION is $full but the parts say $major.$minor.$patch"; exit 1
+          fi
+          echo "version $full"

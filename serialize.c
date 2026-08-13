@@ -1072,3 +1072,512 @@ void serialize_copy_string( char * dest, const char * source, unsigned long dest
 
     dest[i] = '\0';
 }
+
+/* ---------------------------------------------------------------------------
+   128-bit integers, emulated as two 64-bit lanes
+
+   Requiring __int128 would exclude MSVC and every C89 toolchain, and buys
+   nothing: STANDARD.md defines the 128-bit operations in terms of 32-bit
+   groups from least significant upward, which two lanes reproduce exactly.
+   --------------------------------------------------------------------------- */
+
+serialize_uint128_t serialize_uint128_make( serialize_uint64_t hi, serialize_uint64_t lo )
+{
+    serialize_uint128_t r;
+    r.hi = hi;
+    r.lo = lo;
+    return r;
+}
+
+serialize_int128_t serialize_int128_make( serialize_uint64_t hi, serialize_uint64_t lo )
+{
+    serialize_int128_t r;
+    r.hi = hi;
+    r.lo = lo;
+    return r;
+}
+
+serialize_int128_t serialize_int128_from_int64( serialize_int64_t value )
+{
+    serialize_int128_t r;
+    r.lo = (serialize_uint64_t) value;
+    /* sign extend: an arithmetic shift of a negative value is
+       implementation-defined in C, so the sign is tested instead */
+    r.hi = ( value < 0 ) ? ~(serialize_uint64_t) 0 : (serialize_uint64_t) 0;
+    return r;
+}
+
+int serialize_uint128_equal( serialize_uint128_t a, serialize_uint128_t b )
+{
+    return a.lo == b.lo && a.hi == b.hi;
+}
+
+int serialize_int128_equal( serialize_int128_t a, serialize_int128_t b )
+{
+    return a.lo == b.lo && a.hi == b.hi;
+}
+
+/* a - b in the unsigned 128-bit domain, wrapping like the hardware would */
+static serialize_uint128_t serialize_u128_sub( serialize_uint128_t a, serialize_uint128_t b )
+{
+    serialize_uint128_t r;
+    r.lo = a.lo - b.lo;
+    r.hi = a.hi - b.hi - ( a.lo < b.lo ? 1u : 0u );
+    return r;
+}
+
+static int serialize_u128_compare( serialize_uint128_t a, serialize_uint128_t b )
+{
+    if ( a.hi != b.hi )
+    {
+        return a.hi < b.hi ? -1 : 1;
+    }
+    if ( a.lo != b.lo )
+    {
+        return a.lo < b.lo ? -1 : 1;
+    }
+    return 0;
+}
+
+int serialize_int128_compare( serialize_int128_t a, serialize_int128_t b )
+{
+    /* flip the sign bit and compare unsigned: the standard trick, and it
+       avoids any signed overflow */
+    serialize_uint128_t ua, ub;
+    ua.lo = a.lo;
+    ua.hi = a.hi ^ ( (serialize_uint64_t) 1 << 63 );
+    ub.lo = b.lo;
+    ub.hi = b.hi ^ ( (serialize_uint64_t) 1 << 63 );
+    return serialize_u128_compare( ua, ub );
+}
+
+static int serialize_u128_bit_length( serialize_uint128_t v )
+{
+    if ( v.hi != 0 )
+    {
+        return 64 + serialize_bit_length64( v.hi );
+    }
+    return serialize_bit_length64( v.lo );
+}
+
+/* the 32-bit group at index i, counting from least significant */
+static serialize_uint32_t serialize_u128_group32( serialize_uint128_t v, int i )
+{
+    switch ( i )
+    {
+        case 0: return (serialize_uint32_t) ( v.lo & 0xFFFFFFFFu );
+        case 1: return (serialize_uint32_t) ( v.lo >> 32 );
+        case 2: return (serialize_uint32_t) ( v.hi & 0xFFFFFFFFu );
+        default: return (serialize_uint32_t) ( v.hi >> 32 );
+    }
+}
+
+static void serialize_u128_set_group32( serialize_uint128_t * v, int i, serialize_uint32_t g )
+{
+    switch ( i )
+    {
+        case 0: v->lo |= (serialize_uint64_t) g; break;
+        case 1: v->lo |= ( (serialize_uint64_t) g ) << 32; break;
+        case 2: v->hi |= (serialize_uint64_t) g; break;
+        default: v->hi |= ( (serialize_uint64_t) g ) << 32; break;
+    }
+}
+
+static serialize_uint128_t serialize_u128_add( serialize_uint128_t a, serialize_uint128_t b )
+{
+    serialize_uint128_t r;
+    r.lo = a.lo + b.lo;
+    r.hi = a.hi + b.hi + ( r.lo < a.lo ? 1u : 0u );
+    return r;
+}
+
+/*
+    Writes `bits` bits of an unsigned 128-bit value as 32-bit groups from least
+    significant upward: bits <= 32 is a single group, otherwise full groups
+    from the bottom with the final group carrying the remainder. This is the
+    same splitting rule serialize_bits uses for wide values, and the one the
+    128-bit and fixed point paths share.
+*/
+static int serialize_write_u128_bits( serialize_write_stream_t * stream, serialize_uint128_t value, int bits )
+{
+    int written = 0;
+    int group = 0;
+
+    while ( written < bits )
+    {
+        int chunk = bits - written;
+        if ( chunk > 32 )
+        {
+            chunk = 32;
+        }
+        if ( !serialize_write_bits( stream, serialize_u128_group32( value, group ), chunk ) )
+        {
+            return 0;
+        }
+        written += chunk;
+        group++;
+    }
+
+    return 1;
+}
+
+static int serialize_read_u128_bits( serialize_read_stream_t * stream, serialize_uint128_t * value, int bits )
+{
+    int read = 0;
+    int group = 0;
+
+    value->lo = 0;
+    value->hi = 0;
+
+    while ( read < bits )
+    {
+        serialize_uint32_t g = 0;
+        int chunk = bits - read;
+        if ( chunk > 32 )
+        {
+            chunk = 32;
+        }
+        if ( !serialize_read_bits( stream, &g, chunk ) )
+        {
+            return 0;
+        }
+        serialize_u128_set_group32( value, group, g );
+        read += chunk;
+        group++;
+    }
+
+    return 1;
+}
+
+int serialize_write_uint128( serialize_write_stream_t * stream, serialize_uint128_t value )
+{
+    if ( !serialize_write_uint64( stream, value.lo ) )
+    {
+        return 0;
+    }
+    return serialize_write_uint64( stream, value.hi );
+}
+
+int serialize_read_uint128( serialize_read_stream_t * stream, serialize_uint128_t * value )
+{
+    if ( !serialize_read_uint64( stream, &value->lo ) )
+    {
+        return 0;
+    }
+    return serialize_read_uint64( stream, &value->hi );
+}
+
+int serialize_write_int128( serialize_write_stream_t * stream, serialize_int128_t value, serialize_int128_t min, serialize_int128_t max )
+{
+    serialize_uint128_t uvalue, umin, umax, span, offset;
+    int bits;
+
+    if ( stream->error )
+    {
+        return 0;
+    }
+
+    if ( serialize_int128_compare( min, max ) > 0 ||
+         serialize_int128_compare( value, min ) < 0 ||
+         serialize_int128_compare( value, max ) > 0 )
+    {
+        stream->error = 1;
+        return 0;
+    }
+
+    /* converted to the unsigned domain first, so a range wider than 2^127 is
+       exact rather than overflowing */
+    uvalue = serialize_uint128_make( value.hi, value.lo );
+    umin = serialize_uint128_make( min.hi, min.lo );
+    umax = serialize_uint128_make( max.hi, max.lo );
+
+    span = serialize_u128_sub( umax, umin );
+    bits = serialize_u128_bit_length( span );
+    if ( bits == 0 )
+    {
+        return 1;
+    }
+
+    offset = serialize_u128_sub( uvalue, umin );
+
+    return serialize_write_u128_bits( stream, offset, bits );
+}
+
+int serialize_read_int128( serialize_read_stream_t * stream, serialize_int128_t * value, serialize_int128_t min, serialize_int128_t max )
+{
+    serialize_uint128_t umin, umax, span, offset, result;
+    int bits;
+
+    if ( stream->error )
+    {
+        return 0;
+    }
+
+    if ( serialize_int128_compare( min, max ) > 0 )
+    {
+        stream->error = 1;
+        return 0;
+    }
+
+    umin = serialize_uint128_make( min.hi, min.lo );
+    umax = serialize_uint128_make( max.hi, max.lo );
+    span = serialize_u128_sub( umax, umin );
+    bits = serialize_u128_bit_length( span );
+
+    if ( bits == 0 )
+    {
+        *value = min;
+        return 1;
+    }
+
+    if ( !serialize_read_u128_bits( stream, &offset, bits ) )
+    {
+        return 0;
+    }
+
+    /* reject, never clamp */
+    if ( serialize_u128_compare( offset, span ) > 0 )
+    {
+        stream->error = 1;
+        return 0;
+    }
+
+    result = serialize_u128_add( umin, offset );
+    value->lo = result.lo;
+    value->hi = result.hi;
+
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+   fixed point
+   --------------------------------------------------------------------------- */
+
+/*
+    The shared core: an offset encoding over the RAW (scaled) bounds. All three
+    widths funnel here, so there is one place the format lives.
+*/
+static int serialize_write_fixed_core( serialize_write_stream_t * stream, serialize_uint128_t raw_value,
+                                       serialize_uint128_t raw_min, serialize_uint128_t raw_max )
+{
+    serialize_uint128_t span = serialize_u128_sub( raw_max, raw_min );
+    int bits = serialize_u128_bit_length( span );
+    serialize_uint128_t offset;
+
+    if ( bits == 0 )
+    {
+        return 1;
+    }
+
+    offset = serialize_u128_sub( raw_value, raw_min );
+
+    if ( serialize_u128_compare( offset, span ) > 0 )
+    {
+        stream->error = 1;
+        return 0;
+    }
+
+    return serialize_write_u128_bits( stream, offset, bits );
+}
+
+static int serialize_read_fixed_core( serialize_read_stream_t * stream, serialize_uint128_t * raw_value,
+                                      serialize_uint128_t raw_min, serialize_uint128_t raw_max )
+{
+    serialize_uint128_t span = serialize_u128_sub( raw_max, raw_min );
+    int bits = serialize_u128_bit_length( span );
+    serialize_uint128_t offset;
+
+    if ( bits == 0 )
+    {
+        *raw_value = raw_min;
+        return 1;
+    }
+
+    if ( !serialize_read_u128_bits( stream, &offset, bits ) )
+    {
+        return 0;
+    }
+
+    if ( serialize_u128_compare( offset, span ) > 0 )
+    {
+        stream->error = 1;
+        return 0;
+    }
+
+    *raw_value = serialize_u128_add( raw_min, offset );
+
+    return 1;
+}
+
+/* min and max are WHOLE units; the raw bound is min << fraction_bits */
+static serialize_uint128_t serialize_raw_bound( serialize_int64_t whole, int fraction_bits )
+{
+    serialize_int128_t wide = serialize_int128_from_int64( whole );
+    serialize_uint128_t u = serialize_uint128_make( wide.hi, wide.lo );
+    int i;
+    for ( i = 0; i < fraction_bits; i++ )
+    {
+        u.hi = ( u.hi << 1 ) | ( u.lo >> 63 );
+        u.lo = u.lo << 1;
+    }
+    return u;
+}
+
+int serialize_write_fixed32( serialize_write_stream_t * stream, serialize_int32_t value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
+{
+    serialize_int128_t wide;
+    (void) integer_bits;
+    if ( stream->error ) return 0;
+    wide = serialize_int128_from_int64( (serialize_int64_t) value );
+    return serialize_write_fixed_core( stream, serialize_uint128_make( wide.hi, wide.lo ),
+                                       serialize_raw_bound( (serialize_int64_t) min, fraction_bits ),
+                                       serialize_raw_bound( (serialize_int64_t) max, fraction_bits ) );
+}
+
+int serialize_read_fixed32( serialize_read_stream_t * stream, serialize_int32_t * value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
+{
+    serialize_uint128_t raw;
+    (void) integer_bits;
+    if ( stream->error ) return 0;
+    if ( !serialize_read_fixed_core( stream, &raw,
+                                     serialize_raw_bound( (serialize_int64_t) min, fraction_bits ),
+                                     serialize_raw_bound( (serialize_int64_t) max, fraction_bits ) ) )
+    {
+        return 0;
+    }
+    *value = (serialize_int32_t) (serialize_uint32_t) ( raw.lo & 0xFFFFFFFFu );
+    return 1;
+}
+
+int serialize_write_fixed64( serialize_write_stream_t * stream, serialize_int64_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+{
+    serialize_int128_t wide;
+    (void) integer_bits;
+    if ( stream->error ) return 0;
+    wide = serialize_int128_from_int64( value );
+    return serialize_write_fixed_core( stream, serialize_uint128_make( wide.hi, wide.lo ),
+                                       serialize_raw_bound( min, fraction_bits ),
+                                       serialize_raw_bound( max, fraction_bits ) );
+}
+
+int serialize_read_fixed64( serialize_read_stream_t * stream, serialize_int64_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+{
+    serialize_uint128_t raw;
+    (void) integer_bits;
+    if ( stream->error ) return 0;
+    if ( !serialize_read_fixed_core( stream, &raw,
+                                     serialize_raw_bound( min, fraction_bits ),
+                                     serialize_raw_bound( max, fraction_bits ) ) )
+    {
+        return 0;
+    }
+    *value = (serialize_int64_t) raw.lo;
+    return 1;
+}
+
+int serialize_write_fixed128( serialize_write_stream_t * stream, serialize_int128_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+{
+    (void) integer_bits;
+    if ( stream->error ) return 0;
+    return serialize_write_fixed_core( stream, serialize_uint128_make( value.hi, value.lo ),
+                                       serialize_raw_bound( min, fraction_bits ),
+                                       serialize_raw_bound( max, fraction_bits ) );
+}
+
+int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+{
+    serialize_uint128_t raw;
+    (void) integer_bits;
+    if ( stream->error ) return 0;
+    if ( !serialize_read_fixed_core( stream, &raw,
+                                     serialize_raw_bound( min, fraction_bits ),
+                                     serialize_raw_bound( max, fraction_bits ) ) )
+    {
+        return 0;
+    }
+    value->lo = raw.lo;
+    value->hi = raw.hi;
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+   wide strings
+   --------------------------------------------------------------------------- */
+
+int serialize_write_wstring( serialize_write_stream_t * stream, const wchar_t * string, int buffer_size )
+{
+    int length = 0;
+    int i;
+
+    if ( stream->error )
+    {
+        return 0;
+    }
+
+    while ( string[length] != 0 )
+    {
+        length++;
+    }
+
+    if ( length >= buffer_size )
+    {
+        stream->error = 1;
+        return 0;
+    }
+
+    if ( !serialize_write_int( stream, length, 0, buffer_size - 1 ) )
+    {
+        return 0;
+    }
+
+    /* NO align here -- deliberately unlike the narrow path. See the header. */
+    for ( i = 0; i < length; i++ )
+    {
+        if ( !serialize_write_bits( stream, (serialize_uint32_t) string[i], 32 ) )
+        {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, int buffer_size )
+{
+    serialize_int32_t length = 0;
+    int i;
+
+    if ( stream->error )
+    {
+        return 0;
+    }
+
+    if ( !serialize_read_int( stream, &length, 0, buffer_size - 1 ) )
+    {
+        return 0;
+    }
+
+    for ( i = 0; i < length; i++ )
+    {
+        serialize_uint32_t c = 0;
+        if ( !serialize_read_bits( stream, &c, 32 ) )
+        {
+            return 0;
+        }
+        /*
+            Characters ride as 32 bits regardless of the local wchar_t width.
+            Where wchar_t cannot hold what arrived, FAIL rather than truncate:
+            a silently mangled code point is worse than a refused packet.
+        */
+        if ( sizeof( wchar_t ) < 4 && c > 0xFFFFu )
+        {
+            stream->error = 1;
+            return 0;
+        }
+        string[i] = (wchar_t) c;
+    }
+
+    string[length] = 0;
+
+    return 1;
+}

@@ -47,6 +47,17 @@
 #define SERIALIZE_H
 
 /* ---------------------------------------------------------------------------
+   version
+
+   Kept in step with the tag by CI, the same contract the C++ library uses.
+   --------------------------------------------------------------------------- */
+
+#define SERIALIZE_VERSION_MAJOR 1
+#define SERIALIZE_VERSION_MINOR 0
+#define SERIALIZE_VERSION_PATCH 0
+#define SERIALIZE_VERSION "1.0.0"
+
+/* ---------------------------------------------------------------------------
    configuration
    --------------------------------------------------------------------------- */
 
@@ -111,6 +122,8 @@ typedef long long serialize_int64_t;
 #define SERIALIZE_INLINE
 #endif
 #endif
+
+#include <stddef.h>   /* wchar_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -286,6 +299,92 @@ int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int6
 int serialize_measure_align( serialize_measure_stream_t * stream );
 int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes );
 int serialize_measure_string( serialize_measure_stream_t * stream, const char * string, int buffer_size );
+
+/* ---------------------------------------------------------------------------
+   128-bit integers
+
+   Emulated as two 64-bit lanes rather than requiring __int128, because C89
+   has no such type and neither does MSVC. The wire is identical either way:
+   STANDARD.md defines these operations in terms of 32-bit groups from least
+   significant upward, which two 64-bit lanes reproduce exactly.
+
+   int128 is the same two lanes read as two's complement.
+   --------------------------------------------------------------------------- */
+
+typedef struct serialize_uint128_t
+{
+    serialize_uint64_t lo;
+    serialize_uint64_t hi;
+} serialize_uint128_t;
+
+typedef struct serialize_int128_t
+{
+    serialize_uint64_t lo;
+    serialize_uint64_t hi;
+} serialize_int128_t;
+
+serialize_uint128_t serialize_uint128_make( serialize_uint64_t hi, serialize_uint64_t lo );
+serialize_int128_t serialize_int128_make( serialize_uint64_t hi, serialize_uint64_t lo );
+
+/* Sign-extends a 64-bit value into the 128-bit domain. */
+serialize_int128_t serialize_int128_from_int64( serialize_int64_t value );
+
+int serialize_uint128_equal( serialize_uint128_t a, serialize_uint128_t b );
+int serialize_int128_equal( serialize_int128_t a, serialize_int128_t b );
+
+/* -1, 0 or 1. The signed form compares in the signed domain. */
+int serialize_int128_compare( serialize_int128_t a, serialize_int128_t b );
+
+/* Always 128 bits: the low half first, then the high half. NOT ranged. */
+int serialize_write_uint128( serialize_write_stream_t * stream, serialize_uint128_t value );
+int serialize_read_uint128( serialize_read_stream_t * stream, serialize_uint128_t * value );
+
+/* Ranged, and the only ranged 128-bit operation. Where the range fits 64 bits
+   the bytes are identical to serialize_write_int64 over the same bounds, so a
+   field may widen from 64 to 128 without moving the wire. */
+int serialize_write_int128( serialize_write_stream_t * stream, serialize_int128_t value, serialize_int128_t min, serialize_int128_t max );
+int serialize_read_int128( serialize_read_stream_t * stream, serialize_int128_t * value, serialize_int128_t min, serialize_int128_t max );
+
+/* ---------------------------------------------------------------------------
+   fixed point (Q format)
+
+   The value is an integer scaled by 2^fraction_bits; min and max are bounds in
+   WHOLE REAL UNITS. The encoding is an offset over the raw (scaled) bounds, so
+   with fraction_bits = 0 the operation IS a ranged integer.
+
+   Exact by construction: unlike compressed_float there is no quantization
+   step, so the same raw value produces the same bytes and reads back
+   bit-for-bit identical on every platform. That is what makes it usable for
+   lockstep simulation and deterministic replay.
+
+   Three widths because C has no overloading; pick the one matching your
+   storage. integer_bits + fraction_bits must equal the storage width.
+   --------------------------------------------------------------------------- */
+
+int serialize_write_fixed32( serialize_write_stream_t * stream, serialize_int32_t value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max );
+int serialize_read_fixed32( serialize_read_stream_t * stream, serialize_int32_t * value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max );
+
+int serialize_write_fixed64( serialize_write_stream_t * stream, serialize_int64_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+int serialize_read_fixed64( serialize_read_stream_t * stream, serialize_int64_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+
+int serialize_write_fixed128( serialize_write_stream_t * stream, serialize_int128_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+
+/* ---------------------------------------------------------------------------
+   wide strings
+
+   buffer_size counts WIDE CHARACTERS, not bytes. Each character rides as a
+   32-bit group regardless of the local wchar_t width, so streams are
+   compatible between 2-byte and 4-byte wchar_t platforms.
+
+   NO ALIGNMENT is performed anywhere in this operation -- the one place the
+   wide path deliberately differs from the narrow one, which aligns via
+   serialize_bytes. An implementation that mirrors the narrow path here
+   produces the wrong bytes.
+   --------------------------------------------------------------------------- */
+
+int serialize_write_wstring( serialize_write_stream_t * stream, const wchar_t * string, int buffer_size );
+int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, int buffer_size );
 
 /* ---------------------------------------------------------------------------
    helpers

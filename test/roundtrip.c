@@ -153,6 +153,68 @@ int main( void )
         CHECK( serialize_write_bits_processed( &w ) == serialize_measure_bits_processed( &m ) );
     }
 
+    /* ---- 128-bit, fixed point and wide strings ---- */
+    {
+        serialize_uint128_t u = serialize_uint128_make( 0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL );
+        serialize_uint128_t u_out;
+        serialize_int128_t i_in = serialize_int128_from_int64( -1234567890123LL );
+        serialize_int128_t i_out;
+        serialize_int128_t lo = serialize_int128_from_int64( -2000000000000LL );
+        serialize_int128_t hi = serialize_int128_from_int64( 2000000000000LL );
+        serialize_int32_t f32 = 0;
+        serialize_int64_t f64 = 0;
+        serialize_int128_t f128;
+        wchar_t ws_in[8], ws_out[8];
+
+        ws_in[0] = 0x043C; ws_in[1] = 0x0438; ws_in[2] = 0x0440; ws_in[3] = 0;
+
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_write_uint128( &w, u );
+        serialize_write_int128( &w, i_in, lo, hi );
+        serialize_write_fixed32( &w, 100 * 65536, 16, 16, -180, 180 );
+        serialize_write_fixed64( &w, -5000LL * 65536, 48, 16, -1000000, 1000000 );
+        serialize_write_fixed128( &w, serialize_int128_from_int64( 777LL * 65536 ), 112, 16, -1000000, 1000000 );
+        serialize_write_wstring( &w, ws_in, 8 );
+        serialize_write_flush( &w );
+        CHECK( !serialize_write_error( &w ) );
+
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( serialize_read_uint128( &r, &u_out ) );
+        CHECK( serialize_uint128_equal( u_out, u ) );
+        CHECK( serialize_read_int128( &r, &i_out, lo, hi ) );
+        CHECK( serialize_int128_equal( i_out, i_in ) );
+        CHECK( serialize_read_fixed32( &r, &f32, 16, 16, -180, 180 ) );
+        CHECK( f32 == 100 * 65536 );
+        CHECK( serialize_read_fixed64( &r, &f64, 48, 16, -1000000, 1000000 ) );
+        CHECK( f64 == -5000LL * 65536 );
+        CHECK( serialize_read_fixed128( &r, &f128, 112, 16, -1000000, 1000000 ) );
+        CHECK( serialize_int128_equal( f128, serialize_int128_from_int64( 777LL * 65536 ) ) );
+        CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
+        CHECK( ws_out[0] == 0x043C && ws_out[1] == 0x0438 && ws_out[2] == 0x0440 && ws_out[3] == 0 );
+        CHECK( !serialize_read_error( &r ) );
+
+        /* fixed point is EXACT -- that is the whole reason it exists, so a
+           round trip that merely lands nearby would defeat the purpose */
+        CHECK( f32 == 100 * 65536 );
+
+        /* fraction_bits = 0 makes it a plain ranged integer */
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_write_fixed32( &w, 12345, 32, 0, 0, 1000000 );
+        serialize_write_flush( &w );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( serialize_read_fixed32( &r, &f32, 32, 0, 0, 1000000 ) );
+        CHECK( f32 == 12345 );
+
+        /* and the read still rejects an out-of-range 128-bit offset */
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_write_bits( &w, 0xFFFFFFFFu, 32 );
+        serialize_write_bits( &w, 0xFFFFFFFFu, 32 );
+        serialize_write_flush( &w );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( !serialize_read_int128( &r, &i_out, lo, hi ) );
+        CHECK( serialize_read_error( &r ) );
+    }
+
     printf( failed ? "FAILED\n" : "OK\n" );
     return failed;
 }

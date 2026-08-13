@@ -100,15 +100,30 @@ library, which loads unconditionally and documents the slack as the caller's
 responsibility. You can hand this reader a buffer of exactly the meaningful
 length.
 
-## What is not here yet
+## The full surface
 
-- `serialize_int128` / `serialize_uint128`, and the `serialize_fixed` Q-format
-  path. The wire for these is specified in [STANDARD.md](STANDARD.md) and the
-  other four ports implement them; this one does not, so a schema using
-  128-bit or fixed point fields cannot target C yet.
-- `serialize_wstring`. Narrow strings are supported.
-- The C++ library's aligned fast path for `serialize_bytes` — this port writes
-  byte at a time through the packer. Same bytes, less speed.
+Everything the wire standard defines is here, so a schema using any feature of
+the language can target C:
+
+- bits, bool, align, and the fixed-width helpers
+- ranged `int`, `int64` and `int128`
+- `uint128`, always 128 bits
+- **fixed point** (`serialize_write_fixed32` / `64` / `128`) — the Q-format
+  path, exact by construction, which is what makes lockstep simulation and
+  deterministic replay possible
+- float, double, compressed float
+- bytes, string, wide string
+- `int_relative`, all six tiers
+- the measure stream
+
+128-bit integers are **emulated as two 64-bit lanes** rather than requiring
+`__int128`, because C89 has no such type and neither does MSVC. The wire is
+identical either way — STANDARD.md defines these in terms of 32-bit groups
+from least significant upward, which two lanes reproduce exactly.
+
+One deliberate omission: the C++ library's aligned fast path for
+`serialize_bytes`. This port writes byte at a time through the packer. Same
+bytes, less speed.
 
 ## Licence
 
