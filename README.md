@@ -217,6 +217,13 @@ read, malformed align padding, reads past the end — plus a capacity check on
 write that the C++ library only asserts, because running off the end of your
 buffer is worse than being slower.
 
+## Contributing
+
+Contributions require a signed
+[Contributor Assignment Agreement](https://github.com/mas-bandwidth/.github/blob/main/CAA.md).
+The check on each pull request explains how to sign: one exact comment, posted
+once, and the signature counts across every Más Bandwidth repository.
+
 ## Licence
 
 BSD 3-Clause, matching the rest of the family. See [LICENSE](LICENSE).
