@@ -249,6 +249,8 @@ int serialize_read_compressed_float( serialize_read_stream_t * stream, float * v
     serialize_uint32_t max_integer_value;
     int bits;
     serialize_uint32_t integer_value = 0;
+    float normalized;
+    float scaled;
 
     if ( stream->error )
     {
@@ -268,7 +270,18 @@ int serialize_read_compressed_float( serialize_read_stream_t * stream, float * v
         return serialize_read_fail( stream );
     }
 
-    *value = ( (float) integer_value / (float) max_integer_value ) * delta + min;
+    /* The reconstruction is float32 like the writer's quantization, and the
+       same contraction hazard applies: written as one expression, a compiler
+       permitted to contract (clang's default is -ffp-contract=on) may fuse
+       the multiply and the add into a single FMA and round once instead of
+       twice, and two hosts then reconstruct different floats from the same
+       bytes. The wire does not change -- the decoded VALUE does, which is a
+       cross-platform divergence of its own. Store the product through a
+       local, exactly as the writer does, and see the Makefile's
+       -ffp-contract=off for the compilers that fuse across statements. */
+    normalized = (float) integer_value / (float) max_integer_value;
+    scaled = normalized * delta;
+    *value = scaled + min;
 
     return 1;
 }
