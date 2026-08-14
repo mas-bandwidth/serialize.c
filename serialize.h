@@ -19,6 +19,28 @@
     drift the schema compiler exists to remove, by generating both halves from
     one declaration.
 
+    WHY THE HOT PATH IS IN THIS HEADER
+
+    The C++ library is header only, so every field a caller serializes inlines
+    into the caller and the bit width — which comes from bounds that are almost
+    always compile-time constants — folds to a literal. A C library compiled as
+    a separate translation unit gets none of that: every field costs a call,
+    and serialize_bits_required( min, max ) becomes a runtime computation of a
+    number the compiler already knew.
+
+    So the operations a packet path performs per FIELD are defined here, as
+    SERIALIZE_INLINE, and the ones performed per MESSAGE or not at all in a
+    tight loop stay in serialize.c. This is a size/speed trade made once, for
+    everybody, with no LTO flag and no define to opt into: measured on Apple
+    silicon, moving them took ranged-int reads from 22.8 to 186 million packets
+    a second, which is the C++ library's number.
+
+    What is here is the whole per-field surface: bits, bool, align, ranged int
+    and int64, the fixed-width helpers, float, double, the stream lifecycle,
+    and the measure operations that mirror them. What is not is everything
+    whose cost is dominated by what it does rather than by the call: strings,
+    bytes, 128-bit, fixed point, compressed float, int_relative.
+
     HISTORICAL AND MODERN C
 
     The floor is C89. That means: comments are, declarations sit at the top of
@@ -41,6 +63,12 @@
     Reads fail on out-of-range values rather than clamping them. This library
     is used on packet paths that face the open internet, and a read is the
     place where untrusted data arrives.
+
+    What is NOT a runtime check is caller error: bounds the wrong way round, a
+    value outside its declared range on WRITE, a bit count outside [1,32].
+    Those are serialize_assert, which compiles to nothing under NDEBUG — the
+    same division the C++ library makes, and for the same reason. A read
+    validates the network; it does not validate you.
 */
 
 #ifndef SERIALIZE_H
@@ -107,23 +135,74 @@ typedef long long serialize_int64_t;
 #endif
 
 /*
-    SERIALIZE_INLINE — C89 has no inline. The library is compiled as a
-    translation unit rather than a header, so this only affects the few
-    helpers that benefit from it.
+    SERIALIZE_UNUSED — marks a definition the translation unit may not use.
+    The hot path is defined in this header, and no consumer calls all of it.
 */
-#ifndef SERIALIZE_INLINE
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
-#define SERIALIZE_INLINE inline
-#elif defined(_MSC_VER)
-#define SERIALIZE_INLINE __inline
-#elif defined(__GNUC__)
-#define SERIALIZE_INLINE __inline__
+#ifndef SERIALIZE_UNUSED
+#if defined(__GNUC__) || defined(__clang__)
+#define SERIALIZE_UNUSED __attribute__((unused))
 #else
-#define SERIALIZE_INLINE
+#define SERIALIZE_UNUSED
 #endif
 #endif
 
+/*
+    SERIALIZE_INLINE — how the hot path is spelled.
+
+    C89 has no inline keyword, so the floor is plain static: a private copy per
+    translation unit, which the compiler inlines anyway at any optimization
+    level and which needs SERIALIZE_UNUSED so an unused one does not warn.
+    Everything above C89 spells it properly. static either way, so a caller
+    that includes only this header links, and nothing here collides with
+    serialize.c.
+*/
+#ifndef SERIALIZE_INLINE
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#define SERIALIZE_INLINE static inline
+#elif defined(__GNUC__)
+#define SERIALIZE_INLINE static __inline__
+#elif defined(_MSC_VER)
+#define SERIALIZE_INLINE static __inline
+#else
+#define SERIALIZE_INLINE static SERIALIZE_UNUSED
+#endif
+#endif
+
+/*
+    SERIALIZE_RESTRICT — the promise that a stream does not overlap the value
+    being read or written. Without it a store through the caller's pointer
+    could, as far as the compiler knows, have changed the stream's own bit
+    position, and every field reloads the whole stream from memory. The C++
+    library makes the same promise on its bit writer, for the same reason.
+*/
+#ifndef SERIALIZE_RESTRICT
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#define SERIALIZE_RESTRICT restrict
+#elif defined(__GNUC__)
+#define SERIALIZE_RESTRICT __restrict__
+#elif defined(_MSC_VER)
+#define SERIALIZE_RESTRICT __restrict
+#else
+#define SERIALIZE_RESTRICT
+#endif
+#endif
+
+/*
+    serialize_assert — caller error, not stream error.
+
+    Spelled and overridable exactly as the C++ library spells it, and for the
+    same purpose: bounds the wrong way round or a value outside its declared
+    range on write are bugs in the calling code, caught in a debug build and
+    costing nothing in a release one. Data arriving from the network is never
+    checked this way. See ERRORS at the top of this file.
+*/
+#ifndef serialize_assert
+#include <assert.h>
+#define serialize_assert assert
+#endif
+
 #include <stddef.h>   /* wchar_t */
+#include <string.h>   /* memcpy — the packer moves whole words through it */
 
 #ifdef __cplusplus
 extern "C" {
@@ -150,6 +229,17 @@ typedef struct serialize_write_stream_t
     serialize_uint64_t scratch;
     int scratch_bits;
     int error;                  /* sticky: once set, every write is a no-op */
+
+    /*
+        num_bits again, and -1 once the stream has failed.
+
+        Every write already tests that it fits, so poisoning the limit is what
+        makes failure sticky WITHOUT a second test per field: one comparison
+        answers both questions. Set it through serialize_write_fail and never
+        by hand — a stream whose error flag is set and whose limit is not would
+        accept the next write.
+    */
+    int bits_limit;
 } serialize_write_stream_t;
 
 /*
@@ -167,6 +257,27 @@ typedef struct serialize_read_stream_t
     int num_bits;
     int bits_read;
     int error;                  /* sticky: once set, every read fails */
+    int bits_limit;             /* num_bits, and -1 once failed. See the write stream. */
+
+    /*
+        The last window of the buffer, assembled once at init.
+
+        The reader loads a 64-bit window at the current byte. Within the first
+        bytes - 8 of the buffer that window is a single load; past
+        that it would run off the end, so the final window is built up front
+        from the bytes that are there and every read in the last 8 bytes uses
+        it, shifted. tail_base is the byte index that window starts at, and is
+        0 for a buffer shorter than 8 bytes — which is then entirely in tail.
+
+        This is what lets the read path stay two straight-line instructions per
+        arm and require nothing of the caller's allocation. The C++ reader
+        instead loads unconditionally and requires 8 bytes of slack past the
+        data; this port asks nothing, and the price is one predictable branch.
+
+        The buffer must not change while the stream is reading it.
+    */
+    serialize_uint64_t tail;    /* host order, ready to shift */
+    int tail_base;
 } serialize_read_stream_t;
 
 /*
@@ -183,48 +294,58 @@ typedef struct serialize_measure_stream_t
    stream lifecycle
    --------------------------------------------------------------------------- */
 
-void serialize_write_stream_init( serialize_write_stream_t * stream, void * buffer, int bytes );
+SERIALIZE_INLINE void serialize_write_stream_init( serialize_write_stream_t * stream, void * buffer, int bytes );
 
 /* Flushes the partial scratch word. Call once, after the final write. */
-void serialize_write_flush( serialize_write_stream_t * stream );
+SERIALIZE_INLINE void serialize_write_flush( serialize_write_stream_t * stream );
 
-int serialize_write_bits_processed( const serialize_write_stream_t * stream );
-int serialize_write_bytes_processed( const serialize_write_stream_t * stream );
-int serialize_write_bits_available( const serialize_write_stream_t * stream );
-int serialize_write_error( const serialize_write_stream_t * stream );
+SERIALIZE_INLINE int serialize_write_bits_processed( const serialize_write_stream_t * stream );
+SERIALIZE_INLINE int serialize_write_bytes_processed( const serialize_write_stream_t * stream );
+SERIALIZE_INLINE int serialize_write_bits_available( const serialize_write_stream_t * stream );
+SERIALIZE_INLINE int serialize_write_error( const serialize_write_stream_t * stream );
 
-void serialize_read_stream_init( serialize_read_stream_t * stream, const void * buffer, int bytes );
+/* Fails a stream, and always returns 0 so a caller can `return` it directly.
 
-int serialize_read_bits_processed( const serialize_read_stream_t * stream );
-int serialize_read_bytes_processed( const serialize_read_stream_t * stream );
-int serialize_read_bits_remaining( const serialize_read_stream_t * stream );
-int serialize_read_error( const serialize_read_stream_t * stream );
+   This is the ONLY supported way to fail a stream. Setting the error flag by
+   hand leaves the bit limit unpoisoned, and the next operation would succeed —
+   see bits_limit in the stream structs. */
+SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream );
+SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream );
 
-void serialize_measure_stream_init( serialize_measure_stream_t * stream );
-int serialize_measure_bits_processed( const serialize_measure_stream_t * stream );
-int serialize_measure_bytes_processed( const serialize_measure_stream_t * stream );
+SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stream, const void * buffer, int bytes );
+
+SERIALIZE_INLINE int serialize_read_bits_processed( const serialize_read_stream_t * stream );
+SERIALIZE_INLINE int serialize_read_bytes_processed( const serialize_read_stream_t * stream );
+SERIALIZE_INLINE int serialize_read_bits_remaining( const serialize_read_stream_t * stream );
+SERIALIZE_INLINE int serialize_read_error( const serialize_read_stream_t * stream );
+
+SERIALIZE_INLINE void serialize_measure_stream_init( serialize_measure_stream_t * stream );
+SERIALIZE_INLINE int serialize_measure_bits_processed( const serialize_measure_stream_t * stream );
+SERIALIZE_INLINE int serialize_measure_bytes_processed( const serialize_measure_stream_t * stream );
 
 /* ---------------------------------------------------------------------------
    bit-level primitives
    --------------------------------------------------------------------------- */
 
-/* bits must be in [1,32] and value must be less than 2^bits. */
-int serialize_write_bits( serialize_write_stream_t * stream, serialize_uint32_t value, int bits );
-int serialize_read_bits( serialize_read_stream_t * stream, serialize_uint32_t * value, int bits );
+/* bits must be in [1,32] and value must be less than 2^bits. Both are caller
+   error, so both are asserted rather than checked; a value wider than its
+   declared bits is masked, so it damages its own field and no other. */
+SERIALIZE_INLINE int serialize_write_bits( serialize_write_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t value, int bits );
+SERIALIZE_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits );
 
-int serialize_write_bool( serialize_write_stream_t * stream, int value );
-int serialize_read_bool( serialize_read_stream_t * stream, int * value );
+SERIALIZE_INLINE int serialize_write_bool( serialize_write_stream_t * stream, int value );
+SERIALIZE_INLINE int serialize_read_bool( serialize_read_stream_t * SERIALIZE_RESTRICT stream, int * SERIALIZE_RESTRICT value );
 
 /*
     Pads with zero bits to the next byte boundary, writing nothing if already
     aligned. The reader verifies the padding is zero and FAILS if it is not —
     malformed streams are detectable rather than silently accepted.
 */
-int serialize_write_align( serialize_write_stream_t * stream );
-int serialize_read_align( serialize_read_stream_t * stream );
+SERIALIZE_INLINE int serialize_write_align( serialize_write_stream_t * stream );
+SERIALIZE_INLINE int serialize_read_align( serialize_read_stream_t * stream );
 
-int serialize_write_align_bits( const serialize_write_stream_t * stream );
-int serialize_read_align_bits( const serialize_read_stream_t * stream );
+SERIALIZE_INLINE int serialize_write_align_bits( const serialize_write_stream_t * stream );
+SERIALIZE_INLINE int serialize_read_align_bits( const serialize_read_stream_t * stream );
 
 /* ---------------------------------------------------------------------------
    integers
@@ -235,26 +356,30 @@ int serialize_read_align_bits( const serialize_read_stream_t * stream );
     [0,7] costs 3 bits and a degenerate min == max costs nothing at all.
     Both sides must pass identical bounds — the wire carries no description
     of itself.
-*/
-int serialize_write_int( serialize_write_stream_t * stream, serialize_int32_t value, serialize_int32_t min, serialize_int32_t max );
-int serialize_read_int( serialize_read_stream_t * stream, serialize_int32_t * value, serialize_int32_t min, serialize_int32_t max );
 
-int serialize_write_int64( serialize_write_stream_t * stream, serialize_int64_t value, serialize_int64_t min, serialize_int64_t max );
-int serialize_read_int64( serialize_read_stream_t * stream, serialize_int64_t * value, serialize_int64_t min, serialize_int64_t max );
+    min <= max is asserted, not checked: bounds are the caller's, not the
+    network's. On READ the decoded value is range checked for real, always,
+    because that is where untrusted data arrives.
+*/
+SERIALIZE_INLINE int serialize_write_int( serialize_write_stream_t * stream, serialize_int32_t value, serialize_int32_t min, serialize_int32_t max );
+SERIALIZE_INLINE int serialize_read_int( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int32_t * SERIALIZE_RESTRICT value, serialize_int32_t min, serialize_int32_t max );
+
+SERIALIZE_INLINE int serialize_write_int64( serialize_write_stream_t * stream, serialize_int64_t value, serialize_int64_t min, serialize_int64_t max );
+SERIALIZE_INLINE int serialize_read_int64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int64_t * SERIALIZE_RESTRICT value, serialize_int64_t min, serialize_int64_t max );
 
 /*
     Fixed-width helpers. These are NOT ranged — serialize_write_uint64 always
     costs 64 bits, where serialize_write_int64 costs only what its bounds
     require. The names are similar and the encodings are not.
 */
-int serialize_write_uint8( serialize_write_stream_t * stream, serialize_uint8_t value );
-int serialize_read_uint8( serialize_read_stream_t * stream, serialize_uint8_t * value );
-int serialize_write_uint16( serialize_write_stream_t * stream, serialize_uint16_t value );
-int serialize_read_uint16( serialize_read_stream_t * stream, serialize_uint16_t * value );
-int serialize_write_uint32( serialize_write_stream_t * stream, serialize_uint32_t value );
-int serialize_read_uint32( serialize_read_stream_t * stream, serialize_uint32_t * value );
-int serialize_write_uint64( serialize_write_stream_t * stream, serialize_uint64_t value );
-int serialize_read_uint64( serialize_read_stream_t * stream, serialize_uint64_t * value );
+SERIALIZE_INLINE int serialize_write_uint8( serialize_write_stream_t * stream, serialize_uint8_t value );
+SERIALIZE_INLINE int serialize_read_uint8( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT value );
+SERIALIZE_INLINE int serialize_write_uint16( serialize_write_stream_t * stream, serialize_uint16_t value );
+SERIALIZE_INLINE int serialize_read_uint16( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint16_t * SERIALIZE_RESTRICT value );
+SERIALIZE_INLINE int serialize_write_uint32( serialize_write_stream_t * stream, serialize_uint32_t value );
+SERIALIZE_INLINE int serialize_read_uint32( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value );
+SERIALIZE_INLINE int serialize_write_uint64( serialize_write_stream_t * stream, serialize_uint64_t value );
+SERIALIZE_INLINE int serialize_read_uint64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint64_t * SERIALIZE_RESTRICT value );
 
 /* An increasing sequence, encoded as a ladder of tier flags. A difference of
    1 — the common case for sequence numbers — costs a single bit. */
@@ -265,11 +390,11 @@ int serialize_read_int_relative( serialize_read_stream_t * stream, serialize_int
    floating point
    --------------------------------------------------------------------------- */
 
-int serialize_write_float( serialize_write_stream_t * stream, float value );
-int serialize_read_float( serialize_read_stream_t * stream, float * value );
+SERIALIZE_INLINE int serialize_write_float( serialize_write_stream_t * stream, float value );
+SERIALIZE_INLINE int serialize_read_float( serialize_read_stream_t * SERIALIZE_RESTRICT stream, float * SERIALIZE_RESTRICT value );
 
-int serialize_write_double( serialize_write_stream_t * stream, double value );
-int serialize_read_double( serialize_read_stream_t * stream, double * value );
+SERIALIZE_INLINE int serialize_write_double( serialize_write_stream_t * stream, double value );
+SERIALIZE_INLINE int serialize_read_double( serialize_read_stream_t * SERIALIZE_RESTRICT stream, double * SERIALIZE_RESTRICT value );
 
 /* Lossy by construction: a round trip returns the nearest quantum. */
 int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res );
@@ -398,25 +523,25 @@ int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, 
    write is where that fails.
    --------------------------------------------------------------------------- */
 
-int serialize_measure_bits( serialize_measure_stream_t * stream, int bits );
-int serialize_measure_bool( serialize_measure_stream_t * stream );
-int serialize_measure_align( serialize_measure_stream_t * stream );
+SERIALIZE_INLINE int serialize_measure_bits( serialize_measure_stream_t * stream, int bits );
+SERIALIZE_INLINE int serialize_measure_bool( serialize_measure_stream_t * stream );
+SERIALIZE_INLINE int serialize_measure_align( serialize_measure_stream_t * stream );
 
-int serialize_measure_int( serialize_measure_stream_t * stream, serialize_int32_t min, serialize_int32_t max );
-int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int64_t min, serialize_int64_t max );
+SERIALIZE_INLINE int serialize_measure_int( serialize_measure_stream_t * stream, serialize_int32_t min, serialize_int32_t max );
+SERIALIZE_INLINE int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int64_t min, serialize_int64_t max );
 
-int serialize_measure_uint8( serialize_measure_stream_t * stream );
-int serialize_measure_uint16( serialize_measure_stream_t * stream );
-int serialize_measure_uint32( serialize_measure_stream_t * stream );
-int serialize_measure_uint64( serialize_measure_stream_t * stream );
+SERIALIZE_INLINE int serialize_measure_uint8( serialize_measure_stream_t * stream );
+SERIALIZE_INLINE int serialize_measure_uint16( serialize_measure_stream_t * stream );
+SERIALIZE_INLINE int serialize_measure_uint32( serialize_measure_stream_t * stream );
+SERIALIZE_INLINE int serialize_measure_uint64( serialize_measure_stream_t * stream );
 
 int serialize_measure_int_relative( serialize_measure_stream_t * stream, serialize_int32_t previous, serialize_int32_t current );
 
-int serialize_measure_float( serialize_measure_stream_t * stream );
-int serialize_measure_double( serialize_measure_stream_t * stream );
+SERIALIZE_INLINE int serialize_measure_float( serialize_measure_stream_t * stream );
+SERIALIZE_INLINE int serialize_measure_double( serialize_measure_stream_t * stream );
 int serialize_measure_compressed_float( serialize_measure_stream_t * stream, float min, float max, float res );
 
-int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes );
+SERIALIZE_INLINE int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes );
 int serialize_measure_string( serialize_measure_stream_t * stream, const char * string, int buffer_size );
 int serialize_measure_wstring( serialize_measure_stream_t * stream, const wchar_t * string, int buffer_size );
 
@@ -431,12 +556,816 @@ int serialize_measure_fixed128( serialize_measure_stream_t * stream, int integer
    helpers
    --------------------------------------------------------------------------- */
 
-/* Bits needed for a value in [min,max]; 0 when min == max. */
-int serialize_bits_required( serialize_int32_t min, serialize_int32_t max );
-int serialize_bits_required64( serialize_int64_t min, serialize_int64_t max );
+/* Bits needed for a value in [min,max]; 0 when min == max.
+
+   Inline because it is the width of every ranged field, and bounds are almost
+   always constants: called from this header it folds to a literal at the call
+   site, which is what the C++ macro gets for free and what an out-of-line C
+   call was paying for per field. */
+SERIALIZE_INLINE int serialize_bits_required( serialize_int32_t min, serialize_int32_t max );
+SERIALIZE_INLINE int serialize_bits_required64( serialize_int64_t min, serialize_int64_t max );
 
 /* Bounded copy that always null-terminates. */
 void serialize_copy_string( char * dest, const char * source, unsigned long dest_size );
+
+/* ===========================================================================
+   the hot path
+
+   Everything below is the implementation of the operations declared above as
+   SERIALIZE_INLINE: the ones a packet path performs per field, which have to
+   inline into the caller for the bit width to fold to a literal. See WHY THE
+   HOT PATH IS IN THIS HEADER at the top of this file.
+
+   Nothing below is also defined in serialize.c. A caller including only this
+   header gets the whole per-field surface and links.
+   =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+   endianness
+
+   The wire is little-endian. On a little-endian host the scratch word is
+   copied out as-is; on a big-endian host it is byte-swapped, so the bytes
+   match everywhere.
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE int serialize_host_is_big_endian( void )
+{
+    /* Computed rather than #ifdef'd: the preprocessor spellings for this vary
+       by compiler and platform, and every one of them is a chance to be wrong
+       on a platform nobody tested. A compiler folds this to a constant. */
+    union { serialize_uint32_t i; unsigned char c[4]; } probe;
+    probe.i = 0x01020304u;
+    return probe.c[0] == 0x01;
+}
+
+SERIALIZE_INLINE serialize_uint64_t serialize_bswap64( serialize_uint64_t value )
+{
+#if defined(__GNUC__)
+    /* not spelled with an (unsigned long long) cast: naming the type warns
+       under -std=c89 -pedantic, and the builtin takes the value as it is */
+    return __builtin_bswap64( value );
+#else
+    /* Built by shifting rather than from 0x...ULL masks: a C89 compiler has no
+       64-bit literal suffix it is happy about, and this needs none. */
+    serialize_uint64_t result = 0;
+    int i;
+    for ( i = 0; i < 8; i++ )
+    {
+        result = ( result << 8 ) | ( ( value >> ( i * 8 ) ) & 0xFF );
+    }
+    return result;
+#endif
+}
+
+SERIALIZE_INLINE serialize_uint64_t serialize_host_to_wire64( serialize_uint64_t value )
+{
+    return serialize_host_is_big_endian() ? serialize_bswap64( value ) : value;
+}
+
+SERIALIZE_INLINE serialize_uint64_t serialize_wire_to_host64( serialize_uint64_t value )
+{
+    return serialize_host_is_big_endian() ? serialize_bswap64( value ) : value;
+}
+
+/* ---------------------------------------------------------------------------
+   bits required
+   --------------------------------------------------------------------------- */
+
+/*
+    Bit length, and 0 for 0.
+
+    The count leading zeros builtin is UNDEFINED at zero — on arm64 it happens
+    to give the right answer and on x86 it does not — and zero reaches here:
+    serialize_u128_bit_length asks for the length of a span, and a degenerate
+    128-bit range has a span of zero. So the zero is tested rather than
+    assumed. Where the bounds are constants, as they nearly always are, the
+    whole thing folds to a literal and none of this survives.
+*/
+
+SERIALIZE_INLINE int serialize_bit_length32( serialize_uint32_t value )
+{
+#if defined(__GNUC__)
+    return value ? 32 - __builtin_clz( (unsigned int) value ) : 0;
+#else
+    int bits = 0;
+    while ( value )
+    {
+        bits++;
+        value >>= 1;
+    }
+    return bits;
+#endif
+}
+
+SERIALIZE_INLINE int serialize_bit_length64( serialize_uint64_t value )
+{
+#if defined(__GNUC__)
+    return value ? 64 - __builtin_clzll( value ) : 0;
+#else
+    int bits = 0;
+    while ( value )
+    {
+        bits++;
+        value >>= 1;
+    }
+    return bits;
+#endif
+}
+
+SERIALIZE_INLINE int serialize_bits_required( serialize_int32_t min, serialize_int32_t max )
+{
+    if ( min == max )
+    {
+        return 0;
+    }
+    /* the span is computed in the unsigned domain so a range spanning the
+       whole int32 space does not overflow */
+    return serialize_bit_length32( (serialize_uint32_t) max - (serialize_uint32_t) min );
+}
+
+SERIALIZE_INLINE int serialize_bits_required64( serialize_int64_t min, serialize_int64_t max )
+{
+    if ( min == max )
+    {
+        return 0;
+    }
+    return serialize_bit_length64( (serialize_uint64_t) max - (serialize_uint64_t) min );
+}
+
+/* ---------------------------------------------------------------------------
+   write stream
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE void serialize_write_stream_init( serialize_write_stream_t * stream, void * buffer, int bytes )
+{
+    stream->data = (serialize_uint8_t *) buffer;
+    stream->num_bits = bytes * 8;
+    stream->bits_written = 0;
+    stream->word_index = 0;
+    stream->scratch = 0;
+    stream->scratch_bits = 0;
+    stream->error = 0;
+    stream->bits_limit = bytes * 8;
+}
+
+SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream )
+{
+    stream->error = 1;
+    stream->bits_limit = -1;    /* the bounds test every write already makes now fails for good */
+    return 0;
+}
+
+SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream )
+{
+    stream->error = 1;
+    stream->bits_limit = -1;
+    return 0;
+}
+
+SERIALIZE_INLINE int serialize_write_bits( serialize_write_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t value, int bits )
+{
+    int new_scratch_bits;
+
+    /* caller error, asserted exactly where the C++ BitWriter asserts it */
+    serialize_assert( bits > 0 );
+    serialize_assert( bits <= 32 );
+
+    /*
+        Two things in one comparison.
+
+        Kept as a real check where the C++ BitWriter only asserts: the C++
+        writer is a trusted caller that sized its buffer with a measure stream,
+        and this one refuses to run off the end of yours in a release build.
+        That is a promise about memory rather than about the wire.
+
+        And because a failed stream has a limit of -1, this is also the sticky
+        flag — without which a write that failed for want of room would be
+        followed by a NARROWER one that fits, and the buffer would end up
+        plausible and wrong. The C++ library needs neither test: it has no
+        sticky state, and returns false up through the serialize function
+        instead.
+    */
+    if ( stream->bits_written + bits > stream->bits_limit )
+    {
+        return serialize_write_fail( stream );
+    }
+
+    /* mask rather than trust: the assert above catches a value wider than its
+       declared bits in a debug build, and the mask keeps a release build
+       deterministic — the damage stays inside the field it belongs to */
+    serialize_assert( bits == 32 || value <= (serialize_uint32_t) ( ( 1UL << bits ) - 1 ) );
+    if ( bits < 32 )
+    {
+        value &= (serialize_uint32_t) ( ( 1UL << bits ) - 1 );
+    }
+
+    stream->scratch |= ( (serialize_uint64_t) value ) << stream->scratch_bits;
+
+    new_scratch_bits = stream->scratch_bits + bits;
+
+    if ( new_scratch_bits >= 64 )
+    {
+        serialize_uint64_t word = serialize_host_to_wire64( stream->scratch );
+        memcpy( stream->data + (size_t) stream->word_index * 8, &word, sizeof( word ) );
+        stream->word_index++;
+        /* recover the bits that spilled past 64. new_scratch_bits >= 64 with
+           bits <= 32 means the shift is in [1,32], never the undefined 64 */
+        stream->scratch = ( (serialize_uint64_t) value ) >> ( 64 - stream->scratch_bits );
+        stream->scratch_bits = new_scratch_bits - 64;
+    }
+    else
+    {
+        stream->scratch_bits = new_scratch_bits;
+    }
+
+    stream->bits_written += bits;
+
+    return 1;
+}
+
+SERIALIZE_INLINE void serialize_write_flush( serialize_write_stream_t * stream )
+{
+    if ( stream->error )
+    {
+        return;
+    }
+
+    if ( stream->scratch_bits != 0 )
+    {
+        serialize_uint64_t word = serialize_host_to_wire64( stream->scratch );
+        memcpy( stream->data + (size_t) stream->word_index * 8, &word, sizeof( word ) );
+        stream->scratch = 0;
+        stream->scratch_bits = 0;
+        stream->word_index++;
+    }
+}
+
+SERIALIZE_INLINE int serialize_write_bits_processed( const serialize_write_stream_t * stream )
+{
+    return stream->bits_written;
+}
+
+SERIALIZE_INLINE int serialize_write_bytes_processed( const serialize_write_stream_t * stream )
+{
+    return ( stream->bits_written + 7 ) / 8;
+}
+
+SERIALIZE_INLINE int serialize_write_bits_available( const serialize_write_stream_t * stream )
+{
+    return stream->num_bits - stream->bits_written;
+}
+
+SERIALIZE_INLINE int serialize_write_error( const serialize_write_stream_t * stream )
+{
+    return stream->error;
+}
+
+/* ---------------------------------------------------------------------------
+   read stream
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stream, const void * buffer, int bytes )
+{
+    const serialize_uint8_t * data = (const serialize_uint8_t *) buffer;
+
+    stream->data = data;
+    stream->num_bits = bytes * 8;
+    stream->bits_read = 0;
+    stream->error = 0;
+    stream->bits_limit = bytes * 8;
+
+    /* the final window, built once. See the struct. */
+    if ( bytes >= 8 )
+    {
+        serialize_uint64_t word;
+        stream->tail_base = bytes - 8;
+        memcpy( &word, data + bytes - 8, sizeof( word ) );
+        stream->tail = serialize_wire_to_host64( word );
+    }
+    else
+    {
+        /* Spelled out rather than looped: a loop here is a loop the caller's
+           per-message code has to carry, and there are at most seven bytes.
+           Shifting from the low byte up IS the wire order, so this needs no
+           byte swap on either host. */
+        serialize_uint64_t word = 0;
+        stream->tail_base = 0;
+        if ( bytes > 0 ) word |= ( (serialize_uint64_t) data[0] );
+        if ( bytes > 1 ) word |= ( (serialize_uint64_t) data[1] ) << 8;
+        if ( bytes > 2 ) word |= ( (serialize_uint64_t) data[2] ) << 16;
+        if ( bytes > 3 ) word |= ( (serialize_uint64_t) data[3] ) << 24;
+        if ( bytes > 4 ) word |= ( (serialize_uint64_t) data[4] ) << 32;
+        if ( bytes > 5 ) word |= ( (serialize_uint64_t) data[5] ) << 40;
+        if ( bytes > 6 ) word |= ( (serialize_uint64_t) data[6] ) << 48;
+        stream->tail = word;
+    }
+}
+
+SERIALIZE_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits )
+{
+    serialize_uint64_t window;
+    int byte_index;
+    int shift;
+
+    /* caller error, asserted exactly where the C++ BitReader asserts it */
+    serialize_assert( bits > 0 );
+    serialize_assert( bits <= 32 );
+
+    /* the network's error, not the caller's: this is C++'s WouldReadPastEnd,
+       which is a real check there too — and, via the poisoned limit, the
+       sticky flag as well. See serialize_write_bits. */
+    if ( stream->bits_read + bits > stream->bits_limit )
+    {
+        return serialize_read_fail( stream );
+    }
+
+    /*
+        The window. Inside the buffer it is one load; in the last 8 bytes it is
+        the word init already assembled, shifted to where this read starts. Two
+        instructions either way, and neither runs off the end of the buffer —
+        which is what this port promises and the C++ reader does not. See the
+        read stream struct.
+    */
+    byte_index = stream->bits_read >> 3;
+
+    if ( byte_index < stream->tail_base )
+    {
+        memcpy( &window, stream->data + byte_index, sizeof( window ) );
+        window = serialize_wire_to_host64( window );
+        shift = stream->bits_read & 7;
+    }
+    else
+    {
+        window = stream->tail;
+        shift = stream->bits_read - stream->tail_base * 8;
+    }
+
+    *value = (serialize_uint32_t) ( window >> shift );
+    if ( bits < 32 )
+    {
+        *value &= (serialize_uint32_t) ( ( 1UL << bits ) - 1 );
+    }
+
+    stream->bits_read += bits;
+
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_read_bits_processed( const serialize_read_stream_t * stream )
+{
+    return stream->bits_read;
+}
+
+SERIALIZE_INLINE int serialize_read_bytes_processed( const serialize_read_stream_t * stream )
+{
+    return ( stream->bits_read + 7 ) / 8;
+}
+
+SERIALIZE_INLINE int serialize_read_bits_remaining( const serialize_read_stream_t * stream )
+{
+    return stream->num_bits - stream->bits_read;
+}
+
+SERIALIZE_INLINE int serialize_read_error( const serialize_read_stream_t * stream )
+{
+    return stream->error;
+}
+
+/* ---------------------------------------------------------------------------
+   measure stream lifecycle
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE void serialize_measure_stream_init( serialize_measure_stream_t * stream )
+{
+    stream->bits_written = 0;
+}
+
+SERIALIZE_INLINE int serialize_measure_bits_processed( const serialize_measure_stream_t * stream )
+{
+    return stream->bits_written;
+}
+
+SERIALIZE_INLINE int serialize_measure_bytes_processed( const serialize_measure_stream_t * stream )
+{
+    return ( stream->bits_written + 7 ) / 8;
+}
+
+/* ---------------------------------------------------------------------------
+   bool
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE int serialize_write_bool( serialize_write_stream_t * stream, int value )
+{
+    return serialize_write_bits( stream, value ? 1u : 0u, 1 );
+}
+
+SERIALIZE_INLINE int serialize_read_bool( serialize_read_stream_t * SERIALIZE_RESTRICT stream, int * SERIALIZE_RESTRICT value )
+{
+    serialize_uint32_t raw = 0;
+    if ( !serialize_read_bits( stream, &raw, 1 ) )
+    {
+        return 0;
+    }
+    *value = (int) raw;
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+   align
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE int serialize_write_align_bits( const serialize_write_stream_t * stream )
+{
+    return ( 8 - ( stream->bits_written % 8 ) ) % 8;
+}
+
+SERIALIZE_INLINE int serialize_read_align_bits( const serialize_read_stream_t * stream )
+{
+    return ( 8 - ( stream->bits_read % 8 ) ) % 8;
+}
+
+SERIALIZE_INLINE int serialize_write_align( serialize_write_stream_t * stream )
+{
+    int remainder = stream->bits_written % 8;
+    if ( remainder != 0 )
+    {
+        return serialize_write_bits( stream, 0, 8 - remainder );
+    }
+    /* an align on an already aligned stream writes nothing, so it never
+       reaches the bounds test that carries the sticky flag. Failure has to
+       survive an operation that does nothing. */
+    return !stream->error;
+}
+
+SERIALIZE_INLINE int serialize_read_align( serialize_read_stream_t * stream )
+{
+    int remainder = stream->bits_read % 8;
+    if ( remainder != 0 )
+    {
+        serialize_uint32_t padding = 0;
+        if ( !serialize_read_bits( stream, &padding, 8 - remainder ) )
+        {
+            return 0;
+        }
+        /* the padding must be zero. A stream where it is not was not produced
+           by a conforming writer, and accepting it silently would hide the
+           desynchronization until some later field decoded as nonsense. */
+        if ( padding != 0 )
+        {
+            return serialize_read_fail( stream );
+        }
+        return 1;
+    }
+    /* nothing to read, so nothing tested the limit. See serialize_write_align. */
+    return !stream->error;
+}
+
+/* ---------------------------------------------------------------------------
+   ranged integers
+
+   min > max, and a value outside [min,max] on WRITE, are caller error and are
+   asserted rather than checked — the same split the C++ serialize_int macro
+   and SerializeInteger make. What survives into a release build is the READ
+   side range check, because that one is about the network.
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE int serialize_write_int( serialize_write_stream_t * stream, serialize_int32_t value, serialize_int32_t min, serialize_int32_t max )
+{
+    int bits;
+    serialize_uint32_t offset;
+
+    serialize_assert( min <= max );
+    serialize_assert( value >= min );
+    serialize_assert( value <= max );
+
+    bits = serialize_bits_required( min, max );
+    if ( bits == 0 )
+    {
+        /* degenerate range: the value is the range, and nothing is written.
+           The sticky flag is still honoured, so a caller checking every field
+           sees the failure here too. */
+        return !stream->error;
+    }
+
+    offset = (serialize_uint32_t) value - (serialize_uint32_t) min;
+
+    return serialize_write_bits( stream, offset, bits );
+}
+
+SERIALIZE_INLINE int serialize_read_int( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int32_t * SERIALIZE_RESTRICT value, serialize_int32_t min, serialize_int32_t max )
+{
+    int bits;
+    serialize_uint32_t offset = 0;
+
+    serialize_assert( min <= max );
+
+    bits = serialize_bits_required( min, max );
+    if ( bits == 0 )
+    {
+        if ( stream->error )
+        {
+            return 0;
+        }
+        *value = min;
+        return 1;
+    }
+
+    if ( !serialize_read_bits( stream, &offset, bits ) )
+    {
+        return 0;
+    }
+
+    /* reject, never clamp — this is where untrusted data arrives. Compared in
+       the unsigned domain against the span, as the C++ SerializeInteger does:
+       min + offset can overflow signed arithmetic on a wide range. */
+    if ( offset > (serialize_uint32_t) max - (serialize_uint32_t) min )
+    {
+        return serialize_read_fail( stream );
+    }
+
+    *value = (serialize_int32_t) ( (serialize_uint32_t) min + offset );
+
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_write_int64( serialize_write_stream_t * stream, serialize_int64_t value, serialize_int64_t min, serialize_int64_t max )
+{
+    int bits;
+    serialize_uint64_t offset;
+
+    serialize_assert( min <= max );
+    serialize_assert( value >= min );
+    serialize_assert( value <= max );
+
+    bits = serialize_bits_required64( min, max );
+    if ( bits == 0 )
+    {
+        return !stream->error;
+    }
+
+    offset = (serialize_uint64_t) value - (serialize_uint64_t) min;
+
+    if ( bits <= 32 )
+    {
+        return serialize_write_bits( stream, (serialize_uint32_t) offset, bits );
+    }
+
+    /* low 32 first, then the remainder — the same split serialize_bits uses */
+    if ( !serialize_write_bits( stream, (serialize_uint32_t) ( offset & 0xFFFFFFFFu ), 32 ) )
+    {
+        return 0;
+    }
+    return serialize_write_bits( stream, (serialize_uint32_t) ( offset >> 32 ), bits - 32 );
+}
+
+SERIALIZE_INLINE int serialize_read_int64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int64_t * SERIALIZE_RESTRICT value, serialize_int64_t min, serialize_int64_t max )
+{
+    int bits;
+    serialize_uint64_t offset;
+    serialize_uint32_t lo = 0;
+    serialize_uint32_t hi = 0;
+
+    serialize_assert( min <= max );
+
+    bits = serialize_bits_required64( min, max );
+    if ( bits == 0 )
+    {
+        if ( stream->error )
+        {
+            return 0;
+        }
+        *value = min;
+        return 1;
+    }
+
+    if ( bits <= 32 )
+    {
+        if ( !serialize_read_bits( stream, &lo, bits ) )
+        {
+            return 0;
+        }
+        offset = (serialize_uint64_t) lo;
+    }
+    else
+    {
+        if ( !serialize_read_bits( stream, &lo, 32 ) )
+        {
+            return 0;
+        }
+        if ( !serialize_read_bits( stream, &hi, bits - 32 ) )
+        {
+            return 0;
+        }
+        offset = (serialize_uint64_t) lo | ( ( (serialize_uint64_t) hi ) << 32 );
+    }
+
+    /* compare in the unsigned domain: max - min can exceed int64 range */
+    if ( offset > (serialize_uint64_t) max - (serialize_uint64_t) min )
+    {
+        return serialize_read_fail( stream );
+    }
+
+    *value = (serialize_int64_t) ( (serialize_uint64_t) min + offset );
+
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+   fixed-width integers — NOT ranged
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE int serialize_write_uint8( serialize_write_stream_t * stream, serialize_uint8_t value )
+{
+    return serialize_write_bits( stream, (serialize_uint32_t) value, 8 );
+}
+
+SERIALIZE_INLINE int serialize_read_uint8( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT value )
+{
+    serialize_uint32_t raw = 0;
+    if ( !serialize_read_bits( stream, &raw, 8 ) )
+    {
+        return 0;
+    }
+    *value = (serialize_uint8_t) raw;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_write_uint16( serialize_write_stream_t * stream, serialize_uint16_t value )
+{
+    return serialize_write_bits( stream, (serialize_uint32_t) value, 16 );
+}
+
+SERIALIZE_INLINE int serialize_read_uint16( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint16_t * SERIALIZE_RESTRICT value )
+{
+    serialize_uint32_t raw = 0;
+    if ( !serialize_read_bits( stream, &raw, 16 ) )
+    {
+        return 0;
+    }
+    *value = (serialize_uint16_t) raw;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_write_uint32( serialize_write_stream_t * stream, serialize_uint32_t value )
+{
+    return serialize_write_bits( stream, value, 32 );
+}
+
+SERIALIZE_INLINE int serialize_read_uint32( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value )
+{
+    return serialize_read_bits( stream, value, 32 );
+}
+
+SERIALIZE_INLINE int serialize_write_uint64( serialize_write_stream_t * stream, serialize_uint64_t value )
+{
+    if ( !serialize_write_bits( stream, (serialize_uint32_t) ( value & 0xFFFFFFFFu ), 32 ) )
+    {
+        return 0;
+    }
+    return serialize_write_bits( stream, (serialize_uint32_t) ( value >> 32 ), 32 );
+}
+
+SERIALIZE_INLINE int serialize_read_uint64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint64_t * SERIALIZE_RESTRICT value )
+{
+    serialize_uint32_t lo = 0;
+    serialize_uint32_t hi = 0;
+    if ( !serialize_read_bits( stream, &lo, 32 ) )
+    {
+        return 0;
+    }
+    if ( !serialize_read_bits( stream, &hi, 32 ) )
+    {
+        return 0;
+    }
+    *value = (serialize_uint64_t) lo | ( ( (serialize_uint64_t) hi ) << 32 );
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+   floating point
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE int serialize_write_float( serialize_write_stream_t * stream, float value )
+{
+    serialize_uint32_t bits;
+    /* through memcpy rather than a union or a cast: the only spelling that is
+       not a strict-aliasing violation in every C standard */
+    memcpy( &bits, &value, 4 );
+    return serialize_write_bits( stream, bits, 32 );
+}
+
+SERIALIZE_INLINE int serialize_read_float( serialize_read_stream_t * SERIALIZE_RESTRICT stream, float * SERIALIZE_RESTRICT value )
+{
+    serialize_uint32_t bits = 0;
+    if ( !serialize_read_bits( stream, &bits, 32 ) )
+    {
+        return 0;
+    }
+    memcpy( value, &bits, 4 );
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_write_double( serialize_write_stream_t * stream, double value )
+{
+    serialize_uint64_t bits;
+    memcpy( &bits, &value, 8 );
+    return serialize_write_uint64( stream, bits );
+}
+
+SERIALIZE_INLINE int serialize_read_double( serialize_read_stream_t * SERIALIZE_RESTRICT stream, double * SERIALIZE_RESTRICT value )
+{
+    serialize_uint64_t bits = 0;
+    if ( !serialize_read_uint64( stream, &bits ) )
+    {
+        return 0;
+    }
+    memcpy( value, &bits, 8 );
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+   measure operations
+
+   The mirror of the write operations above, and inline for the same reason:
+   a measure is a handful of additions, and every one of them was a call.
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE int serialize_measure_bits( serialize_measure_stream_t * stream, int bits )
+{
+    stream->bits_written += bits;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_bool( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 1;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_align( serialize_measure_stream_t * stream )
+{
+    int remainder = stream->bits_written % 8;
+    if ( remainder != 0 )
+    {
+        stream->bits_written += 8 - remainder;
+    }
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_int( serialize_measure_stream_t * stream, serialize_int32_t min, serialize_int32_t max )
+{
+    stream->bits_written += serialize_bits_required( min, max );
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int64_t min, serialize_int64_t max )
+{
+    stream->bits_written += serialize_bits_required64( min, max );
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_uint8( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 8;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_uint16( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 16;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_uint32( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 32;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_uint64( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 64;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_float( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 32;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_double( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 64;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes )
+{
+    serialize_measure_align( stream );
+    stream->bits_written += bytes * 8;
+    return 1;
+}
 
 #ifdef __cplusplus
 }

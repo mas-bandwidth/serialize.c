@@ -136,13 +136,18 @@ bench-all: build/bench build/bench_lto build/bench_cpp
 	@echo "=== C++, same -O2 ==="
 	@./build/bench_cpp
 
+# -DNDEBUG on both C legs because the C++ leg below has it: caller error is
+# serialize_assert on both sides now, and an assert that is live on one side
+# and compiled out on the other is not a comparison. It is the only define
+# either leg gets, and it is the standard release one -- nothing here is
+# opted into.
 build/bench: bench.c serialize.c serialize.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -I. bench.c serialize.c -o $@ $(LDLIBS)
+	$(CC) $(CFLAGS) -DNDEBUG -I. bench.c serialize.c -o $@ $(LDLIBS)
 
 build/bench_lto: bench.c serialize.c serialize.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -flto -I. bench.c serialize.c -flto -o $@ $(LDLIBS)
+	$(CC) $(CFLAGS) -DNDEBUG -flto -I. bench.c serialize.c -flto -o $@ $(LDLIBS)
 
 # The C++ bench, built here rather than by its own CMake so the optimization level
 # matches this repo's -O2 -- its CMake Release build is -O3, and comparing -O3 to

@@ -73,6 +73,14 @@ malformed alignment pad, or a read past the end of the buffer all fail the
 read. This library is used on packet paths facing the open internet, and a
 read is where untrusted data arrives.
 
+**Your mistakes are not stream errors.** Bounds the wrong way round, a value
+outside its declared range on write, a bit count outside `[1,32]` — those are
+`serialize_assert`, which fires in a debug build and compiles out under
+`NDEBUG`. That is the same division the C++ library makes. If you need to fail
+a stream yourself, call `serialize_read_fail` or `serialize_write_fail`; do
+not set the `error` field by hand, because failure is carried by a poisoned
+bit limit as well as by that flag.
+
 ## Building
 
 There is no build system to adopt: two files, `serialize.h` and `serialize.c`.
@@ -120,11 +128,12 @@ past the meaningful length. Give it a buffer that is a multiple of 8 bytes and
 ask for the meaningful length with `serialize_write_bytes_processed` after
 flushing.
 
-The **reader** loads through an 8-byte window near the end of the buffer, and
-assembles that window byte by byte rather than over-reading — unlike the C++
-library, which loads unconditionally and documents the slack as the caller's
-responsibility. You can hand this reader a buffer of exactly the meaningful
-length.
+The **reader** loads through an 8-byte window, and the last such window — the
+one that would reach past the end — is assembled once when the stream is
+initialized, from the bytes that are there. Unlike the C++ library, which
+loads unconditionally and documents the slack as the caller's responsibility,
+you can hand this reader a buffer of exactly the meaningful length. The buffer
+must not change while the stream is reading it.
 
 ## The full surface
 
@@ -151,9 +160,41 @@ the language can target C:
 identical either way — STANDARD.md defines these in terms of 32-bit groups
 from least significant upward, which two lanes reproduce exactly.
 
-One deliberate omission: the C++ library's aligned fast path for
-`serialize_bytes`. This port writes byte at a time through the packer. Same
-bytes, less speed.
+## Speed
+
+The per-field operations — bits, bool, align, ranged `int` and `int64`, the
+fixed-width helpers, float, double, the stream lifecycle and the measure
+operations — are defined in `serialize.h` rather than `serialize.c`, so they
+inline into your code and their bit widths fold to literals the way the C++
+macros do. You get that by compiling normally: no LTO flag, no define.
+
+Measured against the C++ library at the same `-O2` on an Apple M2, `make
+bench-all`:
+
+| | C | C++ |
+|---|---|---|
+| int packet read | 233 M/s | 187 M/s |
+| int packet write | 114 M/s | 100 M/s |
+| mixed packet read | 242 M/s | 188 M/s |
+| stream read | 4664 MB/s | 5213 MB/s |
+| stream write | 2715 MB/s | 2441 MB/s |
+| bitpacker read | 2072 MB/s | 2601 MB/s |
+| bitpacker write | 2090 MB/s | 2070 MB/s |
+
+The raw bitpacker read is the one place this port is meaningfully behind, and
+it is behind on purpose. The C++ reader loads its 64-bit window
+unconditionally and **requires the caller's allocation to extend 8 bytes past
+the data**; this one reads no byte you did not give it, and pays one
+predictable branch per read for that. Removing the branch — measured — takes
+bitpacker read to 2497 MB/s and stream read past the C++ number.
+
+Caller error is `serialize_assert` and compiles out under `NDEBUG`, matching
+the C++ library operation for operation: bounds the wrong way round, a value
+outside its declared range on write, a bit count outside `[1,32]`. What stays
+in a release build is everything that judges the network — range checks on
+read, malformed align padding, reads past the end — plus a capacity check on
+write that the C++ library only asserts, because running off the end of your
+buffer is worse than being slower.
 
 ## Licence
 

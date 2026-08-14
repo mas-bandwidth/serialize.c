@@ -149,17 +149,106 @@ int main( void )
         CHECK( !serialize_read_int( &r, &v, 0, 10 ) );
     }
 
-    /* ---- a degenerate range costs zero bits, per STANDARD.md ---- */
+    /* ---- a degenerate range costs zero bits, per STANDARD.md ----
+
+            At EVERY width. The wide operations get their span from a 128-bit
+            subtraction whose bit length is then taken, and a span of zero is
+            the one input a count-leading-zeros instruction is undefined on --
+            so this is the case an implementation reaching for that instruction
+            gets wrong, silently, in exactly one place. */
+    {
+        serialize_measure_stream_t m;
+        serialize_int32_t v = 0;
+        serialize_int64_t v64 = 0;
+        serialize_int128_t v128 = serialize_int128_from_int64( 42 );
+        serialize_int128_t out128;
+        serialize_int32_t f32 = 0;
+        serialize_int64_t f64 = 0;
+        serialize_int128_t f128;
+
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_measure_stream_init( &m );
+        CHECK( serialize_write_int( &w, 5, 5, 5 ) );                            CHECK( serialize_measure_int( &m, 5, 5 ) );
+        CHECK( serialize_write_int64( &w, 7, 7, 7 ) );                          CHECK( serialize_measure_int64( &m, 7, 7 ) );
+        CHECK( serialize_write_int128( &w, v128, v128, v128 ) );                CHECK( serialize_measure_int128( &m, v128, v128 ) );
+        CHECK( serialize_write_fixed32( &w, 5 * 65536, 16, 16, 5, 5 ) );        CHECK( serialize_measure_fixed32( &m, 16, 16, 5, 5 ) );
+        CHECK( serialize_write_fixed64( &w, 7LL * 65536, 48, 16, 7, 7 ) );      CHECK( serialize_measure_fixed64( &m, 48, 16, 7, 7 ) );
+        CHECK( serialize_write_fixed128( &w, serialize_int128_from_int64( 9LL * 65536 ), 112, 16, 9, 9 ) );
+        CHECK( serialize_measure_fixed128( &m, 112, 16, 9, 9 ) );
+        CHECK( !serialize_write_error( &w ) );
+        CHECK( serialize_write_bits_processed( &w ) == 0 );
+        CHECK( serialize_measure_bits_processed( &m ) == 0 );
+        serialize_write_flush( &w );
+
+        serialize_read_stream_init( &r, buffer, 8 );
+        CHECK( serialize_read_int( &r, &v, 5, 5 ) );                            CHECK( v == 5 );
+        CHECK( serialize_read_int64( &r, &v64, 7, 7 ) );                        CHECK( v64 == 7 );
+        CHECK( serialize_read_int128( &r, &out128, v128, v128 ) );              CHECK( serialize_int128_equal( out128, v128 ) );
+        CHECK( serialize_read_fixed32( &r, &f32, 16, 16, 5, 5 ) );              CHECK( f32 == 5 * 65536 );
+        CHECK( serialize_read_fixed64( &r, &f64, 48, 16, 7, 7 ) );              CHECK( f64 == 7LL * 65536 );
+        CHECK( serialize_read_fixed128( &r, &f128, 112, 16, 9, 9 ) );
+        CHECK( serialize_int128_equal( f128, serialize_int128_from_int64( 9LL * 65536 ) ) );
+        CHECK( !serialize_read_error( &r ) );
+        CHECK( serialize_read_bits_processed( &r ) == 0 );
+    }
+
+    /* ---- failure is sticky whatever caused it ----
+
+            The bit limit is what every operation tests against, and failing a
+            stream poisons it -- which is what makes one comparison do the work
+            of two. A failure path that set the error flag and left the limit
+            alone would leave a stream that reports failure and keeps reading,
+            so each KIND of failure is checked here, not just running out of
+            buffer. */
     {
         serialize_int32_t v = 0;
+        serialize_uint32_t raw = 0;
+        serialize_uint8_t u8 = 0;
+
+        /* a value out of its declared range */
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
-        CHECK( serialize_write_int( &w, 5, 5, 5 ) );
-        CHECK( serialize_write_bits_processed( &w ) == 0 );
+        serialize_write_bits( &w, 127, 7 );                  /* outside [0,100] */
+        serialize_write_bits( &w, 0xAB, 8 );                 /* and a valid field behind it */
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, 8 );
-        CHECK( serialize_read_int( &r, &v, 5, 5 ) );
-        CHECK( v == 5 );
-        CHECK( serialize_read_bits_processed( &r ) == 0 );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
+        CHECK( serialize_read_error( &r ) );
+        CHECK( !serialize_read_bits( &r, &raw, 8 ) );        /* the field behind it must NOT be readable */
+        CHECK( !serialize_read_uint8( &r, &u8 ) );
+        CHECK( !serialize_read_int( &r, &v, 0, 255 ) );
+
+        /* nonzero align padding */
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_write_bits( &w, 1, 1 );
+        serialize_write_bits( &w, 0x7F, 7 );
+        serialize_write_bits( &w, 0xCD, 8 );
+        serialize_write_flush( &w );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( serialize_read_bits( &r, &raw, 1 ) );
+        CHECK( !serialize_read_align( &r ) );
+        CHECK( serialize_read_error( &r ) );
+        CHECK( !serialize_read_bits( &r, &raw, 8 ) );
+
+        /* including the operations that would otherwise do nothing at all: a
+           zero length bytes on a failed stream is still a failure, and used
+           not to be, because it reached neither a read nor an align that
+           would have noticed */
+        {
+            serialize_uint8_t none[1];
+            CHECK( !serialize_read_bytes( &r, none, 0 ) );
+            CHECK( !serialize_read_align( &r ) );
+        }
+
+        /* and on the write side: a write that does not fit stops every later
+           write, including one that would have fitted */
+        serialize_write_stream_init( &w, buffer, 4 );        /* 32 bits of room */
+        CHECK( serialize_write_bits( &w, 0xFFFFFF, 24 ) );
+        CHECK( !serialize_write_bits( &w, 0, 16 ) );         /* 8 bits past the end */
+        CHECK( serialize_write_error( &w ) );
+        CHECK( !serialize_write_bits( &w, 1, 1 ) );          /* would have fitted */
+        CHECK( !serialize_write_int( &w, 5, 0, 10 ) );
+        CHECK( !serialize_write_bool( &w, 1 ) );
+        CHECK( serialize_write_bits_processed( &w ) == 24 );
     }
 
     /* ---- the measure stream agrees with the writer, ONE OPERATION AT A TIME.
