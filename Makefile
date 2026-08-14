@@ -13,7 +13,7 @@ LDLIBS  ?= -lm
 # The C++ library, for the differential test. Override if it lives elsewhere.
 SERIALIZE_CPP ?= ../serialize
 
-.PHONY: all test golden wstest test-all-standards diff clean
+.PHONY: all test golden wstest test-all-standards diff bench bench-lto bench-cpp bench-all clean
 
 all: test
 
@@ -88,6 +88,52 @@ build/diff_c: test/diff_c.c serialize.c serialize.h
 build/diff_cpp: test/diff_cpp.cpp test/vectors.h
 	@mkdir -p build
 	c++ -std=c++17 -O2 -I$(SERIALIZE_CPP) test/diff_cpp.cpp -o $@
+
+# bench.c mirrors the C++ library's bench.cpp operation for operation, so the two
+# outputs can be read side by side. See the header comment in bench.c for the one
+# thing it does not mirror and why.
+#
+# Three legs, because the question is whether the out-of-line call into
+# serialize.c costs a consumer anything the C++ macros do not pay:
+#
+#   bench      the flags a consumer gets today -- separate translation unit, no LTO
+#   bench-lto  the same, plus -flto, which lets the linker inline across that boundary
+#   bench-cpp  the C++ library at the SAME -O2, so the comparison is like for like
+#
+# Absolute numbers mean nothing off a quiet machine. What means something is the
+# ratio between legs run back to back, which is what bench-all produces.
+bench: build/bench
+	./build/bench
+
+bench-lto: build/bench_lto
+	./build/bench_lto
+
+bench-cpp: build/bench_cpp
+	./build/bench_cpp
+
+bench-all: build/bench build/bench_lto build/bench_cpp
+	@echo "=== C, no LTO (what a consumer gets today) ==="
+	@./build/bench
+	@echo "=== C, -flto ==="
+	@./build/bench_lto
+	@echo "=== C++, same -O2 ==="
+	@./build/bench_cpp
+
+build/bench: bench.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -I. bench.c serialize.c -o $@ $(LDLIBS)
+
+build/bench_lto: bench.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -flto -I. bench.c serialize.c -flto -o $@ $(LDLIBS)
+
+# The C++ bench, built here rather than by its own CMake so the optimization level
+# matches this repo's -O2 -- its CMake Release build is -O3, and comparing -O3 to
+# -O2 would answer a different question. Nothing in $(SERIALIZE_CPP) is written to.
+# No -I. here: bench.cpp includes "serialize.h" and must get the C++ one.
+build/bench_cpp: $(SERIALIZE_CPP)/bench.cpp $(SERIALIZE_CPP)/serialize.h
+	@mkdir -p build
+	c++ -std=c++17 -O2 -DNDEBUG -DSERIALIZE_RELEASE -Wall -Wextra -fno-rtti -I$(SERIALIZE_CPP) $(SERIALIZE_CPP)/bench.cpp -o $@
 
 test-all-standards:
 	@for std in c89 c99 c11 c17; do \
