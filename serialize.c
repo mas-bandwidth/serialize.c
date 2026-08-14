@@ -179,11 +179,17 @@ static int serialize_compressed_float_bits( float min, float max, float res, ser
 {
     float delta = max - min;
     float values = delta / res;
-    if ( values < 1.0f )
+    serialize_assert( min < max && res > 0.0f );
+    /* clamp with the !>= form so the uint32 conversion below is defined even
+       for pathological delta / res -- NaN fails every ordered comparison, so
+       the plain < form lets it through and the conversion of NaN to unsigned
+       is undefined in C. The !>= form catches it. Match serialize.h's
+       serialize_compressed_float_internal exactly. */
+    if ( !( values >= 1.0f ) )
     {
         values = 1.0f;
     }
-    if ( values > 4294967040.0f )
+    else if ( values > 4294967040.0f )
     {
         values = 4294967040.0f;
     }
@@ -208,12 +214,15 @@ int serialize_write_compressed_float( serialize_write_stream_t * stream, float v
     delta = max - min;
     bits = serialize_compressed_float_bits( min, max, res, &max_integer_value );
 
+    /* clamp with the !>= / !<= form so a NaN value is forced into range
+       instead of reaching the uint32 conversion below -- the family behavior:
+       NaN writes as min. Match serialize.h exactly. */
     normalized = ( value - min ) / delta;
-    if ( normalized < 0.0f )
+    if ( !( normalized >= 0.0f ) )
     {
         normalized = 0.0f;
     }
-    if ( normalized > 1.0f )
+    else if ( !( normalized <= 1.0f ) )
     {
         normalized = 1.0f;
     }

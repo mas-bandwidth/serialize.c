@@ -81,6 +81,10 @@ jobs:
       - name: Compare
         run: make diff
 
+  # -fno-sanitize-recover=all is load-bearing: without it ubsan prints its
+  # report and lets the process continue to a green exit, so an undefined
+  # operation whose fallout happens to round-trip (NaN through a float-to-
+  # unsigned cast does, on arm64) never fails the job.
   sanitizers:
     name: asan + ubsan
     runs-on: ubuntu-24.04
@@ -88,9 +92,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Test
         run: |
-          make test CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
-          make golden CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
-          make wstest CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
+          make test CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          make golden CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          make wstest CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
 
   # STANDARD.md here is a VERBATIM VENDORED COPY of the specification in
   # mas-bandwidth/serialize. A duplicated normative document is the same

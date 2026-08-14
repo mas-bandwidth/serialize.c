@@ -433,6 +433,48 @@ int main( void )
         CHECK( serialize_read_error( &r ) );
     }
 
+    /* ---- NaN through compressed float writes as min: the family behavior.
+       C++, C#, Go and Rust all clamp with the !>= form, which is false for
+       NaN, so a NaN value is forced to normalized = 0, the wire carries
+       integer 0, and the reader reconstructs min exactly. The bytes must be
+       identical to writing min itself. The NaN is built from its bit pattern
+       rather than any NAN macro so ubsan actually exercises this path and
+       finite-math builds still compile. */
+    {
+        static const serialize_uint32_t nan_patterns[2] = { 0x7FC00000UL, 0xFFC00000UL };  /* quiet NaN, and its negative */
+        serialize_uint8_t nan_buffer[16];
+        serialize_uint8_t min_buffer[16];
+        serialize_write_stream_t w2;
+        float nan_value;
+        float out;
+        int i;
+
+        for ( i = 0; i < 2; i++ )
+        {
+            memset( nan_buffer, 0, sizeof( nan_buffer ) );
+            memset( min_buffer, 0, sizeof( min_buffer ) );
+            memcpy( &nan_value, &nan_patterns[i], 4 );
+
+            serialize_write_stream_init( &w, nan_buffer, sizeof( nan_buffer ) );
+            CHECK( serialize_write_compressed_float( &w, nan_value, 0.0f, 10.0f, 0.01f ) );
+            serialize_write_flush( &w );
+            CHECK( !serialize_write_error( &w ) );
+
+            serialize_write_stream_init( &w2, min_buffer, sizeof( min_buffer ) );
+            CHECK( serialize_write_compressed_float( &w2, 0.0f, 0.0f, 10.0f, 0.01f ) );
+            serialize_write_flush( &w2 );
+            CHECK( !serialize_write_error( &w2 ) );
+
+            CHECK( serialize_write_bits_processed( &w ) == serialize_write_bits_processed( &w2 ) );
+            CHECK( memcmp( nan_buffer, min_buffer, sizeof( nan_buffer ) ) == 0 );
+
+            out = 42.0f;
+            serialize_read_stream_init( &r, nan_buffer, serialize_write_bytes_processed( &w ) );
+            CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 10.0f, 0.01f ) );
+            CHECK( out == 0.0f );       /* integer 0 reconstructs to min exactly */
+        }
+    }
+
     printf( failed ? "FAILED\n" : "OK\n" );
     return failed;
 }
