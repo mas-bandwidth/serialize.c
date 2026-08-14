@@ -1,8 +1,15 @@
 // The C++ twin of diff_c.c: the SAME sequence through the original
 // serialize.h. If the two disagree by one byte, this port is not wire
 // compatible and nothing else about it matters.
+//
+// It also checks its own output against the pinned vector test/golden.c
+// asserts. That is what makes the pin evidence rather than a tautology: the
+// bytes are agreed by two independent implementations, not just recorded from
+// one.
 #include "serialize.h"
+#include "vectors.h"
 #include <stdio.h>
+#include <string.h>
 
 template <typename Stream> bool write_sequence( Stream & stream )
 {
@@ -52,8 +59,17 @@ int main()
     if ( !write_sequence( stream ) ) { printf( "WRITE ERROR\n" ); return 1; }
     stream.Flush();
     const int n = stream.GetBytesProcessed();
+    char hex[4096];
+    hex[0] = '\0';
+    for ( int i = 0; i < n; i++ ) snprintf( hex + i * 2, 3, "%02x", buffer[i] );
+    if ( strcmp( hex, SERIALIZE_GOLDEN_CORE ) != 0 )
+    {
+        fprintf( stderr, "GOLDEN MISMATCH: the C++ library disagrees with the pinned core vector\n" );
+        fprintf( stderr, "  pinned %s\n", SERIALIZE_GOLDEN_CORE );
+        fprintf( stderr, "  C++    %s\n", hex );
+        return 1;
+    }
     printf( "%d bytes\n", n );
-    for ( int i = 0; i < n; i++ ) printf( "%02x", buffer[i] );
-    printf( "\n" );
+    printf( "%s\n", hex );
     return 0;
 }

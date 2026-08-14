@@ -8,6 +8,28 @@
 static int failed = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAILED %s:%d: %s\n", __FILE__, __LINE__, #c); failed = 1; } } while (0)
 
+/*
+    Performs one operation on a write stream and its measure counterpart on a
+    measure stream, from the same starting point, and requires the two counts
+    to agree EXACTLY. A measure that does not equal the bits actually emitted
+    is worse than no measure at all: it sizes a buffer that then overflows.
+
+    The 3-bit prelude is not decoration. align, bytes, string -- everything
+    that pads -- costs a number of bits that depends on where in the byte the
+    operation begins, and starting from zero would measure the one case where
+    alignment happens to be free.
+*/
+#define MEASURED(w_op, m_op) do {                                                                \
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );                              \
+        serialize_measure_stream_init( &m );                                                      \
+        CHECK( serialize_write_bits( &w, 5, 3 ) );                                                \
+        CHECK( serialize_measure_bits( &m, 3 ) );                                                 \
+        CHECK( w_op );                                                                            \
+        CHECK( m_op );                                                                            \
+        CHECK( !serialize_write_error( &w ) );                                                     \
+        CHECK( serialize_write_bits_processed( &w ) == serialize_measure_bits_processed( &m ) );  \
+    } while ( 0 )
+
 int main( void )
 {
     static serialize_uint8_t buffer[2048];
@@ -140,17 +162,124 @@ int main( void )
         CHECK( serialize_read_bits_processed( &r ) == 0 );
     }
 
-    /* ---- the measure stream agrees with the writer ---- */
+    /* ---- the measure stream agrees with the writer, ONE OPERATION AT A TIME.
+
+            There is a measure counterpart for every write operation, and the
+            README says so; this is what makes that true rather than claimed.
+            The variable-width ones matter most -- int_relative picks its tier
+            from the difference and wstring its length field from the buffer
+            size, so neither can be worked around with measure_bits by a
+            caller who does not want to reimplement the ladder. ---- */
     {
         serialize_measure_stream_t m;
+        static const serialize_uint8_t src[3] = { 9, 8, 7 };
+        serialize_int128_t i128lo = serialize_int128_from_int64( -2000000000000LL );
+        serialize_int128_t i128hi = serialize_int128_from_int64( 2000000000000LL );
+        serialize_int128_t widelo = serialize_int128_make( 0xFFFFFFF000000000ULL, 0x0000000000000000ULL );
+        serialize_int128_t widehi = serialize_int128_make( 0x0000001000000000ULL, 0x0000000000000000ULL );
+        serialize_int128_t wideval = serialize_int128_make( 0x0000000F23456789ULL, 0xABCDEF0123456789ULL );
+        wchar_t ws[8];
+        int i;
+
+        ws[0] = 0x043C; ws[1] = 0x0438; ws[2] = 0x0440; ws[3] = 0;
+
+        MEASURED( serialize_write_bits( &w, 5, 3 ),  serialize_measure_bits( &m, 3 ) );
+        MEASURED( serialize_write_bool( &w, 1 ),     serialize_measure_bool( &m ) );
+        MEASURED( serialize_write_align( &w ),       serialize_measure_align( &m ) );
+
+        MEASURED( serialize_write_int( &w, 42, 0, 1000 ),    serialize_measure_int( &m, 0, 1000 ) );
+        MEASURED( serialize_write_int( &w, -7, -100, 100 ),  serialize_measure_int( &m, -100, 100 ) );
+        MEASURED( serialize_write_int( &w, 5, 5, 5 ),        serialize_measure_int( &m, 5, 5 ) );
+
+        MEASURED( serialize_write_int64( &w, -1234567890123LL, -2000000000000LL, 2000000000000LL ),
+                  serialize_measure_int64( &m, -2000000000000LL, 2000000000000LL ) );
+        MEASURED( serialize_write_int64( &w, 3, 0, 7 ), serialize_measure_int64( &m, 0, 7 ) );
+
+        MEASURED( serialize_write_uint8( &w, 0xAB ),        serialize_measure_uint8( &m ) );
+        MEASURED( serialize_write_uint16( &w, 0xBEEF ),     serialize_measure_uint16( &m ) );
+        MEASURED( serialize_write_uint32( &w, 0xDEADBEEF ), serialize_measure_uint32( &m ) );
+        MEASURED( serialize_write_uint64( &w, 0x0123456789ABCDEFULL ), serialize_measure_uint64( &m ) );
+
+        MEASURED( serialize_write_float( &w, 3.1415926f ), serialize_measure_float( &m ) );
+        MEASURED( serialize_write_double( &w, 1.0 / 3.0 ), serialize_measure_double( &m ) );
+        MEASURED( serialize_write_compressed_float( &w, 0.75f, 0.0f, 1.0f, 0.01f ),
+                  serialize_measure_compressed_float( &m, 0.0f, 1.0f, 0.01f ) );
+        MEASURED( serialize_write_compressed_float( &w, -3.5f, -10.0f, 10.0f, 0.001f ),
+                  serialize_measure_compressed_float( &m, -10.0f, 10.0f, 0.001f ) );
+
+        MEASURED( serialize_write_bytes( &w, src, 3 ),  serialize_measure_bytes( &m, 3 ) );
+        MEASURED( serialize_write_bytes( &w, src, 0 ),  serialize_measure_bytes( &m, 0 ) );
+        MEASURED( serialize_write_string( &w, "the quick brown fox", 64 ),
+                  serialize_measure_string( &m, "the quick brown fox", 64 ) );
+        MEASURED( serialize_write_string( &w, "", 64 ), serialize_measure_string( &m, "", 64 ) );
+
+        MEASURED( serialize_write_wstring( &w, ws, 8 ),  serialize_measure_wstring( &m, ws, 8 ) );
+        ws[0] = 0;
+        MEASURED( serialize_write_wstring( &w, ws, 8 ),  serialize_measure_wstring( &m, ws, 8 ) );
+        ws[0] = 0x043C;
+
+        MEASURED( serialize_write_uint128( &w, serialize_uint128_make( 0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL ) ),
+                  serialize_measure_uint128( &m ) );
+        MEASURED( serialize_write_int128( &w, serialize_int128_from_int64( -1234567890123LL ), i128lo, i128hi ),
+                  serialize_measure_int128( &m, i128lo, i128hi ) );
+        /* a span wider than 64 bits, so the count covers the high lane too */
+        MEASURED( serialize_write_int128( &w, wideval, widelo, widehi ),
+                  serialize_measure_int128( &m, widelo, widehi ) );
+
+        MEASURED( serialize_write_fixed32( &w, 100 * 65536, 16, 16, -180, 180 ),
+                  serialize_measure_fixed32( &m, 16, 16, -180, 180 ) );
+        MEASURED( serialize_write_fixed32( &w, 12345, 32, 0, 0, 1000000 ),
+                  serialize_measure_fixed32( &m, 32, 0, 0, 1000000 ) );
+        MEASURED( serialize_write_fixed64( &w, -5000LL * 65536, 48, 16, -1000000, 1000000 ),
+                  serialize_measure_fixed64( &m, 48, 16, -1000000, 1000000 ) );
+        MEASURED( serialize_write_fixed128( &w, serialize_int128_from_int64( 777LL * 65536 ), 112, 16, -1000000, 1000000 ),
+                  serialize_measure_fixed128( &m, 112, 16, -1000000, 1000000 ) );
+        MEASURED( serialize_write_fixed128( &w, serialize_int128_from_int64( -12345LL * ( (serialize_int64_t) 1 << 48 ) ), 80, 48, -1000000, 1000000 ),
+                  serialize_measure_fixed128( &m, 80, 48, -1000000, 1000000 ) );
+
+        /* every int_relative tier, including the raw fallback */
+        {
+            static const serialize_int32_t deltas[] = { 1, 2, 6, 7, 23, 24, 280, 281, 4377, 4378, 69914, 69915, 1000000 };
+            for ( i = 0; i < (int) ( sizeof( deltas ) / sizeof( deltas[0] ) ); i++ )
+            {
+                MEASURED( serialize_write_int_relative( &w, 1000, 1000 + deltas[i] ),
+                          serialize_measure_int_relative( &m, 1000, 1000 + deltas[i] ) );
+            }
+        }
+
+        /* a whole message at once, so nothing that depends on the position
+           within the byte can agree operation by operation and still drift
+           over a sequence */
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
         serialize_measure_stream_init( &m );
-        serialize_write_bits( &w, 5, 3 );        serialize_measure_bits( &m, 3 );
-        serialize_write_int( &w, 42, 0, 1000 );  serialize_measure_int( &m, 0, 1000 );
-        serialize_write_align( &w );             serialize_measure_align( &m );
-        { static const serialize_uint8_t src[3] = { 9, 8, 7 };
-          serialize_write_bytes( &w, src, 3 );   serialize_measure_bytes( &m, 3 ); }
+        CHECK( serialize_write_bits( &w, 5, 3 ) );            CHECK( serialize_measure_bits( &m, 3 ) );
+        CHECK( serialize_write_bool( &w, 1 ) );               CHECK( serialize_measure_bool( &m ) );
+        CHECK( serialize_write_int( &w, 42, 0, 1000 ) );      CHECK( serialize_measure_int( &m, 0, 1000 ) );
+        CHECK( serialize_write_int_relative( &w, 100, 400 ) ); CHECK( serialize_measure_int_relative( &m, 100, 400 ) );
+        CHECK( serialize_write_align( &w ) );                 CHECK( serialize_measure_align( &m ) );
+        CHECK( serialize_write_bytes( &w, src, 3 ) );         CHECK( serialize_measure_bytes( &m, 3 ) );
+        CHECK( serialize_write_string( &w, "fox", 64 ) );     CHECK( serialize_measure_string( &m, "fox", 64 ) );
+        CHECK( serialize_write_wstring( &w, ws, 8 ) );        CHECK( serialize_measure_wstring( &m, ws, 8 ) );
+        CHECK( serialize_write_fixed64( &w, 65536, 48, 16, -1000000, 1000000 ) );
+        CHECK( serialize_measure_fixed64( &m, 48, 16, -1000000, 1000000 ) );
+        CHECK( serialize_write_compressed_float( &w, 0.5f, 0.0f, 1.0f, 0.01f ) );
+        CHECK( serialize_measure_compressed_float( &m, 0.0f, 1.0f, 0.01f ) );
+        CHECK( !serialize_write_error( &w ) );
         CHECK( serialize_write_bits_processed( &w ) == serialize_measure_bits_processed( &m ) );
+        CHECK( serialize_write_bytes_processed( &w ) == serialize_measure_bytes_processed( &m ) );
+
+        /* measure refuses what the writer would refuse, and counts nothing
+           when it does -- a count the writer could never produce is the one
+           way a measure stream can do real damage */
+        {
+            serialize_measure_stream_init( &m );
+            CHECK( !serialize_measure_string( &m, "too long for its buffer", 8 ) );
+            CHECK( !serialize_measure_wstring( &m, ws, 3 ) );
+            CHECK( !serialize_measure_int_relative( &m, 100, 100 ) );
+            CHECK( !serialize_measure_int_relative( &m, 100, 99 ) );
+            CHECK( !serialize_measure_int128( &m, i128hi, i128lo ) );
+            CHECK( serialize_measure_bits_processed( &m ) == 0 );
+        }
     }
 
     /* ---- 128-bit, fixed point and wide strings ---- */

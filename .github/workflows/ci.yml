@@ -28,6 +28,8 @@ jobs:
         run: make test CSTD=${{ matrix.std }}
       - name: Golden wire
         run: make golden CSTD=${{ matrix.std }}
+      - name: STANDARD.md wstring example
+        run: make wstest CSTD=${{ matrix.std }}
 
   # THE job that matters most for this port.
   #
@@ -37,6 +39,12 @@ jobs:
   # incompatible with the other four languages. Only a PINNED GOLDEN run on a
   # big-endian machine proves the byte order is right, and s390x under qemu is
   # the cheapest big-endian machine there is.
+  #
+  # test/golden.c pins TWO sequences and this job runs both. The second is the
+  # 128-bit, fixed point and wide string surface -- a hand-rolled two-lane
+  # 64-bit emulation, and so the likeliest place in the library for a byte
+  # order bug. It is also the part a round trip proves least about, which is
+  # exactly why it has to be pinned and run here.
   big-endian:
     name: big endian s390x
     runs-on: ubuntu-24.04
@@ -54,6 +62,9 @@ jobs:
           s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -static -I. \
             test/golden.c serialize.c -o golden-s390x -lm
           qemu-s390x-static ./golden-s390x
+          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -static -I. \
+            test/wstest.c serialize.c -o wstest-s390x -lm
+          qemu-s390x-static ./wstest-s390x
           s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -static -I. \
             test/roundtrip.c serialize.c -o roundtrip-s390x -lm
           qemu-s390x-static ./roundtrip-s390x
@@ -79,6 +90,7 @@ jobs:
         run: |
           make test CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
           make golden CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
+          make wstest CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer"
 
   # STANDARD.md here is a VERBATIM VENDORED COPY of the specification in
   # mas-bandwidth/serialize. A duplicated normative document is the same

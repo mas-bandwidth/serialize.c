@@ -299,7 +299,11 @@ int serialize_read_error( const serialize_read_stream_t * stream )
 }
 
 /* ---------------------------------------------------------------------------
-   measure stream
+   measure stream lifecycle
+
+   The measure OPERATIONS are at the bottom of this file rather than here: they
+   mirror the whole surface, including the fixed point and 128-bit paths, and
+   they reuse the same static helpers those are built from.
    --------------------------------------------------------------------------- */
 
 void serialize_measure_stream_init( serialize_measure_stream_t * stream )
@@ -315,49 +319,6 @@ int serialize_measure_bits_processed( const serialize_measure_stream_t * stream 
 int serialize_measure_bytes_processed( const serialize_measure_stream_t * stream )
 {
     return ( stream->bits_written + 7 ) / 8;
-}
-
-int serialize_measure_bits( serialize_measure_stream_t * stream, int bits )
-{
-    stream->bits_written += bits;
-    return 1;
-}
-
-int serialize_measure_int( serialize_measure_stream_t * stream, serialize_int32_t min, serialize_int32_t max )
-{
-    stream->bits_written += serialize_bits_required( min, max );
-    return 1;
-}
-
-int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int64_t min, serialize_int64_t max )
-{
-    stream->bits_written += serialize_bits_required64( min, max );
-    return 1;
-}
-
-int serialize_measure_align( serialize_measure_stream_t * stream )
-{
-    int remainder = stream->bits_written % 8;
-    if ( remainder != 0 )
-    {
-        stream->bits_written += 8 - remainder;
-    }
-    return 1;
-}
-
-int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes )
-{
-    serialize_measure_align( stream );
-    stream->bits_written += bytes * 8;
-    return 1;
-}
-
-int serialize_measure_string( serialize_measure_stream_t * stream, const char * string, int buffer_size )
-{
-    int length = (int) strlen( string );
-    serialize_measure_int( stream, 0, buffer_size - 1 );
-    serialize_measure_bytes( stream, length );
-    return 1;
 }
 
 /* ---------------------------------------------------------------------------
@@ -848,10 +809,30 @@ int serialize_read_double( serialize_read_stream_t * stream, double * value )
     return 1;
 }
 
+/*
+    The width of a compressed float, and the quantization ceiling that goes
+    with it. In one place because three callers need it -- write, read and
+    measure -- and a formula copied three times is a formula that drifts twice.
+*/
+static int serialize_compressed_float_bits( float min, float max, float res, serialize_uint32_t * max_integer_value )
+{
+    float delta = max - min;
+    float values = delta / res;
+    if ( values < 1.0f )
+    {
+        values = 1.0f;
+    }
+    if ( values > 4294967040.0f )
+    {
+        values = 4294967040.0f;
+    }
+    *max_integer_value = (serialize_uint32_t) ceil( (double) values );
+    return serialize_bits_required( 0, (serialize_int32_t) *max_integer_value );
+}
+
 int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res )
 {
     float delta;
-    float values;
     serialize_uint32_t max_integer_value;
     int bits;
     float normalized;
@@ -863,17 +844,7 @@ int serialize_write_compressed_float( serialize_write_stream_t * stream, float v
     }
 
     delta = max - min;
-    values = delta / res;
-    if ( values < 1.0f )
-    {
-        values = 1.0f;
-    }
-    if ( values > 4294967040.0f )
-    {
-        values = 4294967040.0f;
-    }
-    max_integer_value = (serialize_uint32_t) ceil( (double) values );
-    bits = serialize_bits_required( 0, (serialize_int32_t) max_integer_value );
+    bits = serialize_compressed_float_bits( min, max, res, &max_integer_value );
 
     normalized = ( value - min ) / delta;
     if ( normalized < 0.0f )
@@ -893,7 +864,6 @@ int serialize_write_compressed_float( serialize_write_stream_t * stream, float v
 int serialize_read_compressed_float( serialize_read_stream_t * stream, float * value, float min, float max, float res )
 {
     float delta;
-    float values;
     serialize_uint32_t max_integer_value;
     int bits;
     serialize_uint32_t integer_value = 0;
@@ -904,17 +874,7 @@ int serialize_read_compressed_float( serialize_read_stream_t * stream, float * v
     }
 
     delta = max - min;
-    values = delta / res;
-    if ( values < 1.0f )
-    {
-        values = 1.0f;
-    }
-    if ( values > 4294967040.0f )
-    {
-        values = 4294967040.0f;
-    }
-    max_integer_value = (serialize_uint32_t) ceil( (double) values );
-    bits = serialize_bits_required( 0, (serialize_int32_t) max_integer_value );
+    bits = serialize_compressed_float_bits( min, max, res, &max_integer_value );
 
     if ( !serialize_read_bits( stream, &integer_value, bits ) )
     {
@@ -1580,4 +1540,260 @@ int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, 
     string[length] = 0;
 
     return 1;
+}
+
+/* ---------------------------------------------------------------------------
+   measure stream operations
+
+   One per write operation, counting the bits that write would emit without
+   emitting any. They are here, at the bottom, because they mirror the whole
+   surface and reuse the same static helpers the fixed point and 128-bit paths
+   are built from -- the widths are computed by the same code that computes
+   them on the write path, not by a second copy that could drift from it.
+
+   test/roundtrip.c checks every one of these against the writer, field by
+   field: a measure that does not equal the bits actually emitted is worse
+   than no measure at all, because it sizes a buffer that then overflows.
+   --------------------------------------------------------------------------- */
+
+int serialize_measure_bits( serialize_measure_stream_t * stream, int bits )
+{
+    stream->bits_written += bits;
+    return 1;
+}
+
+int serialize_measure_bool( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 1;
+    return 1;
+}
+
+int serialize_measure_align( serialize_measure_stream_t * stream )
+{
+    int remainder = stream->bits_written % 8;
+    if ( remainder != 0 )
+    {
+        stream->bits_written += 8 - remainder;
+    }
+    return 1;
+}
+
+int serialize_measure_int( serialize_measure_stream_t * stream, serialize_int32_t min, serialize_int32_t max )
+{
+    stream->bits_written += serialize_bits_required( min, max );
+    return 1;
+}
+
+int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int64_t min, serialize_int64_t max )
+{
+    stream->bits_written += serialize_bits_required64( min, max );
+    return 1;
+}
+
+int serialize_measure_uint8( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 8;
+    return 1;
+}
+
+int serialize_measure_uint16( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 16;
+    return 1;
+}
+
+int serialize_measure_uint32( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 32;
+    return 1;
+}
+
+int serialize_measure_uint64( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 64;
+    return 1;
+}
+
+/*
+    The one operation whose width cannot be worked around with measure_bits:
+    the tier is chosen by the difference, so the caller would have to
+    reimplement the ladder to know the count. This walks the same ladder
+    serialize_write_int_relative does, in the same order, and asks
+    serialize_bits_required for each tier's width rather than restating it as
+    a literal that could disagree with the writer.
+*/
+int serialize_measure_int_relative( serialize_measure_stream_t * stream, serialize_int32_t previous, serialize_int32_t current )
+{
+    serialize_uint32_t difference;
+
+    if ( current <= previous )
+    {
+        return 0;
+    }
+
+    difference = (serialize_uint32_t) current - (serialize_uint32_t) previous;
+
+    stream->bits_written += 1;
+    if ( difference == 1 )
+    {
+        return 1;
+    }
+
+    stream->bits_written += 1;
+    if ( difference <= 6 )
+    {
+        stream->bits_written += serialize_bits_required( 2, 6 );
+        return 1;
+    }
+
+    stream->bits_written += 1;
+    if ( difference <= 23 )
+    {
+        stream->bits_written += serialize_bits_required( 7, 23 );
+        return 1;
+    }
+
+    stream->bits_written += 1;
+    if ( difference <= 280 )
+    {
+        stream->bits_written += serialize_bits_required( 24, 280 );
+        return 1;
+    }
+
+    stream->bits_written += 1;
+    if ( difference <= 4377 )
+    {
+        stream->bits_written += serialize_bits_required( 281, 4377 );
+        return 1;
+    }
+
+    stream->bits_written += 1;
+    if ( difference <= 69914 )
+    {
+        stream->bits_written += serialize_bits_required( 4378, 69914 );
+        return 1;
+    }
+
+    stream->bits_written += 32;
+
+    return 1;
+}
+
+int serialize_measure_float( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 32;
+    return 1;
+}
+
+int serialize_measure_double( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 64;
+    return 1;
+}
+
+int serialize_measure_compressed_float( serialize_measure_stream_t * stream, float min, float max, float res )
+{
+    serialize_uint32_t max_integer_value;
+    stream->bits_written += serialize_compressed_float_bits( min, max, res, &max_integer_value );
+    return 1;
+}
+
+int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes )
+{
+    serialize_measure_align( stream );
+    stream->bits_written += bytes * 8;
+    return 1;
+}
+
+int serialize_measure_string( serialize_measure_stream_t * stream, const char * string, int buffer_size )
+{
+    int length = (int) strlen( string );
+
+    /* the writer refuses a string that does not fit, so a count for one would
+       be a number no write could ever produce */
+    if ( length >= buffer_size )
+    {
+        return 0;
+    }
+
+    serialize_measure_int( stream, 0, buffer_size - 1 );
+    serialize_measure_bytes( stream, length );
+
+    return 1;
+}
+
+/* NO align, matching serialize_write_wstring. See the header. */
+int serialize_measure_wstring( serialize_measure_stream_t * stream, const wchar_t * string, int buffer_size )
+{
+    int length = 0;
+
+    while ( string[length] != 0 )
+    {
+        length++;
+    }
+
+    if ( length >= buffer_size )
+    {
+        return 0;
+    }
+
+    stream->bits_written += serialize_bits_required( 0, buffer_size - 1 );
+    stream->bits_written += length * 32;
+
+    return 1;
+}
+
+int serialize_measure_uint128( serialize_measure_stream_t * stream )
+{
+    stream->bits_written += 128;
+    return 1;
+}
+
+int serialize_measure_int128( serialize_measure_stream_t * stream, serialize_int128_t min, serialize_int128_t max )
+{
+    serialize_uint128_t umin, umax, span;
+
+    if ( serialize_int128_compare( min, max ) > 0 )
+    {
+        return 0;
+    }
+
+    umin = serialize_uint128_make( min.hi, min.lo );
+    umax = serialize_uint128_make( max.hi, max.lo );
+    span = serialize_u128_sub( umax, umin );
+
+    stream->bits_written += serialize_u128_bit_length( span );
+
+    return 1;
+}
+
+/* the shared core, mirroring serialize_write_fixed_core: the width comes from
+   the span of the RAW (scaled) bounds, and nothing else */
+static int serialize_measure_fixed_core( serialize_measure_stream_t * stream, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+{
+    serialize_uint128_t raw_min = serialize_raw_bound( min, fraction_bits );
+    serialize_uint128_t raw_max = serialize_raw_bound( max, fraction_bits );
+    serialize_uint128_t span = serialize_u128_sub( raw_max, raw_min );
+
+    stream->bits_written += serialize_u128_bit_length( span );
+
+    return 1;
+}
+
+int serialize_measure_fixed32( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
+{
+    (void) integer_bits;
+    return serialize_measure_fixed_core( stream, fraction_bits, (serialize_int64_t) min, (serialize_int64_t) max );
+}
+
+int serialize_measure_fixed64( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+{
+    (void) integer_bits;
+    return serialize_measure_fixed_core( stream, fraction_bits, min, max );
+}
+
+int serialize_measure_fixed128( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+{
+    (void) integer_bits;
+    return serialize_measure_fixed_core( stream, fraction_bits, min, max );
 }

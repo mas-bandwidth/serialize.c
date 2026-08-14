@@ -83,7 +83,8 @@ The Makefile here is for developing the library itself:
 
 ```
 make test                  # round trip, rejection, and measure-stream tests
-make golden                # the pinned wire vector
+make golden                # the pinned wire vectors, core and wide
+make wstest                # STANDARD.md's worked wstring example
 make diff                  # byte-compare against the C++ library
 make test-all-standards    # c89, c99, c11, c17
 ```
@@ -94,6 +95,20 @@ an endianness bug, because a packer writing the scratch word in the wrong byte
 order would be read back in the same wrong order and every round trip would
 pass while the bytes stayed incompatible with the other four languages. Only a
 pinned golden on a big-endian machine proves the byte order.
+
+The golden pins **two** sequences and the big-endian job runs both. The second
+covers `uint128`, ranged `int128`, `fixed32`/`64`/`128` and `wstring` — the
+hand-rolled two-lane 64-bit emulation, which is both the likeliest place for a
+byte order bug and the part a round trip proves least about. Two of its cases
+span more than 64 bits deliberately, so the offset reaches the high lane;
+everything narrower fits in the low one and would leave half the emulation
+unproven.
+
+The pinned bytes are not merely self-consistent. They live in `test/vectors.h`,
+and the C++ twins behind `make diff` check their own output against the *same*
+constants — so the vector is agreed by two independent implementations, and a
+drift between the golden's sequence and the differential's fails loudly instead
+of quietly turning the pin into a string that agrees only with itself.
 
 `make diff` expects the C++ library as a sibling checkout; override with
 `SERIALIZE_CPP=/path/to/serialize`.
@@ -125,7 +140,11 @@ the language can target C:
 - float, double, compressed float
 - bytes, string, wide string
 - `int_relative`, all six tiers
-- the measure stream
+- the measure stream, with **one operation per write operation** — including
+  `int_relative` and `wstring`, whose widths depend on the value and so cannot
+  be worked around with `serialize_measure_bits` by a caller unwilling to
+  reimplement the tier ladder. Every one is tested against the bits the
+  corresponding write actually emits.
 
 128-bit integers are **emulated as two 64-bit lanes** rather than requiring
 `__int128`, because C89 has no such type and neither does MSVC. The wire is

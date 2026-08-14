@@ -22,6 +22,18 @@ int main( void )
     serialize_write_fixed64( &w, -5000LL * 65536, 48, 16, -1000000, 1000000 );
     serialize_write_fixed128( &w, serialize_int128_from_int64( 777LL * 65536 ), 112, 16, -1000000, 1000000 );
     serialize_write_fixed32( &w, 12345, 32, 0, 0, 1000000 );
+
+    /* Ranged 128-bit over a span WIDER THAN 64 BITS, and fixed128 likewise.
+       Every case above fits its offset in the low lane, so the high lane of
+       the two-lane emulation -- groups 2 and 3 of the 32-bit splitting -- is
+       never reached by them. That is exactly where a byte order or lane
+       mix-up would hide. */
+    serialize_write_int128( &w,
+        serialize_int128_make( 0x0000000F23456789ULL, 0xABCDEF0123456789ULL ),
+        serialize_int128_make( 0xFFFFFFF000000000ULL, 0x0000000000000000ULL ),
+        serialize_int128_make( 0x0000001000000000ULL, 0x0000000000000000ULL ) );
+    serialize_write_fixed128( &w, serialize_int128_from_int64( -12345LL * ( (serialize_int64_t) 1 << 48 ) ), 80, 48, -1000000, 1000000 );
+
     serialize_write_wstring( &w, ws, 8 );
 
     serialize_write_flush( &w );

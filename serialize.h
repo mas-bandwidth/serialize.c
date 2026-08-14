@@ -290,17 +290,6 @@ int serialize_write_string( serialize_write_stream_t * stream, const char * stri
 int serialize_read_string( serialize_read_stream_t * stream, char * string, int buffer_size );
 
 /* ---------------------------------------------------------------------------
-   measure stream
-   --------------------------------------------------------------------------- */
-
-int serialize_measure_bits( serialize_measure_stream_t * stream, int bits );
-int serialize_measure_int( serialize_measure_stream_t * stream, serialize_int32_t min, serialize_int32_t max );
-int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int64_t min, serialize_int64_t max );
-int serialize_measure_align( serialize_measure_stream_t * stream );
-int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes );
-int serialize_measure_string( serialize_measure_stream_t * stream, const char * string, int buffer_size );
-
-/* ---------------------------------------------------------------------------
    128-bit integers
 
    Emulated as two 64-bit lanes rather than requiring __int128, because C89
@@ -385,6 +374,58 @@ int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_
 
 int serialize_write_wstring( serialize_write_stream_t * stream, const wchar_t * string, int buffer_size );
 int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, int buffer_size );
+
+/* ---------------------------------------------------------------------------
+   measure stream
+
+   One measure operation for every write operation, so a schema that can
+   generate a write half can always generate a measure half. This block sits
+   last because it mirrors everything above it.
+
+   The measure functions take the arguments that determine the WIDTH and
+   nothing else: a ranged integer costs the same whatever the value, so
+   serialize_measure_int takes only the bounds. Where the width does depend on
+   the value -- int_relative, string, wstring -- the value is taken too, and
+   there is no way to get the count right without it.
+
+   They return int for symmetry with the write half, and return 0 for input a
+   writer would refuse: a string or wstring longer than its buffer, an
+   int_relative that does not increase, inverted bounds. Nothing is counted in
+   that case, so a measure that returns 0 leaves the stream as it was.
+
+   What a measure CANNOT refuse is a value out of its declared range, because
+   it is never given the value -- only the bounds that set the width. The
+   write is where that fails.
+   --------------------------------------------------------------------------- */
+
+int serialize_measure_bits( serialize_measure_stream_t * stream, int bits );
+int serialize_measure_bool( serialize_measure_stream_t * stream );
+int serialize_measure_align( serialize_measure_stream_t * stream );
+
+int serialize_measure_int( serialize_measure_stream_t * stream, serialize_int32_t min, serialize_int32_t max );
+int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int64_t min, serialize_int64_t max );
+
+int serialize_measure_uint8( serialize_measure_stream_t * stream );
+int serialize_measure_uint16( serialize_measure_stream_t * stream );
+int serialize_measure_uint32( serialize_measure_stream_t * stream );
+int serialize_measure_uint64( serialize_measure_stream_t * stream );
+
+int serialize_measure_int_relative( serialize_measure_stream_t * stream, serialize_int32_t previous, serialize_int32_t current );
+
+int serialize_measure_float( serialize_measure_stream_t * stream );
+int serialize_measure_double( serialize_measure_stream_t * stream );
+int serialize_measure_compressed_float( serialize_measure_stream_t * stream, float min, float max, float res );
+
+int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes );
+int serialize_measure_string( serialize_measure_stream_t * stream, const char * string, int buffer_size );
+int serialize_measure_wstring( serialize_measure_stream_t * stream, const wchar_t * string, int buffer_size );
+
+int serialize_measure_uint128( serialize_measure_stream_t * stream );
+int serialize_measure_int128( serialize_measure_stream_t * stream, serialize_int128_t min, serialize_int128_t max );
+
+int serialize_measure_fixed32( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max );
+int serialize_measure_fixed64( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+int serialize_measure_fixed128( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
 
 /* ---------------------------------------------------------------------------
    helpers
