@@ -51,11 +51,13 @@ build/roundtrip: test/roundtrip.c serialize.c serialize.h
 # Both C++ twins also check their own output against test/vectors.h -- the
 # constants test/golden.c pins -- and exit nonzero if it disagrees. That is
 # what keeps the golden from being a vector that agrees only with itself.
-diff: build/diff_c build/diff_cpp build/diff2_c build/diff2_cpp
+diff: build/diff_c build/diff_cpp build/diff2_c build/diff2_cpp build/diff3_c build/diff3_cpp
 	@./build/diff_c   > build/out_c.txt
 	@./build/diff_cpp > build/out_cpp.txt
 	@./build/diff2_c   > build/out2_c.txt
 	@./build/diff2_cpp > build/out2_cpp.txt
+	@./build/diff3_c   > build/out3_c.txt
+	@./build/diff3_cpp > build/out3_cpp.txt
 	@fail=0; \
 	if diff -q build/out_c.txt build/out_cpp.txt > /dev/null; then \
 		echo "core operations:  IDENTICAL"; \
@@ -71,13 +73,28 @@ diff: build/diff_c build/diff_cpp build/diff2_c build/diff2_cpp
 		echo "  C:   "; cat build/out2_c.txt; \
 		echo "  C++: "; cat build/out2_cpp.txt; fail=1; \
 	fi; \
+	if diff -q build/out3_c.txt build/out3_cpp.txt > /dev/null; then \
+		echo "compressed float: IDENTICAL  (values BETWEEN quanta, where the arithmetic shows)"; \
+	else \
+		echo "compressed float: MISMATCH"; \
+		echo "  C:   "; cat build/out3_c.txt; \
+		echo "  C++: "; cat build/out3_cpp.txt; fail=1; \
+	fi; \
 	exit $$fail
+
+build/diff3_c: test/diff3_c.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -I. test/diff3_c.c serialize.c -o $@ $(LDLIBS)
+
+build/diff3_cpp: test/diff3_cpp.cpp $(SERIALIZE_CPP)/serialize.h
+	@mkdir -p build
+	c++ -std=c++17 -O2 -I$(SERIALIZE_CPP) test/diff3_cpp.cpp -o $@
 
 build/diff2_c: test/diff2_c.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/diff2_c.c serialize.c -o $@ $(LDLIBS)
 
-build/diff2_cpp: test/diff2_cpp.cpp test/vectors.h
+build/diff2_cpp: test/diff2_cpp.cpp test/vectors.h $(SERIALIZE_CPP)/serialize.h
 	@mkdir -p build
 	c++ -std=c++17 -O2 -I$(SERIALIZE_CPP) test/diff2_cpp.cpp -o $@
 
@@ -85,7 +102,7 @@ build/diff_c: test/diff_c.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/diff_c.c serialize.c -o $@ $(LDLIBS)
 
-build/diff_cpp: test/diff_cpp.cpp test/vectors.h
+build/diff_cpp: test/diff_cpp.cpp test/vectors.h $(SERIALIZE_CPP)/serialize.h
 	@mkdir -p build
 	c++ -std=c++17 -O2 -I$(SERIALIZE_CPP) test/diff_cpp.cpp -o $@
 

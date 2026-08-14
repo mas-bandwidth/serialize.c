@@ -836,6 +836,7 @@ int serialize_write_compressed_float( serialize_write_stream_t * stream, float v
     serialize_uint32_t max_integer_value;
     int bits;
     float normalized;
+    float scaled;
     serialize_uint32_t integer_value;
 
     if ( stream->error )
@@ -856,7 +857,18 @@ int serialize_write_compressed_float( serialize_write_stream_t * stream, float v
         normalized = 1.0f;
     }
 
-    integer_value = (serialize_uint32_t) floor( (double) normalized * (double) max_integer_value + 0.5 );
+    /* The arithmetic is float32, and the two roundings are REQUIRED. Widening
+       to double here looks harmless and is not: it changes the wire. Over
+       [0,10] at resolution 0.01, value 0.005 quantizes to 1 in float32 and 0
+       in double, and 0.025 / 0.105 / 9.995 diverge the same way. Only values
+       that land exactly on a quantum agree, which is why a golden built from
+       such values stays green while the wire is wrong. The product is stored
+       through a local before the add so the intermediate rounds to float32 --
+       a compiler is otherwise free to contract the multiply and add into a
+       single FMA and round ONCE, which diverges again. Match serialize.h's
+       serialize_compressed_float_internal exactly. */
+    scaled = normalized * (float) max_integer_value;
+    integer_value = (serialize_uint32_t) floor( (double) ( scaled + 0.5f ) );
 
     return serialize_write_bits( stream, integer_value, bits );
 }
