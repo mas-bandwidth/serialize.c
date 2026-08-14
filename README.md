@@ -163,30 +163,42 @@ from least significant upward, which two lanes reproduce exactly.
 ## Speed
 
 The per-field operations — bits, bool, align, ranged `int` and `int64`, the
-fixed-width helpers, float, double, the stream lifecycle and the measure
-operations — are defined in `serialize.h` rather than `serialize.c`, so they
-inline into your code and their bit widths fold to literals the way the C++
-macros do. You get that by compiling normally: no LTO flag, no define.
+fixed-width helpers, float, double, the byte-block read, the stream lifecycle
+and the measure operations — are defined in `serialize.h` rather than
+`serialize.c`, so they inline into your code and their bit widths fold to
+literals the way the C++ macros do. You get that by compiling normally: no
+LTO flag, no define.
+
+The read half of that surface goes one step further: it **demands** inlining
+(`SERIALIZE_ALWAYS_INLINE`) instead of hinting at it. A read path is a chain
+of fallible operations, the compiler's static branch heuristics treat each
+success/failure split as even odds, and a few fields into a message every
+remaining callsite is judged cold and refused at a threshold these functions
+do not fit — the later read fields of a message quietly fall out of line while
+the write side stays put. Measured before/after on the demand: the stranded
+read rows went from 0.6–0.7x of the C++ library to 0.8–0.9x, and writes were
+already at parity or ahead without it, so the write spine does not make the
+demand.
 
 Measured against the C++ library at the same `-O2` on an Apple M2, `make
 bench-all`:
 
 | | C | C++ |
 |---|---|---|
-| int packet read | 233 M/s | 187 M/s |
-| int packet write | 114 M/s | 100 M/s |
-| mixed packet read | 242 M/s | 188 M/s |
-| stream read | 4664 MB/s | 5213 MB/s |
-| stream write | 2715 MB/s | 2441 MB/s |
-| bitpacker read | 2072 MB/s | 2601 MB/s |
-| bitpacker write | 2090 MB/s | 2070 MB/s |
+| int packet read | 243 M/s | 193 M/s |
+| int packet write | 119 M/s | 103 M/s |
+| mixed packet read | 250 M/s | 194 M/s |
+| stream read | 9263 MB/s | 5369 MB/s |
+| stream write | 2753 MB/s | 2543 MB/s |
+| bitpacker read | 2097 MB/s | 2706 MB/s |
+| bitpacker write | 2126 MB/s | 2140 MB/s |
 
 The raw bitpacker read is the one place this port is meaningfully behind, and
 it is behind on purpose. The C++ reader loads its 64-bit window
 unconditionally and **requires the caller's allocation to extend 8 bytes past
 the data**; this one reads no byte you did not give it, and pays one
 predictable branch per read for that. Removing the branch — measured — takes
-bitpacker read to 2497 MB/s and stream read past the C++ number.
+bitpacker read to 2497 MB/s.
 
 Caller error is `serialize_assert` and compiles out under `NDEBUG`, matching
 the C++ library operation for operation: bounds the wrong way round, a value

@@ -29,17 +29,19 @@
     number the compiler already knew.
 
     So the operations a packet path performs per FIELD are defined here, as
-    SERIALIZE_INLINE, and the ones performed per MESSAGE or not at all in a
-    tight loop stay in serialize.c. This is a size/speed trade made once, for
+    SERIALIZE_INLINE — the read spine as SERIALIZE_ALWAYS_INLINE, which says
+    why where it is defined — and the ones performed per MESSAGE or not at
+    all in a tight loop stay in serialize.c. This is a size/speed trade made once, for
     everybody, with no LTO flag and no define to opt into: measured on Apple
     silicon, moving them took ranged-int reads from 22.8 to 186 million packets
     a second, which is the C++ library's number.
 
     What is here is the whole per-field surface: bits, bool, align, ranged int
-    and int64, the fixed-width helpers, float, double, the stream lifecycle,
-    and the measure operations that mirror them. What is not is everything
-    whose cost is dominated by what it does rather than by the call: strings,
-    bytes, 128-bit, fixed point, compressed float, int_relative.
+    and int64, the fixed-width helpers, float, double, the byte-block read,
+    the stream lifecycle, and the measure operations that mirror them. What is
+    not is everything whose cost is dominated by what it does rather than by
+    the call: strings, the byte-block write, 128-bit, fixed point, compressed
+    float, int_relative.
 
     HISTORICAL AND MODERN C
 
@@ -165,6 +167,35 @@ typedef long long serialize_int64_t;
 #define SERIALIZE_INLINE static __inline
 #else
 #define SERIALIZE_INLINE static SERIALIZE_UNUSED
+#endif
+#endif
+
+/*
+    SERIALIZE_ALWAYS_INLINE — how the read spine is spelled.
+
+    A read path is a chain of fallible operations, the compiler's static
+    branch heuristics treat each success/failure split as roughly even odds,
+    and block frequency decays geometrically down the chain — so a few fields
+    into a message, every remaining callsite is judged cold and held to the
+    cold-callsite inline threshold, which these functions do not fit: the
+    bounds-safe window and the sticky-failure test price them a handful of
+    instructions above it. SERIALIZE_INLINE alone therefore strands the later
+    read fields of a message out of line, measured on Apple silicon (schema
+    bench, O3) as the affected read rows trailing the C++ library 0.57–0.71x
+    while every write row held parity or better. The read spine demands
+    inlining instead of hinting at it; the write spine measurably does not
+    need the demand, and does not make it.
+
+    C89 floor: where no always-inline spelling exists this falls back to
+    SERIALIZE_INLINE, and from there to plain static.
+*/
+#ifndef SERIALIZE_ALWAYS_INLINE
+#if defined(__GNUC__) || defined(__clang__)
+#define SERIALIZE_ALWAYS_INLINE SERIALIZE_INLINE __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#define SERIALIZE_ALWAYS_INLINE static __forceinline
+#else
+#define SERIALIZE_ALWAYS_INLINE SERIALIZE_INLINE
 #endif
 #endif
 
@@ -331,10 +362,10 @@ SERIALIZE_INLINE int serialize_measure_bytes_processed( const serialize_measure_
    error, so both are asserted rather than checked; a value wider than its
    declared bits is masked, so it damages its own field and no other. */
 SERIALIZE_INLINE int serialize_write_bits( serialize_write_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t value, int bits );
-SERIALIZE_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits );
+SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits );
 
 SERIALIZE_INLINE int serialize_write_bool( serialize_write_stream_t * stream, int value );
-SERIALIZE_INLINE int serialize_read_bool( serialize_read_stream_t * SERIALIZE_RESTRICT stream, int * SERIALIZE_RESTRICT value );
+SERIALIZE_ALWAYS_INLINE int serialize_read_bool( serialize_read_stream_t * SERIALIZE_RESTRICT stream, int * SERIALIZE_RESTRICT value );
 
 /*
     Pads with zero bits to the next byte boundary, writing nothing if already
@@ -342,7 +373,7 @@ SERIALIZE_INLINE int serialize_read_bool( serialize_read_stream_t * SERIALIZE_RE
     malformed streams are detectable rather than silently accepted.
 */
 SERIALIZE_INLINE int serialize_write_align( serialize_write_stream_t * stream );
-SERIALIZE_INLINE int serialize_read_align( serialize_read_stream_t * stream );
+SERIALIZE_ALWAYS_INLINE int serialize_read_align( serialize_read_stream_t * stream );
 
 SERIALIZE_INLINE int serialize_write_align_bits( const serialize_write_stream_t * stream );
 SERIALIZE_INLINE int serialize_read_align_bits( const serialize_read_stream_t * stream );
@@ -362,10 +393,10 @@ SERIALIZE_INLINE int serialize_read_align_bits( const serialize_read_stream_t * 
     because that is where untrusted data arrives.
 */
 SERIALIZE_INLINE int serialize_write_int( serialize_write_stream_t * stream, serialize_int32_t value, serialize_int32_t min, serialize_int32_t max );
-SERIALIZE_INLINE int serialize_read_int( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int32_t * SERIALIZE_RESTRICT value, serialize_int32_t min, serialize_int32_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_read_int( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int32_t * SERIALIZE_RESTRICT value, serialize_int32_t min, serialize_int32_t max );
 
 SERIALIZE_INLINE int serialize_write_int64( serialize_write_stream_t * stream, serialize_int64_t value, serialize_int64_t min, serialize_int64_t max );
-SERIALIZE_INLINE int serialize_read_int64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int64_t * SERIALIZE_RESTRICT value, serialize_int64_t min, serialize_int64_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_read_int64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int64_t * SERIALIZE_RESTRICT value, serialize_int64_t min, serialize_int64_t max );
 
 /*
     Fixed-width helpers. These are NOT ranged — serialize_write_uint64 always
@@ -373,13 +404,13 @@ SERIALIZE_INLINE int serialize_read_int64( serialize_read_stream_t * SERIALIZE_R
     require. The names are similar and the encodings are not.
 */
 SERIALIZE_INLINE int serialize_write_uint8( serialize_write_stream_t * stream, serialize_uint8_t value );
-SERIALIZE_INLINE int serialize_read_uint8( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT value );
+SERIALIZE_ALWAYS_INLINE int serialize_read_uint8( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT value );
 SERIALIZE_INLINE int serialize_write_uint16( serialize_write_stream_t * stream, serialize_uint16_t value );
-SERIALIZE_INLINE int serialize_read_uint16( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint16_t * SERIALIZE_RESTRICT value );
+SERIALIZE_ALWAYS_INLINE int serialize_read_uint16( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint16_t * SERIALIZE_RESTRICT value );
 SERIALIZE_INLINE int serialize_write_uint32( serialize_write_stream_t * stream, serialize_uint32_t value );
-SERIALIZE_INLINE int serialize_read_uint32( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value );
+SERIALIZE_ALWAYS_INLINE int serialize_read_uint32( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value );
 SERIALIZE_INLINE int serialize_write_uint64( serialize_write_stream_t * stream, serialize_uint64_t value );
-SERIALIZE_INLINE int serialize_read_uint64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint64_t * SERIALIZE_RESTRICT value );
+SERIALIZE_ALWAYS_INLINE int serialize_read_uint64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint64_t * SERIALIZE_RESTRICT value );
 
 /* An increasing sequence, encoded as a ladder of tier flags. A difference of
    1 — the common case for sequence numbers — costs a single bit. */
@@ -391,10 +422,10 @@ int serialize_read_int_relative( serialize_read_stream_t * stream, serialize_int
    --------------------------------------------------------------------------- */
 
 SERIALIZE_INLINE int serialize_write_float( serialize_write_stream_t * stream, float value );
-SERIALIZE_INLINE int serialize_read_float( serialize_read_stream_t * SERIALIZE_RESTRICT stream, float * SERIALIZE_RESTRICT value );
+SERIALIZE_ALWAYS_INLINE int serialize_read_float( serialize_read_stream_t * SERIALIZE_RESTRICT stream, float * SERIALIZE_RESTRICT value );
 
 SERIALIZE_INLINE int serialize_write_double( serialize_write_stream_t * stream, double value );
-SERIALIZE_INLINE int serialize_read_double( serialize_read_stream_t * SERIALIZE_RESTRICT stream, double * SERIALIZE_RESTRICT value );
+SERIALIZE_ALWAYS_INLINE int serialize_read_double( serialize_read_stream_t * SERIALIZE_RESTRICT stream, double * SERIALIZE_RESTRICT value );
 
 /* Lossy by construction: a round trip returns the nearest quantum. */
 int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res );
@@ -405,9 +436,15 @@ int serialize_read_compressed_float( serialize_read_stream_t * stream, float * v
    --------------------------------------------------------------------------- */
 
 /* Aligns first — that alignment is part of the format, not an optimization.
-   count is not transmitted; both sides must already agree on it. */
+   count is not transmitted; both sides must already agree on it.
+
+   The two halves live in different places. The write half runs the
+   head/body/tail packing machinery and stays in serialize.c; the read half
+   after its align is a single memcpy, and for the small blocks packet code
+   actually reads per field the call was the cost — so it lives in this
+   header, on the read spine with the rest of the per-field surface. */
 int serialize_write_bytes( serialize_write_stream_t * stream, const serialize_uint8_t * data, int bytes );
-int serialize_read_bytes( serialize_read_stream_t * stream, serialize_uint8_t * data, int bytes );
+SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT data, int bytes );
 
 /* A null-terminated string. buffer_size sets the width of the length field,
    so both sides must agree on it; the terminator is not transmitted. */
@@ -572,9 +609,10 @@ void serialize_copy_string( char * dest, const char * source, unsigned long dest
    the hot path
 
    Everything below is the implementation of the operations declared above as
-   SERIALIZE_INLINE: the ones a packet path performs per field, which have to
-   inline into the caller for the bit width to fold to a literal. See WHY THE
-   HOT PATH IS IN THIS HEADER at the top of this file.
+   SERIALIZE_INLINE and SERIALIZE_ALWAYS_INLINE: the ones a packet path
+   performs per field, which have to inline into the caller for the bit width
+   to fold to a literal. See WHY THE HOT PATH IS IN THIS HEADER at the top of
+   this file.
 
    Nothing below is also defined in serialize.c. A caller including only this
    header gets the whole per-field surface and links.
@@ -861,7 +899,7 @@ SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stre
     }
 }
 
-SERIALIZE_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits )
+SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits )
 {
     serialize_uint64_t window;
     int byte_index;
@@ -959,7 +997,7 @@ SERIALIZE_INLINE int serialize_write_bool( serialize_write_stream_t * stream, in
     return serialize_write_bits( stream, value ? 1u : 0u, 1 );
 }
 
-SERIALIZE_INLINE int serialize_read_bool( serialize_read_stream_t * SERIALIZE_RESTRICT stream, int * SERIALIZE_RESTRICT value )
+SERIALIZE_ALWAYS_INLINE int serialize_read_bool( serialize_read_stream_t * SERIALIZE_RESTRICT stream, int * SERIALIZE_RESTRICT value )
 {
     serialize_uint32_t raw = 0;
     if ( !serialize_read_bits( stream, &raw, 1 ) )
@@ -997,7 +1035,7 @@ SERIALIZE_INLINE int serialize_write_align( serialize_write_stream_t * stream )
     return !stream->error;
 }
 
-SERIALIZE_INLINE int serialize_read_align( serialize_read_stream_t * stream )
+SERIALIZE_ALWAYS_INLINE int serialize_read_align( serialize_read_stream_t * stream )
 {
     int remainder = stream->bits_read % 8;
     if ( remainder != 0 )
@@ -1052,7 +1090,7 @@ SERIALIZE_INLINE int serialize_write_int( serialize_write_stream_t * stream, ser
     return serialize_write_bits( stream, offset, bits );
 }
 
-SERIALIZE_INLINE int serialize_read_int( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int32_t * SERIALIZE_RESTRICT value, serialize_int32_t min, serialize_int32_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_read_int( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int32_t * SERIALIZE_RESTRICT value, serialize_int32_t min, serialize_int32_t max )
 {
     int bits;
     serialize_uint32_t offset = 0;
@@ -1118,7 +1156,7 @@ SERIALIZE_INLINE int serialize_write_int64( serialize_write_stream_t * stream, s
     return serialize_write_bits( stream, (serialize_uint32_t) ( offset >> 32 ), bits - 32 );
 }
 
-SERIALIZE_INLINE int serialize_read_int64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int64_t * SERIALIZE_RESTRICT value, serialize_int64_t min, serialize_int64_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_read_int64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int64_t * SERIALIZE_RESTRICT value, serialize_int64_t min, serialize_int64_t max )
 {
     int bits;
     serialize_uint64_t offset;
@@ -1179,7 +1217,7 @@ SERIALIZE_INLINE int serialize_write_uint8( serialize_write_stream_t * stream, s
     return serialize_write_bits( stream, (serialize_uint32_t) value, 8 );
 }
 
-SERIALIZE_INLINE int serialize_read_uint8( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT value )
+SERIALIZE_ALWAYS_INLINE int serialize_read_uint8( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT value )
 {
     serialize_uint32_t raw = 0;
     if ( !serialize_read_bits( stream, &raw, 8 ) )
@@ -1195,7 +1233,7 @@ SERIALIZE_INLINE int serialize_write_uint16( serialize_write_stream_t * stream, 
     return serialize_write_bits( stream, (serialize_uint32_t) value, 16 );
 }
 
-SERIALIZE_INLINE int serialize_read_uint16( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint16_t * SERIALIZE_RESTRICT value )
+SERIALIZE_ALWAYS_INLINE int serialize_read_uint16( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint16_t * SERIALIZE_RESTRICT value )
 {
     serialize_uint32_t raw = 0;
     if ( !serialize_read_bits( stream, &raw, 16 ) )
@@ -1211,7 +1249,7 @@ SERIALIZE_INLINE int serialize_write_uint32( serialize_write_stream_t * stream, 
     return serialize_write_bits( stream, value, 32 );
 }
 
-SERIALIZE_INLINE int serialize_read_uint32( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value )
+SERIALIZE_ALWAYS_INLINE int serialize_read_uint32( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value )
 {
     return serialize_read_bits( stream, value, 32 );
 }
@@ -1225,7 +1263,7 @@ SERIALIZE_INLINE int serialize_write_uint64( serialize_write_stream_t * stream, 
     return serialize_write_bits( stream, (serialize_uint32_t) ( value >> 32 ), 32 );
 }
 
-SERIALIZE_INLINE int serialize_read_uint64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint64_t * SERIALIZE_RESTRICT value )
+SERIALIZE_ALWAYS_INLINE int serialize_read_uint64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint64_t * SERIALIZE_RESTRICT value )
 {
     serialize_uint32_t lo = 0;
     serialize_uint32_t hi = 0;
@@ -1254,7 +1292,7 @@ SERIALIZE_INLINE int serialize_write_float( serialize_write_stream_t * stream, f
     return serialize_write_bits( stream, bits, 32 );
 }
 
-SERIALIZE_INLINE int serialize_read_float( serialize_read_stream_t * SERIALIZE_RESTRICT stream, float * SERIALIZE_RESTRICT value )
+SERIALIZE_ALWAYS_INLINE int serialize_read_float( serialize_read_stream_t * SERIALIZE_RESTRICT stream, float * SERIALIZE_RESTRICT value )
 {
     serialize_uint32_t bits = 0;
     if ( !serialize_read_bits( stream, &bits, 32 ) )
@@ -1272,7 +1310,7 @@ SERIALIZE_INLINE int serialize_write_double( serialize_write_stream_t * stream, 
     return serialize_write_uint64( stream, bits );
 }
 
-SERIALIZE_INLINE int serialize_read_double( serialize_read_stream_t * SERIALIZE_RESTRICT stream, double * SERIALIZE_RESTRICT value )
+SERIALIZE_ALWAYS_INLINE int serialize_read_double( serialize_read_stream_t * SERIALIZE_RESTRICT stream, double * SERIALIZE_RESTRICT value )
 {
     serialize_uint64_t bits = 0;
     if ( !serialize_read_uint64( stream, &bits ) )
@@ -1280,6 +1318,40 @@ SERIALIZE_INLINE int serialize_read_double( serialize_read_stream_t * SERIALIZE_
         return 0;
     }
     memcpy( value, &bits, 8 );
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+   bytes — the read half
+
+   The write half is in serialize.c with the other bulk machinery; this one is
+   here because after the align it is a single memcpy, and the blocks packet
+   code actually reads per field — a hash, a MAC, a session id — are small
+   enough that the call across the translation unit boundary was the cost.
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT data, int bytes )
+{
+    if ( bytes < 0 )
+    {
+        return serialize_read_fail( stream );
+    }
+
+    if ( !serialize_read_align( stream ) )
+    {
+        return 0;
+    }
+
+    if ( bytes > ( stream->bits_limit - stream->bits_read ) / 8 )
+    {
+        return serialize_read_fail( stream );
+    }
+
+    /* byte aligned by the align above, so this is a straight copy */
+    serialize_assert( ( stream->bits_read % 8 ) == 0 );
+    memcpy( data, stream->data + ( stream->bits_read >> 3 ), (size_t) bytes );
+    stream->bits_read += bytes * 8;
+
     return 1;
 }
 
