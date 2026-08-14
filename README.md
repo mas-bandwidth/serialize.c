@@ -169,36 +169,45 @@ and the measure operations — are defined in `serialize.h` rather than
 literals the way the C++ macros do. You get that by compiling normally: no
 LTO flag, no define.
 
-The read half of that surface goes one step further: it **demands** inlining
-(`SERIALIZE_ALWAYS_INLINE`) instead of hinting at it. A read path is a chain
-of fallible operations, the compiler's static branch heuristics treat each
-success/failure split as even odds, and a few fields into a message every
+Both halves of that surface go one step further: they **demand** inlining
+(`SERIALIZE_ALWAYS_INLINE`) instead of hinting at it. A serialize path is a
+chain of fallible operations, the compiler's static branch heuristics treat
+each success/failure split as even odds, and a few fields into a message every
 remaining callsite is judged cold and refused at a threshold these functions
-do not fit — the later read fields of a message quietly fall out of line while
-the write side stays put. Measured before/after on the demand: the stranded
-read rows went from 0.6–0.7x of the C++ library to 0.8–0.9x, and writes were
-already at parity or ahead without it, so the write spine does not make the
-demand.
+do not fit — the later fields of a message quietly fall out of line. The read
+spine took the demand first (the stranded read rows went from 0.6–0.7x of the
+C++ library to 0.8–0.9x); the write spine follows because every C write is
+fallible too — the capacity check below prices it a handful of instructions
+past the same cold threshold — measured as the stream write leg going from
+2755 to 3088 MB/s, with the stranded float, uint64 and mixed-field writes
+rescued the same way.
 
 Measured against the C++ library at the same `-O2` on an Apple M2, `make
-bench-all`:
+bench-all` (C++ column: the `serialize` checkout with its write-spine
+inlining, [serialize PR #45](https://github.com/mas-bandwidth/serialize/pull/45)):
 
 | | C | C++ |
 |---|---|---|
-| int packet read | 243 M/s | 193 M/s |
-| int packet write | 119 M/s | 103 M/s |
-| mixed packet read | 250 M/s | 194 M/s |
-| stream read | 9263 MB/s | 5369 MB/s |
-| stream write | 2753 MB/s | 2543 MB/s |
-| bitpacker read | 2097 MB/s | 2706 MB/s |
-| bitpacker write | 2126 MB/s | 2140 MB/s |
+| int packet read | 244 M/s | 188 M/s |
+| int packet write | 122 M/s | 174 M/s |
+| mixed packet read | 250 M/s | 193 M/s |
+| stream read | 9263 MB/s | 5273 MB/s |
+| stream write | 3088 MB/s | 3989 MB/s |
+| bitpacker read | 2099 MB/s | 2706 MB/s |
+| bitpacker write | 2120 MB/s | 2157 MB/s |
 
-The raw bitpacker read is the one place this port is meaningfully behind, and
-it is behind on purpose. The C++ reader loads its 64-bit window
-unconditionally and **requires the caller's allocation to extend 8 bytes past
-the data**; this one reads no byte you did not give it, and pays one
-predictable branch per read for that. Removing the branch — measured — takes
-bitpacker read to 2497 MB/s.
+The raw bitpacker read and the packet writes are the places this port is
+meaningfully behind, and both are behind on purpose. The C++ reader loads its
+64-bit window unconditionally and **requires the caller's allocation to extend
+8 bytes past the data**; this one reads no byte you did not give it, and pays
+one predictable branch per read for that. Removing the branch — measured —
+takes bitpacker read to 2497 MB/s. On the write side the capacity check makes
+every field a possible early exit, so the compiler must keep the stream's
+scratch word, bit counts and index correct in memory at each field boundary —
+the C++ writer, whose release build checks nothing, batches that bookkeeping
+across whole packets and keeps its scratch in registers. The check costs more
+in lost coalescing than in executed compares, and it is the same trade as the
+reader's: never touch memory you were not given, even at a price.
 
 Caller error is `serialize_assert` and compiles out under `NDEBUG`, matching
 the C++ library operation for operation: bounds the wrong way round, a value
