@@ -10,16 +10,17 @@
     WHAT IS IN THIS FILE AND WHAT IS NOT
 
     The per-field operations — bits, bool, align, ranged int and int64, the
-    fixed-width helpers, float, double, the stream lifecycle and the measure
-    operations that mirror them — are in serialize.h, as SERIALIZE_INLINE, so
-    they inline into the caller and their bit widths fold to literals. The
-    header says why.
+    fixed-width helpers, float, double, the byte-block read, the stream
+    lifecycle and the measure operations that mirror them — are in
+    serialize.h, so they inline into the caller and their bit widths fold to
+    literals; the read spine demands that inlining as SERIALIZE_ALWAYS_INLINE
+    where the write side merely asks. The header says why.
 
     What is here is everything whose cost is what it does rather than the call
-    to get there: strings, bytes, int_relative, compressed float, the 128-bit
-    lanes and the fixed point path built on them. Each is a consumer of the
-    header's write_bits / read_bits, and gets them inlined the same way a
-    caller does.
+    to get there: strings, the byte-block write, int_relative, compressed
+    float, the 128-bit lanes and the fixed point path built on them. Each is a
+    consumer of the header's write_bits / read_bits, and gets them inlined the
+    same way a caller does.
 */
 
 #include "serialize.h"
@@ -268,7 +269,9 @@ int serialize_read_compressed_float( serialize_read_stream_t * stream, float * v
    --------------------------------------------------------------------------- */
 
 /*
-    The bulk paths, mirroring the C++ WriteBytes and ReadBytes.
+    The bulk write path, mirroring the C++ WriteBytes. The read half lives in
+    serialize.h with the per-field surface — after its align it is one memcpy,
+    and the small blocks packet code reads per field made the call the cost.
 
     A block of bytes is byte aligned by construction — serialize_write_align
     runs first, and that alignment is part of the format — so most of it can be
@@ -342,31 +345,6 @@ int serialize_write_bytes( serialize_write_stream_t * stream, const serialize_ui
             return 0;
         }
     }
-
-    return 1;
-}
-
-int serialize_read_bytes( serialize_read_stream_t * stream, serialize_uint8_t * data, int bytes )
-{
-    if ( bytes < 0 )
-    {
-        return serialize_read_fail( stream );
-    }
-
-    if ( !serialize_read_align( stream ) )
-    {
-        return 0;
-    }
-
-    if ( bytes > ( stream->bits_limit - stream->bits_read ) / 8 )
-    {
-        return serialize_read_fail( stream );
-    }
-
-    /* byte aligned by the align above, so this is a straight copy */
-    serialize_assert( ( stream->bits_read % 8 ) == 0 );
-    memcpy( data, stream->data + ( stream->bits_read >> 3 ), (size_t) bytes );
-    stream->bits_read += bytes * 8;
 
     return 1;
 }
