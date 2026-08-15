@@ -96,6 +96,20 @@ jobs:
           make golden CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
           make wstest CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
 
+  # The untrusted read boundary, explored rather than enumerated. The fixed
+  # suites prove the paths someone thought of; sixty seconds of libFuzzer per
+  # push is the smoke test for the paths nobody did — run against the unfixed
+  # NaN clamp, this harness finds the serialize.c:232 float-to-unsigned trap in
+  # under three minutes. The extended run lives in nightly-fuzz.yml. fuzz.c is
+  # the port of the C++ library's fuzz.cpp; this job mirrors its fuzz job.
+  fuzz:
+    name: fuzz (libFuzzer)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fuzz
+        run: make fuzz
+
   # STANDARD.md here is a VERBATIM VENDORED COPY of the specification in
   # mas-bandwidth/serialize. A duplicated normative document is the same
   # failure as a duplicated constant, except it drifts silently.
