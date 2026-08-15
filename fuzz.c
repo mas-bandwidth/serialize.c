@@ -127,6 +127,100 @@ static serialize_int128_t fuzz_int128_q16( serialize_int64_t whole, serialize_ui
 }
 
 /* ---------------------------------------------------------------------------
+   string content oracles
+
+   Ruling #8 (2026-08-15): a SUCCESSFUL hostile string read must yield only
+   content a conforming writer could have produced -- well-formed UTF-8 with
+   no interior NUL, well-formed UTF-16 with no unpaired surrogate. These
+   re-validate what the reader accepted, independently of the reader's own
+   checks, so a validation bug that lets malformed content through trips the
+   harness rather than propagating.
+   --------------------------------------------------------------------------- */
+
+static int fuzz_utf8_valid( const char * s, size_t n )
+{
+    size_t i = 0;
+    while ( i < n )
+    {
+        unsigned int lead = (unsigned char) s[i];
+        if ( lead < 0x80 ) { i += 1; }
+        else if ( ( lead & 0xE0 ) == 0xC0 )
+        {
+            if ( lead < 0xC2 || i + 1 >= n ) return 0;
+            if ( ( (unsigned char) s[i+1] & 0xC0 ) != 0x80 ) return 0;
+            i += 2;
+        }
+        else if ( ( lead & 0xF0 ) == 0xE0 )
+        {
+            unsigned int b1, b2;
+            if ( i + 2 >= n ) return 0;
+            b1 = (unsigned char) s[i+1];
+            b2 = (unsigned char) s[i+2];
+            if ( ( b1 & 0xC0 ) != 0x80 || ( b2 & 0xC0 ) != 0x80 ) return 0;
+            if ( lead == 0xE0 && b1 < 0xA0 ) return 0;
+            if ( lead == 0xED && b1 >= 0xA0 ) return 0;
+            i += 3;
+        }
+        else if ( ( lead & 0xF8 ) == 0xF0 )
+        {
+            unsigned int b1, b2, b3;
+            if ( lead > 0xF4 || i + 3 >= n ) return 0;
+            b1 = (unsigned char) s[i+1];
+            b2 = (unsigned char) s[i+2];
+            b3 = (unsigned char) s[i+3];
+            if ( ( b1 & 0xC0 ) != 0x80 || ( b2 & 0xC0 ) != 0x80 || ( b3 & 0xC0 ) != 0x80 ) return 0;
+            if ( lead == 0xF0 && b1 < 0x90 ) return 0;
+            if ( lead == 0xF4 && b1 >= 0x90 ) return 0;
+            i += 4;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int fuzz_wstring_well_formed( const wchar_t * s )
+{
+    const int wide_wchar = sizeof( wchar_t ) >= 4 ? 1 : 0;
+    size_t n = wcslen( s );
+    size_t i = 0;
+    while ( i < n )
+    {
+        serialize_uint32_t c = (serialize_uint32_t) s[i];
+        if ( wide_wchar )
+        {
+            /* a 4-byte wchar_t holds CODE POINTS: pairs were recombined at
+               the read boundary, so no surrogate value may survive */
+            if ( c > 0x10FFFFu ) return 0;
+            if ( c >= 0xD800u && c <= 0xDFFFu ) return 0;
+            i += 1;
+        }
+        else
+        {
+            /* a 2-byte wchar_t holds CODE UNITS: pairs must be present and
+               correctly ordered */
+            if ( c >= 0xD800u && c <= 0xDBFFu )
+            {
+                serialize_uint32_t next = ( i + 1 < n ) ? (serialize_uint32_t) s[i+1] : 0;
+                if ( next < 0xDC00u || next > 0xDFFFu ) return 0;
+                i += 2;
+            }
+            else if ( c >= 0xDC00u && c <= 0xDFFFu )
+            {
+                return 0;
+            }
+            else
+            {
+                i += 1;
+            }
+        }
+    }
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
    pass 1: hostile read
 
    Arbitrary bytes go in; reads either fail cleanly, which ends the program
@@ -270,6 +364,13 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
             {
                 if ( !serialize_read_string( stream, string, (int) sizeof( string ) ) ) return;
                 fuzz_check( strlen( string ) < sizeof( string ) );
+                /* ruling #8: an ACCEPTED string is well-formed UTF-8. The
+                   interior-NUL refusal needs no oracle of its own here: had a
+                   NUL been accepted inside the counted payload, strlen would
+                   measure the truncated prefix, and this validates exactly
+                   the strlen-perceived string -- the wire length and the
+                   perceived length must agree for the accept to be sound. */
+                fuzz_check( fuzz_utf8_valid( string, strlen( string ) ) );
             }
             break;
 
@@ -277,6 +378,9 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
             {
                 if ( !serialize_read_wstring( stream, wstring, (int) ( sizeof( wstring ) / sizeof( wchar_t ) ) ) ) return;
                 fuzz_check( wcslen( wstring ) < sizeof( wstring ) / sizeof( wchar_t ) );
+                /* ruling #8: an ACCEPTED wstring is well-formed UTF-16 --
+                   no unpaired surrogate, nothing above U+10FFFF */
+                fuzz_check( fuzz_wstring_well_formed( wstring ) );
             }
             break;
 

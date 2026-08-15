@@ -359,15 +359,27 @@ The terminator is not transmitted; the reader appends it.
 Because `buffer_size` is an operand rather than a transmitted value, the same
 string serialized against different buffer sizes produces different bytes.
 
-**`string` payloads are well-formed UTF-8 by contract** *(adopted 2026-08-15
-from the schema enactment, writer-trusted per the doctrine above)*. The wire
-shape is unchanged; what the `string` spelling adds is a **contract**: the
-payload is well-formed UTF-8, the writer's obligation, never the reader's
-check. Writing malformed UTF-8 is a writer contract violation — debug-only
-asserts where the language supports them — there is no mandatory read-path
-validation and no release-path cost anywhere, and the conformance vectors
-carry only valid UTF-8. An application with genuinely arbitrary payloads uses
-`serialize_bytes`, which remains exactly that.
+**`string` payloads are well-formed UTF-8 with no interior NUL** *(the
+writer's contract adopted 2026-08-15 from the schema enactment, writer-trusted
+per the doctrine above; the reader's refusals adopted 2026-08-15, ruling #8)*.
+The wire shape is unchanged; what the `string` spelling adds is an obligation
+on each side:
+
+* **The writer's contract**: the payload is well-formed UTF-8. Writing
+  malformed UTF-8 is a writer contract violation — debug-only asserts where
+  the language supports them, no release-path cost on the write side.
+* **The reader's refusals**, binding in every build mode like every refusal
+  rule in this document: the read **must fail** on a payload that is not
+  well-formed UTF-8 — the full definition, refusing overlong encodings,
+  surrogate code points, values above U+10FFFF and truncated sequences, not
+  merely continuation-byte shape — and **must fail** on a NUL byte inside the
+  counted payload. A conforming writer derives the transmitted length from
+  the terminator, so an interior NUL is impossible from conformance;
+  accepting one would produce a string whose transmitted length and whose
+  terminator-derived length disagree.
+
+The conformance vectors carry only valid UTF-8. An application with genuinely
+arbitrary payloads uses `serialize_bytes`, which remains exactly that.
 
 ### wstring
 
@@ -385,8 +397,7 @@ counterpart, which aligns via `serialize_bytes`. An implementation that mirrors
 the narrow string path here will produce the wrong bytes.
 
 Wide characters are transmitted as 32 bits regardless of the local `wchar_t`
-width. A reader whose `wchar_t` cannot hold a received value **fails the read
-rather than truncating**.
+width.
 
 **Each 32-bit group carries one UTF-16 code unit — not one code point — and
 the payload is well-formed UTF-16 by contract** *(adopted 2026-08-15 from the
@@ -399,6 +410,23 @@ points into surrogate pairs on write, recombines on read — because the
 platform-compatibility claim this section used to make was false for astral
 text when each platform transmitted its own `wchar_t` units. Basic-plane text
 is unaffected on every platform.
+
+**The reader refuses malformed content** *(adopted 2026-08-15, ruling #8)*,
+binding in every build mode like every refusal rule in this document, on
+every `wchar_t` width — a platform whose `wchar_t` happens to hold a
+malformed sequence does not get to pass it through. The read **must fail**
+on:
+
+* an **unpaired or misordered surrogate**: a high surrogate not immediately
+  followed by a low, a low surrogate with no high before it, or a payload
+  that ends inside a pair;
+* a **zero unit inside the counted payload** — a conforming writer derives
+  the unit count from the terminator, so an interior NUL is impossible from
+  conformance, and accepting one would produce a string whose transmitted
+  length and whose terminator-derived length disagree;
+* a **group above `0xFFFF`**, which is not a UTF-16 code unit on any
+  platform. This subsumes the earlier, narrower rule that a reader whose
+  `wchar_t` cannot hold a received value fails rather than truncates.
 
 ## Worked Example
 

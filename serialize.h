@@ -506,9 +506,14 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERI
 /* A null-terminated string. buffer_size sets the width of the length field,
    so both sides must agree on it; the terminator is not transmitted.
 
-   The payload is well-formed UTF-8 BY CONTRACT (STANDARD.md): the writer's
-   obligation, debug-asserted only — never the reader's check, and never a
-   release-path cost. Genuinely arbitrary payloads belong in
+   The payload is well-formed UTF-8 with no interior NUL (STANDARD.md). On
+   the write side that is the writer's obligation, debug-asserted only. On
+   the READ side it is enforced in every build mode (ruling #8, adopted
+   2026-08-15): the reader refuses invalid UTF-8 — overlongs, surrogate code
+   points, anything above U+10FFFF, truncated sequences — and refuses a NUL
+   inside the counted payload, whose wire length and strlen-perceived length
+   would otherwise disagree. Refusal is the read-failure convention: return
+   0, stream error set, sticky. Genuinely arbitrary payloads belong in
    serialize_write_bytes, which remains exactly that. */
 int serialize_write_string( serialize_write_stream_t * stream, const char * string, int buffer_size );
 int serialize_read_string( serialize_read_stream_t * stream, char * string, int buffer_size );
@@ -592,13 +597,17 @@ int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_
 
    buffer_size counts WIDE CHARACTERS, not bytes. Each 32-bit group carries
    one UTF-16 CODE UNIT -- not one code point -- and the payload is
-   well-formed UTF-16 by contract (STANDARD.md, adopted 2026-08-15): surrogate
-   pairs are valid, an unpaired surrogate is a writer contract violation,
-   debug-asserted. 2-byte and 4-byte wchar_t platforms produce IDENTICAL
-   bytes: the 4-byte platform converts at the boundary, splitting an astral
-   code point into its surrogate pair on write and recombining on read. A
-   reader whose wchar_t cannot hold a received value fails the read rather
-   than truncating.
+   well-formed UTF-16 with no interior NUL (STANDARD.md, adopted 2026-08-15):
+   surrogate pairs are valid, an unpaired surrogate is a writer contract
+   violation, debug-asserted. On the READ side well-formedness is enforced in
+   every build mode (ruling #8, adopted 2026-08-15): the reader refuses an
+   unpaired or misordered surrogate, a zero unit inside the counted payload,
+   and any group above 0xFFFF -- which is not a UTF-16 code unit on ANY
+   platform, subsuming the old 2-byte-only "wchar_t cannot hold it" refusal.
+   Refusal is the read-failure convention: return 0, stream error set,
+   sticky. 2-byte and 4-byte wchar_t platforms produce IDENTICAL bytes: the
+   4-byte platform converts at the boundary, splitting an astral code point
+   into its surrogate pair on write and recombining on read.
 
    NO ALIGNMENT is performed anywhere in this operation -- the one place the
    wide path deliberately differs from the narrow one, which aligns via
