@@ -7,7 +7,13 @@
 
 CC      ?= cc
 CSTD    ?= c99
-CFLAGS  ?= -std=$(CSTD) -Wall -Wextra -pedantic -O2
+# -ffp-contract=off is load-bearing. STANDARD.md pins compressed_float to
+# float32 arithmetic with distinct roundings, and a compiler permitted to
+# contract a multiply and an add into one FMA rounds once instead -- the
+# writer's local guards the wire on standard-conforming compilers, but the
+# reader's reconstruction and any compiler that fuses across statements
+# (gcc's gnu modes default to -ffp-contract=fast) are only held by the flag.
+CFLAGS  ?= -std=$(CSTD) -Wall -Wextra -pedantic -O2 -ffp-contract=off
 LDLIBS  ?= -lm
 
 # The C++ library, for the differential test. Override if it lives elsewhere.

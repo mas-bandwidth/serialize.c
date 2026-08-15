@@ -59,13 +59,13 @@ jobs:
       # static so the emulated binaries need no s390x sysroot at runtime
       - name: Build and run the golden wire test
         run: |
-          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -static -I. \
+          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -ffp-contract=off -static -I. \
             test/golden.c serialize.c -o golden-s390x -lm
           qemu-s390x-static ./golden-s390x
-          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -static -I. \
+          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -ffp-contract=off -static -I. \
             test/wstest.c serialize.c -o wstest-s390x -lm
           qemu-s390x-static ./wstest-s390x
-          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -static -I. \
+          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -ffp-contract=off -static -I. \
             test/roundtrip.c serialize.c -o roundtrip-s390x -lm
           qemu-s390x-static ./roundtrip-s390x
 
@@ -92,9 +92,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Test
         run: |
-          make test CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-          make golden CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-          make wstest CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          make test CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          make golden CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          make wstest CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
 
   # STANDARD.md here is a VERBATIM VENDORED COPY of the specification in
   # mas-bandwidth/serialize. A duplicated normative document is the same
