@@ -19,7 +19,7 @@ LDLIBS  ?= -lm
 # The C++ library, for the differential test. Override if it lives elsewhere.
 SERIALIZE_CPP ?= ../serialize
 
-.PHONY: all test golden wstest test-all-standards diff bench bench-lto bench-cpp bench-all clean
+.PHONY: all test golden wstest test-all-standards diff fuzz bench bench-lto bench-cpp bench-all clean
 
 all: test
 
@@ -111,6 +111,26 @@ build/diff_c: test/diff_c.c serialize.c serialize.h
 build/diff_cpp: test/diff_cpp.cpp test/vectors.h $(SERIALIZE_CPP)/serialize.h
 	@mkdir -p build
 	c++ -std=c++17 -O2 -I$(SERIALIZE_CPP) test/diff_cpp.cpp -o $@
+
+# The libFuzzer harness, mirroring the C++ library's fuzz.cpp: a hostile read
+# pass over the untrusted boundary and a differential round trip pass. Clang
+# only, because libFuzzer is clang's; the link goes through clang++ because
+# the fuzzer runtime is C++ and needs its standard library. Asserts stay live
+# (no NDEBUG) and asan/ubsan ride along, so a hostile input that corrupts
+# memory, trips undefined behavior or lands in an assert all trap.
+FUZZ_CLANG   ?= clang
+FUZZ_CLANGXX ?= clang++
+FUZZ_CFLAGS  ?= -std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off \
+                -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+
+fuzz: build/fuzz
+	./build/fuzz -max_total_time=60 -timeout=10 -print_final_stats=1
+
+build/fuzz: fuzz.c serialize.c serialize.h
+	@mkdir -p build
+	$(FUZZ_CLANG) $(FUZZ_CFLAGS) -I. -c fuzz.c -o build/fuzz.o
+	$(FUZZ_CLANG) $(FUZZ_CFLAGS) -I. -c serialize.c -o build/fuzz_serialize.o
+	$(FUZZ_CLANGXX) -fsanitize=fuzzer,address,undefined build/fuzz.o build/fuzz_serialize.o -o $@ $(LDLIBS)
 
 # bench.c mirrors the C++ library's bench.cpp operation for operation, so the two
 # outputs can be read side by side. See the header comment in bench.c for the one
