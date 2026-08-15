@@ -374,6 +374,63 @@ int serialize_write_bytes( serialize_write_stream_t * stream, const serialize_ui
     return 1;
 }
 
+/*
+    The string payload is well-formed UTF-8 BY CONTRACT (STANDARD.md, adopted
+    2026-08-15): the writer's obligation, never the reader's check. Per the
+    writes-trusted doctrine the contract is a debug-only assert — an O(n)
+    check no release path should carry — so this validator is referenced only
+    from serialize_assert and compiles to nothing under NDEBUG. The read side
+    is untouched: there is no mandatory read-path validation.
+*/
+static SERIALIZE_UNUSED int serialize_string_is_valid_utf8( const char * string, int length )
+{
+    int i = 0;
+    while ( i < length )
+    {
+        unsigned int lead = (unsigned char) string[i];
+        if ( lead < 0x80 )
+        {
+            i += 1;
+        }
+        else if ( ( lead & 0xE0 ) == 0xC0 )
+        {
+            if ( lead < 0xC2 ) return 0;                                    /* overlong */
+            if ( i + 1 >= length ) return 0;
+            if ( ( (unsigned char) string[i+1] & 0xC0 ) != 0x80 ) return 0;
+            i += 2;
+        }
+        else if ( ( lead & 0xF0 ) == 0xE0 )
+        {
+            unsigned int b1, b2;
+            if ( i + 2 >= length ) return 0;
+            b1 = (unsigned char) string[i+1];
+            b2 = (unsigned char) string[i+2];
+            if ( ( b1 & 0xC0 ) != 0x80 || ( b2 & 0xC0 ) != 0x80 ) return 0;
+            if ( lead == 0xE0 && b1 < 0xA0 ) return 0;                      /* overlong */
+            if ( lead == 0xED && b1 >= 0xA0 ) return 0;                     /* surrogate code point */
+            i += 3;
+        }
+        else if ( ( lead & 0xF8 ) == 0xF0 )
+        {
+            unsigned int b1, b2, b3;
+            if ( lead > 0xF4 ) return 0;                                    /* above U+10FFFF */
+            if ( i + 3 >= length ) return 0;
+            b1 = (unsigned char) string[i+1];
+            b2 = (unsigned char) string[i+2];
+            b3 = (unsigned char) string[i+3];
+            if ( ( b1 & 0xC0 ) != 0x80 || ( b2 & 0xC0 ) != 0x80 || ( b3 & 0xC0 ) != 0x80 ) return 0;
+            if ( lead == 0xF0 && b1 < 0x90 ) return 0;                      /* overlong */
+            if ( lead == 0xF4 && b1 >= 0x90 ) return 0;                     /* above U+10FFFF */
+            i += 4;
+        }
+        else
+        {
+            return 0;                                                       /* continuation or invalid lead byte */
+        }
+    }
+    return 1;
+}
+
 int serialize_write_string( serialize_write_stream_t * stream, const char * string, int buffer_size )
 {
     int length;
@@ -388,6 +445,9 @@ int serialize_write_string( serialize_write_stream_t * stream, const char * stri
     {
         return serialize_write_fail( stream );
     }
+
+    /* the writer's contract, debug only. See serialize_string_is_valid_utf8. */
+    serialize_assert( serialize_string_is_valid_utf8( string, length ) );
 
     if ( !serialize_write_int( stream, length, 0, buffer_size - 1 ) )
     {
@@ -752,6 +812,11 @@ static int serialize_write_fixed_core( serialize_write_stream_t * stream, serial
 
     if ( bits == 0 )
     {
+        /* degenerate range: the value IS the range, nothing to send
+           (STANDARD.md: min == max costs zero bits, on every storage width).
+           The write-side check is a debug assert, per the writes-trusted
+           doctrine. */
+        serialize_assert( raw_value.lo == raw_min.lo && raw_value.hi == raw_min.hi );
         return 1;
     }
 
@@ -888,9 +953,74 @@ int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_
    wide strings
    --------------------------------------------------------------------------- */
 
+/*
+    Each 32-bit group carries one UTF-16 CODE UNIT, not one code point
+    (STANDARD.md, adopted 2026-08-15), so 2-byte and 4-byte wchar_t platforms
+    produce identical bytes: the 4-byte platform converts at the boundary,
+    splitting an astral code point into its surrogate pair on write and
+    recombining the pair on read. This counts the units a string transmits —
+    which on a 4-byte platform is more than its character count when astral
+    text is present, and is the count the length field carries.
+*/
+static int serialize_wstring_unit_count( const wchar_t * string )
+{
+    int units = 0;
+    int i;
+    for ( i = 0; string[i] != 0; i++ )
+    {
+        serialize_uint32_t c = (serialize_uint32_t) string[i];
+        units += ( c >= 0x10000u && c <= 0x10FFFFu ) ? 2 : 1;
+    }
+    return units;
+}
+
+/*
+    The wstring payload is well-formed UTF-16 BY CONTRACT (STANDARD.md): an
+    unpaired surrogate is a writer contract violation, debug-asserted per the
+    writes-trusted doctrine. On a 4-byte wchar_t platform the string is UTF-32,
+    where a surrogate CODE POINT or a value above U+10FFFF is the malformation;
+    on a 2-byte platform it is UTF-16, where the pairing itself is checked.
+    Referenced only from serialize_assert; compiles to nothing under NDEBUG.
+*/
+static SERIALIZE_UNUSED int serialize_wstring_is_valid_utf16( const wchar_t * string )
+{
+    /* through a local rather than tested inline, so MSVC's /W4 does not flag
+       the constant conditional */
+    const int wide_wchar = sizeof( wchar_t ) >= 4 ? 1 : 0;
+    int i = 0;
+    while ( string[i] != 0 )
+    {
+        serialize_uint32_t c = (serialize_uint32_t) string[i];
+        if ( wide_wchar )
+        {
+            if ( c >= 0xD800u && c <= 0xDFFFu ) return 0;   /* a surrogate is not a code point */
+            if ( c > 0x10FFFFu ) return 0;                  /* above Unicode */
+            i += 1;
+        }
+        else
+        {
+            if ( c >= 0xD800u && c <= 0xDBFFu )
+            {
+                serialize_uint32_t next = (serialize_uint32_t) string[i+1];
+                if ( next < 0xDC00u || next > 0xDFFFu ) return 0;   /* high surrogate without its pair */
+                i += 2;
+            }
+            else if ( c >= 0xDC00u && c <= 0xDFFFu )
+            {
+                return 0;                                   /* low surrogate with no high before it */
+            }
+            else
+            {
+                i += 1;
+            }
+        }
+    }
+    return 1;
+}
+
 int serialize_write_wstring( serialize_write_stream_t * stream, const wchar_t * string, int buffer_size )
 {
-    int length = 0;
+    int units;
     int i;
 
     if ( stream->error )
@@ -898,27 +1028,46 @@ int serialize_write_wstring( serialize_write_stream_t * stream, const wchar_t * 
         return 0;
     }
 
-    while ( string[length] != 0 )
-    {
-        length++;
-    }
+    /* the writer's contract, debug only. See serialize_wstring_is_valid_utf16. */
+    serialize_assert( serialize_wstring_is_valid_utf16( string ) );
 
-    if ( length >= buffer_size )
+    units = serialize_wstring_unit_count( string );
+
+    if ( units >= buffer_size )
     {
         return serialize_write_fail( stream );
     }
 
-    if ( !serialize_write_int( stream, length, 0, buffer_size - 1 ) )
+    if ( !serialize_write_int( stream, units, 0, buffer_size - 1 ) )
     {
         return 0;
     }
 
     /* NO align here -- deliberately unlike the narrow path. See the header. */
-    for ( i = 0; i < length; i++ )
+    for ( i = 0; string[i] != 0; i++ )
     {
-        if ( !serialize_write_bits( stream, (serialize_uint32_t) string[i], 32 ) )
+        serialize_uint32_t c = (serialize_uint32_t) string[i];
+        if ( c >= 0x10000u && c <= 0x10FFFFu )
         {
-            return 0;
+            /* an astral code point in a 4-byte wchar_t: split into its
+               surrogate pair at the boundary, so the bytes are the ones a
+               2-byte wchar_t platform produces */
+            serialize_uint32_t v = c - 0x10000u;
+            if ( !serialize_write_bits( stream, 0xD800u + ( v >> 10 ), 32 ) )
+            {
+                return 0;
+            }
+            if ( !serialize_write_bits( stream, 0xDC00u + ( v & 0x3FFu ), 32 ) )
+            {
+                return 0;
+            }
+        }
+        else
+        {
+            if ( !serialize_write_bits( stream, c, 32 ) )
+            {
+                return 0;
+            }
         }
     }
 
@@ -927,7 +1076,11 @@ int serialize_write_wstring( serialize_write_stream_t * stream, const wchar_t * 
 
 int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, int buffer_size )
 {
-    serialize_int32_t length = 0;
+    const int wide_wchar = sizeof( wchar_t ) >= 4 ? 1 : 0;      /* a local, so /W4 does not flag the constant conditional */
+    serialize_int32_t units = 0;
+    serialize_uint32_t pending = 0;     /* a high surrogate awaiting its pair */
+    int have_pending = 0;
+    int out = 0;
     int i;
 
     if ( stream->error )
@@ -935,31 +1088,67 @@ int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, 
         return 0;
     }
 
-    if ( !serialize_read_int( stream, &length, 0, buffer_size - 1 ) )
+    if ( !serialize_read_int( stream, &units, 0, buffer_size - 1 ) )
     {
         return 0;
     }
 
-    for ( i = 0; i < length; i++ )
+    for ( i = 0; i < units; i++ )
     {
         serialize_uint32_t c = 0;
         if ( !serialize_read_bits( stream, &c, 32 ) )
         {
             return 0;
         }
-        /*
-            Characters ride as 32 bits regardless of the local wchar_t width.
-            Where wchar_t cannot hold what arrived, FAIL rather than truncate:
-            a silently mangled code point is worse than a refused packet.
-        */
-        if ( sizeof( wchar_t ) < 4 && c > 0xFFFFu )
+
+        if ( wide_wchar )
         {
-            return serialize_read_fail( stream );
+            /* recombine at the boundary: a surrogate pair becomes one code
+               point, the inverse of the split the writer performed. The
+               payload is well-formed by the WRITER's contract, so an unpaired
+               surrogate is not a mandated refusal here: it is stored as it
+               arrived, which a 4-byte wchar_t can always hold. */
+            if ( have_pending )
+            {
+                if ( c >= 0xDC00u && c <= 0xDFFFu )
+                {
+                    string[out++] = (wchar_t) ( 0x10000u + ( ( pending - 0xD800u ) << 10 ) + ( c - 0xDC00u ) );
+                    have_pending = 0;
+                    continue;
+                }
+                string[out++] = (wchar_t) pending;
+                have_pending = 0;
+            }
+            if ( c >= 0xD800u && c <= 0xDBFFu )
+            {
+                pending = c;
+                have_pending = 1;
+                continue;
+            }
+            string[out++] = (wchar_t) c;
         }
-        string[i] = (wchar_t) c;
+        else
+        {
+            /*
+                A 2-byte wchar_t IS a UTF-16 code unit, so units are stored as
+                they arrive — surrogate pairs included. Where wchar_t cannot
+                hold what arrived, FAIL rather than truncate: a silently
+                mangled code point is worse than a refused packet.
+            */
+            if ( c > 0xFFFFu )
+            {
+                return serialize_read_fail( stream );
+            }
+            string[out++] = (wchar_t) c;
+        }
     }
 
-    string[length] = 0;
+    if ( have_pending )
+    {
+        string[out++] = (wchar_t) pending;
+    }
+
+    string[out] = 0;
 
     return 1;
 }
@@ -1067,23 +1256,20 @@ int serialize_measure_string( serialize_measure_stream_t * stream, const char * 
     return 1;
 }
 
-/* NO align, matching serialize_write_wstring. See the header. */
+/* NO align, matching serialize_write_wstring. See the header. Counts UTF-16
+   CODE UNITS through the same helper the writer uses, so an astral character
+   on a 4-byte wchar_t platform measures as the two groups it transmits. */
 int serialize_measure_wstring( serialize_measure_stream_t * stream, const wchar_t * string, int buffer_size )
 {
-    int length = 0;
+    int units = serialize_wstring_unit_count( string );
 
-    while ( string[length] != 0 )
-    {
-        length++;
-    }
-
-    if ( length >= buffer_size )
+    if ( units >= buffer_size )
     {
         return 0;
     }
 
     stream->bits_written += serialize_bits_required( 0, (serialize_uint32_t) ( buffer_size - 1 ) );
-    stream->bits_written += length * 32;
+    stream->bits_written += units * 32;
 
     return 1;
 }

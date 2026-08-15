@@ -175,6 +175,17 @@ int main( void )
         CHECK( serialize_write_fixed64( &w, 7LL * 65536, 48, 16, 7, 7 ) );      CHECK( serialize_measure_fixed64( &m, 48, 16, 7, 7 ) );
         CHECK( serialize_write_fixed128( &w, serialize_int128_from_int64( 9LL * 65536 ), 112, 16, 9, 9 ) );
         CHECK( serialize_measure_fixed128( &m, 112, 16, 9, 9 ) );
+        /* negative degenerate bounds: the raw min is negative, and the reader
+           must still recover it exactly from the range alone */
+        CHECK( serialize_write_fixed64( &w, -7LL * 65536, 48, 16, -7, -7 ) );   CHECK( serialize_measure_fixed64( &m, 48, 16, -7, -7 ) );
+        CHECK( serialize_write_fixed128( &w, serialize_int128_from_int64( -9LL * 65536 ), 112, 16, -9, -9 ) );
+        CHECK( serialize_measure_fixed128( &m, 112, 16, -9, -9 ) );
+        /* Q64.64 over min == max == 0: the fraction alone spans a full 64-bit
+           field, so a wide path that cost fraction_bits of zeros -- instead of
+           the zero bits STANDARD.md requires on every storage width -- would
+           show here as 64 bits */
+        CHECK( serialize_write_fixed128( &w, serialize_int128_from_int64( 0 ), 64, 64, 0, 0 ) );
+        CHECK( serialize_measure_fixed128( &m, 64, 64, 0, 0 ) );
         CHECK( !serialize_write_error( &w ) );
         CHECK( serialize_write_bits_processed( &w ) == 0 );
         CHECK( serialize_measure_bits_processed( &m ) == 0 );
@@ -188,6 +199,12 @@ int main( void )
         CHECK( serialize_read_fixed64( &r, &f64, 48, 16, 7, 7 ) );              CHECK( f64 == 7LL * 65536 );
         CHECK( serialize_read_fixed128( &r, &f128, 112, 16, 9, 9 ) );
         CHECK( serialize_int128_equal( f128, serialize_int128_from_int64( 9LL * 65536 ) ) );
+        CHECK( serialize_read_fixed64( &r, &f64, 48, 16, -7, -7 ) );            CHECK( f64 == -7LL * 65536 );
+        CHECK( serialize_read_fixed128( &r, &f128, 112, 16, -9, -9 ) );
+        CHECK( serialize_int128_equal( f128, serialize_int128_from_int64( -9LL * 65536 ) ) );
+        f128 = serialize_int128_from_int64( 1 );        /* a wrong value, so recovery is observable */
+        CHECK( serialize_read_fixed128( &r, &f128, 64, 64, 0, 0 ) );
+        CHECK( serialize_int128_equal( f128, serialize_int128_from_int64( 0 ) ) );
         CHECK( !serialize_read_error( &r ) );
         CHECK( serialize_read_bits_processed( &r ) == 0 );
     }
@@ -463,6 +480,74 @@ int main( void )
         serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_int128( &r, &i_out, lo, hi ) );
         CHECK( serialize_read_error( &r ) );
+    }
+
+    /* ---- wstring transmits UTF-16 CODE UNITS: an astral code point is a
+            surrogate pair on the wire, and 2- and 4-byte wchar_t platforms
+            produce IDENTICAL bytes -- the 4-byte platform converts at the
+            boundary (STANDARD.md, adopted 2026-08-15). The input is built per
+            the local width, the expected bytes are the code-unit stream
+            spelled out directly, and the two must agree everywhere. ---- */
+    {
+        const int wide_wchar = sizeof( wchar_t ) >= 4 ? 1 : 0;
+        serialize_uint8_t expected_buffer[64];
+        serialize_write_stream_t we;
+        serialize_measure_stream_t m;
+        serialize_uint32_t astral = 0x1F600u;           /* U+1F600, the pair 0xD83D 0xDE00 */
+        wchar_t ws_in[8];
+        wchar_t ws_out[8];
+        int n;
+
+        if ( wide_wchar )
+        {
+            ws_in[0] = (wchar_t) astral;                /* one character, two units */
+            ws_in[1] = (wchar_t) 0x0041;
+            ws_in[2] = 0;
+        }
+        else
+        {
+            ws_in[0] = (wchar_t) 0xD83Du;               /* already the pair: 2-byte wchar_t IS UTF-16 */
+            ws_in[1] = (wchar_t) 0xDE00u;
+            ws_in[2] = (wchar_t) 0x0041;
+            ws_in[3] = 0;
+        }
+
+        /* the wire, spelled out: three units in a [0,7] length field, then
+           each unit as a 32-bit group */
+        serialize_write_stream_init( &we, expected_buffer, sizeof( expected_buffer ) );
+        CHECK( serialize_write_int( &we, 3, 0, 7 ) );
+        CHECK( serialize_write_bits( &we, 0xD83Du, 32 ) );
+        CHECK( serialize_write_bits( &we, 0xDE00u, 32 ) );
+        CHECK( serialize_write_bits( &we, 0x0041u, 32 ) );
+        serialize_write_flush( &we );
+        CHECK( !serialize_write_error( &we ) );
+
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        CHECK( serialize_write_wstring( &w, ws_in, 8 ) );
+        serialize_write_flush( &w );
+        CHECK( !serialize_write_error( &w ) );
+        n = serialize_write_bytes_processed( &w );
+        CHECK( n == serialize_write_bytes_processed( &we ) );
+        CHECK( memcmp( buffer, expected_buffer, (size_t) n ) == 0 );
+
+        /* the measure counts the units transmitted, not the characters held */
+        serialize_measure_stream_init( &m );
+        CHECK( serialize_measure_wstring( &m, ws_in, 8 ) );
+        CHECK( serialize_measure_bits_processed( &m ) == serialize_write_bits_processed( &w ) );
+
+        /* and the read arrives back at the platform's own representation:
+           recombined on 4-byte wchar_t, the pair itself on 2-byte */
+        serialize_read_stream_init( &r, buffer, n );
+        CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
+        CHECK( !serialize_read_error( &r ) );
+        if ( wide_wchar )
+        {
+            CHECK( ws_out[0] == ws_in[0] && ws_out[1] == ws_in[1] && ws_out[2] == 0 );
+        }
+        else
+        {
+            CHECK( ws_out[0] == ws_in[0] && ws_out[1] == ws_in[1] && ws_out[2] == ws_in[2] && ws_out[3] == 0 );
+        }
     }
 
     /* ---- NaN through compressed float writes as min: the family behavior.
