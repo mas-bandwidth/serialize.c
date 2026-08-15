@@ -128,13 +128,23 @@ build/diff_cpp: test/diff_cpp.cpp test/vectors.h $(SERIALIZE_CPP)/serialize.h
 # the fuzzer runtime is C++ and needs its standard library. Asserts stay live
 # (no NDEBUG) and asan/ubsan ride along, so a hostile input that corrupts
 # memory, trips undefined behavior or lands in an assert all trap.
+#
+# test/fuzz-corpus holds pinned seeds sitting on the reader's accept/refuse
+# fence -- malformed UTF-8/UTF-16 string payloads and their valid neighbors
+# (ruling #8) -- so mutation starts in the neighborhood of the content
+# validation instead of hoping to construct a parseable string op from
+# nothing. Seeds are copied into build/corpus first: libFuzzer writes its
+# discoveries into the first directory it is given, and that churn belongs in
+# build/, not in the tree.
 FUZZ_CLANG   ?= clang
 FUZZ_CLANGXX ?= clang++
 FUZZ_CFLAGS  ?= -std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off \
                 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 
 fuzz: build/fuzz
-	./build/fuzz -max_total_time=60 -timeout=10 -print_final_stats=1
+	@mkdir -p build/corpus
+	@cp test/fuzz-corpus/* build/corpus/
+	./build/fuzz build/corpus -max_total_time=60 -timeout=10 -print_final_stats=1
 
 build/fuzz: fuzz.c serialize.c serialize.h
 	@mkdir -p build

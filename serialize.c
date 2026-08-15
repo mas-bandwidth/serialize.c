@@ -388,14 +388,20 @@ int serialize_write_bytes( serialize_write_stream_t * stream, const serialize_ui
 }
 
 /*
-    The string payload is well-formed UTF-8 BY CONTRACT (STANDARD.md, adopted
-    2026-08-15): the writer's obligation, never the reader's check. Per the
-    writes-trusted doctrine the contract is a debug-only assert — an O(n)
-    check no release path should carry — so this validator is referenced only
-    from serialize_assert and compiles to nothing under NDEBUG. The read side
-    is untouched: there is no mandatory read-path validation.
+    The string payload is well-formed UTF-8 (STANDARD.md, adopted 2026-08-15).
+    On the write side that is the writer's obligation, debug-asserted per the
+    writes-trusted doctrine. On the READ side it is a mandatory refusal in
+    every build mode (ruling #8, adopted 2026-08-15): the reader faces
+    untrusted bytes, and passing malformed UTF-8 through hands every consumer
+    downstream the job this boundary exists to do.
+
+    This is the FULL well-formedness definition, not just continuation-byte
+    shape: overlong encodings, surrogate code points and values above U+10FFFF
+    are all refused. The overlongs matter most — an overlong encoding is the
+    classic bypass of any filter that runs after the decode, which is exactly
+    where a reader that "just checks the bit pattern" leaves its callers.
 */
-static SERIALIZE_UNUSED int serialize_string_is_valid_utf8( const char * string, int length )
+static int serialize_string_is_valid_utf8( const char * string, int length )
 {
     int i = 0;
     while ( i < length )
@@ -491,9 +497,37 @@ int serialize_read_string( serialize_read_stream_t * stream, char * string, int 
 
     if ( length > 0 )
     {
+        int i;
+
         if ( !serialize_read_bytes( stream, (serialize_uint8_t *) string, length ) )
         {
             return 0;
+        }
+
+        /*
+            Content refusals (ruling #8, adopted 2026-08-15). The reader
+            REFUSES what a conforming writer cannot produce, in every build
+            mode — the write side trusts its caller, the read side trusts
+            nobody.
+
+            The interior NUL first, and separately from UTF-8, because NUL is
+            well-formed UTF-8 (U+0000) and the validator below cannot see it.
+            A conforming writer derives length from strlen, so a NUL inside
+            the counted payload is impossible from conformance — and accepting
+            one mints a string whose wire length and whose strlen-perceived
+            length disagree, the two-lengths smuggling primitive.
+        */
+        for ( i = 0; i < length; i++ )
+        {
+            if ( string[i] == '\0' )
+            {
+                return serialize_read_fail( stream );
+            }
+        }
+
+        if ( !serialize_string_is_valid_utf8( string, length ) )
+        {
+            return serialize_read_fail( stream );
         }
     }
     else
@@ -979,6 +1013,9 @@ static int serialize_wstring_unit_count( const wchar_t * string )
     where a surrogate CODE POINT or a value above U+10FFFF is the malformation;
     on a 2-byte platform it is UTF-16, where the pairing itself is checked.
     Referenced only from serialize_assert; compiles to nothing under NDEBUG.
+    This validates the WRITER's wchar_t input. The wire itself is no longer
+    trusted: serialize_read_wstring refuses malformed unit sequences inline,
+    in every build mode (ruling #8, adopted 2026-08-15).
 */
 static SERIALIZE_UNUSED int serialize_wstring_is_valid_utf16( const wchar_t * string )
 {
@@ -1093,51 +1130,73 @@ int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, 
             return 0;
         }
 
-        if ( wide_wchar )
+        /*
+            Content refusals (ruling #8, adopted 2026-08-15). The payload is
+            well-formed UTF-16 with no interior NUL, and the reader REFUSES
+            anything else in every build mode, on BOTH wchar_t widths — the
+            4-byte platform no longer passes malformed sequences through just
+            because a wide wchar_t happens to hold them.
+
+            A zero unit first: the writer derives the unit count from the
+            terminator, so a NUL inside the counted payload is impossible from
+            conformance — and accepting one mints a string whose wire length
+            and whose wcslen-perceived length disagree, the two-lengths
+            smuggling primitive. Then the unit range: each 32-bit group
+            carries one UTF-16 CODE UNIT, so a group above 0xFFFF is
+            malformed on every platform — this subsumes the old 2-byte-only
+            "wchar_t cannot hold it" refusal. The surrogate pairing is
+            checked below.
+        */
+        if ( c == 0 )
         {
-            /* recombine at the boundary: a surrogate pair becomes one code
-               point, the inverse of the split the writer performed. The
-               payload is well-formed by the WRITER's contract, so an unpaired
-               surrogate is not a mandated refusal here: it is stored as it
-               arrived, which a 4-byte wchar_t can always hold. */
-            if ( have_pending )
+            return serialize_read_fail( stream );
+        }
+        if ( c > 0xFFFFu )
+        {
+            return serialize_read_fail( stream );
+        }
+
+        if ( have_pending )
+        {
+            if ( c < 0xDC00u || c > 0xDFFFu )
             {
-                if ( c >= 0xDC00u && c <= 0xDFFFu )
-                {
-                    string[out++] = (wchar_t) ( 0x10000u + ( ( pending - 0xD800u ) << 10 ) + ( c - 0xDC00u ) );
-                    have_pending = 0;
-                    continue;
-                }
+                return serialize_read_fail( stream );   /* high surrogate without its low */
+            }
+            if ( wide_wchar )
+            {
+                /* recombine at the boundary: the pair becomes one code
+                   point, the inverse of the split the writer performed */
+                string[out++] = (wchar_t) ( 0x10000u + ( ( pending - 0xD800u ) << 10 ) + ( c - 0xDC00u ) );
+            }
+            else
+            {
+                /* a 2-byte wchar_t IS a UTF-16 code unit: the pair is
+                   stored as the two units it arrived as */
                 string[out++] = (wchar_t) pending;
-                have_pending = 0;
+                string[out++] = (wchar_t) c;
             }
-            if ( c >= 0xD800u && c <= 0xDBFFu )
-            {
-                pending = c;
-                have_pending = 1;
-                continue;
-            }
-            string[out++] = (wchar_t) c;
+            have_pending = 0;
+            continue;
         }
-        else
+
+        if ( c >= 0xD800u && c <= 0xDBFFu )
         {
-            /*
-                A 2-byte wchar_t IS a UTF-16 code unit, so units are stored as
-                they arrive — surrogate pairs included. Where wchar_t cannot
-                hold what arrived, FAIL rather than truncate: a silently
-                mangled code point is worse than a refused packet.
-            */
-            if ( c > 0xFFFFu )
-            {
-                return serialize_read_fail( stream );
-            }
-            string[out++] = (wchar_t) c;
+            pending = c;
+            have_pending = 1;
+            continue;
         }
+
+        if ( c >= 0xDC00u && c <= 0xDFFFu )
+        {
+            return serialize_read_fail( stream );       /* low surrogate with no high before it */
+        }
+
+        string[out++] = (wchar_t) c;
     }
 
     if ( have_pending )
     {
-        string[out++] = (wchar_t) pending;
+        return serialize_read_fail( stream );           /* the payload ends inside a pair */
     }
 
     string[out] = 0;

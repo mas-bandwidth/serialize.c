@@ -571,6 +571,234 @@ int main( void )
         }
     }
 
+    /* ---- the read path refuses malformed string CONTENT (ruling #8,
+            adopted 2026-08-15): (a) invalid UTF-8, (b) an interior NUL in a
+            narrow string, (c) unpaired/invalid surrogates in a wide string,
+            (d) an interior zero unit in a wide string.
+
+            Every stream here is DOCTORED through the primitives -- write_int
+            for the length, then write_bytes/write_bits for the payload --
+            because write_string/write_wstring debug-assert these contracts
+            away and could never produce the bytes. The wire shape is exactly
+            what the reader parses; only the content is hostile. And every
+            refusal class is fenced by an accepted neighbor as close to the
+            boundary as the format allows: a vector that cannot fail is not
+            evidence, and a refusal test that over-refuses is a different
+            bug. ---- */
+    {
+        char str_out[64];
+        wchar_t ws_out[8];
+        int k;
+
+        /* (a) invalid UTF-8, one payload per malformation class. All are
+           refused by the well-formedness definition, not by byte shape:
+           the overlongs are correctly-shaped lead+continuation sequences
+           and are the classic filter bypass. */
+        {
+            static const struct { unsigned char byte[4]; int length; } bad_utf8[] =
+            {
+                { { 0xC0, 0xAF, 0x00, 0x00 }, 2 },  /* overlong '/': the classic bypass */
+                { { 0xE0, 0x80, 0x80, 0x00 }, 3 },  /* overlong NUL, 3-byte form */
+                { { 0xF0, 0x80, 0x80, 0x80 }, 4 },  /* overlong, 4-byte form */
+                { { 0xED, 0xA0, 0x80, 0x00 }, 3 },  /* U+D800: surrogate as UTF-8 */
+                { { 0xED, 0xBF, 0xBF, 0x00 }, 3 },  /* U+DFFF: surrogate as UTF-8 */
+                { { 0xF4, 0x90, 0x80, 0x80 }, 4 },  /* above U+10FFFF */
+                { { 0xF5, 0x80, 0x80, 0x80 }, 4 },  /* lead byte can never appear */
+                { { 0xE2, 0x82, 0x41, 0x00 }, 3 },  /* continuation replaced by ASCII */
+                { { 0x41, 0xC3, 0x00, 0x00 }, 2 },  /* sequence truncated by the length */
+                { { 0x80, 0x41, 0x00, 0x00 }, 2 }   /* bare continuation byte */
+            };
+            for ( k = 0; k < (int) ( sizeof( bad_utf8 ) / sizeof( bad_utf8[0] ) ); k++ )
+            {
+                serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+                CHECK( serialize_write_int( &w, bad_utf8[k].length, 0, 63 ) );
+                CHECK( serialize_write_bytes( &w, bad_utf8[k].byte, bad_utf8[k].length ) );
+                serialize_write_flush( &w );
+                serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+                CHECK( !serialize_read_string( &r, str_out, 64 ) );
+                CHECK( serialize_read_error( &r ) );
+            }
+        }
+
+        /* the accepted fence for (a): the boundary code points on each side
+           of every refusal above -- U+D7FF/U+E000 around the surrogate
+           block, U+10FFFF itself, the shortest legal 2- and 4-byte forms --
+           doctored through the same primitives, must round trip intact */
+        {
+            static const unsigned char good_utf8[] =
+            {
+                0x41,                       /* 'A' */
+                0xC2, 0x80,                 /* U+0080: shortest legal 2-byte */
+                0xED, 0x9F, 0xBF,           /* U+D7FF: last before the surrogate block */
+                0xEE, 0x80, 0x80,           /* U+E000: first after it */
+                0xF0, 0x90, 0x80, 0x80,     /* U+10000: shortest legal 4-byte */
+                0xF4, 0x8F, 0xBF, 0xBF      /* U+10FFFF: the ceiling itself */
+            };
+            const int good_length = (int) sizeof( good_utf8 );
+            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+            CHECK( serialize_write_int( &w, good_length, 0, 63 ) );
+            CHECK( serialize_write_bytes( &w, good_utf8, good_length ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            CHECK( serialize_read_string( &r, str_out, 64 ) );
+            CHECK( !serialize_read_error( &r ) );
+            CHECK( (int) strlen( str_out ) == good_length );
+            CHECK( memcmp( str_out, good_utf8, (size_t) good_length ) == 0 );
+        }
+
+        /* (b) an interior NUL in a narrow string. Every byte is valid UTF-8
+           -- NUL is U+0000 -- so this is the case the UTF-8 validator CANNOT
+           catch, which is why it is a separate refusal: the wire says 3
+           bytes, strlen would say 1, and that disagreement is the smuggling
+           primitive. The fence is the same bytes with the NUL replaced. */
+        {
+            static const unsigned char nul_inside[3] = { 0x41, 0x00, 0x42 };    /* "A\0B" */
+            static const unsigned char nul_fence[3]  = { 0x41, 0x20, 0x42 };    /* "A B"  */
+
+            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+            CHECK( serialize_write_int( &w, 3, 0, 63 ) );
+            CHECK( serialize_write_bytes( &w, nul_inside, 3 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            CHECK( !serialize_read_string( &r, str_out, 64 ) );
+            CHECK( serialize_read_error( &r ) );
+
+            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+            CHECK( serialize_write_int( &w, 3, 0, 63 ) );
+            CHECK( serialize_write_bytes( &w, nul_fence, 3 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            CHECK( serialize_read_string( &r, str_out, 64 ) );
+            CHECK( strcmp( str_out, "A B" ) == 0 );
+        }
+
+        /* (c) unpaired/invalid surrogates in a wide string, every ordering:
+           high without its low, low with no high before it, a payload that
+           ends inside a pair, and a group that is not a UTF-16 code unit at
+           all -- refused on BOTH wchar_t widths now, not just where wchar_t
+           cannot hold the value. */
+        {
+            static const struct { serialize_uint32_t unit[3]; int units; } bad_utf16[] =
+            {
+                { { 0xD83Du, 0x0041u, 0 }, 2 },     /* high surrogate, then a non-low */
+                { { 0xDE00u, 0x0041u, 0 }, 2 },     /* low surrogate with no high */
+                { { 0x0041u, 0xD83Du, 0 }, 2 },     /* payload ends inside a pair */
+                { { 0xD83Du, 0xD83Du, 0 }, 2 },     /* high followed by another high */
+                { { 0x110000u, 0, 0 },     1 },     /* not a UTF-16 code unit */
+                { { 0xFFFFFFFFu, 0, 0 },   1 }      /* not a UTF-16 code unit */
+            };
+            int j;
+            for ( k = 0; k < (int) ( sizeof( bad_utf16 ) / sizeof( bad_utf16[0] ) ); k++ )
+            {
+                serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+                CHECK( serialize_write_int( &w, bad_utf16[k].units, 0, 7 ) );
+                for ( j = 0; j < bad_utf16[k].units; j++ )
+                {
+                    CHECK( serialize_write_bits( &w, bad_utf16[k].unit[j], 32 ) );
+                }
+                serialize_write_flush( &w );
+                serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+                CHECK( !serialize_read_wstring( &r, ws_out, 8 ) );
+                CHECK( serialize_read_error( &r ) );
+            }
+        }
+
+        /* the accepted fence for (c): the boundary units around every
+           refusal -- 0xD7FF and 0xE000 hugging the surrogate block, 0xFFFF
+           the last code unit, and a correctly ordered pair -- doctored
+           through the same primitives, must be accepted and arrive as the
+           platform's own representation */
+        {
+            const int wide_wchar = sizeof( wchar_t ) >= 4 ? 1 : 0;
+            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+            CHECK( serialize_write_int( &w, 5, 0, 7 ) );
+            CHECK( serialize_write_bits( &w, 0xD7FFu, 32 ) );
+            CHECK( serialize_write_bits( &w, 0xE000u, 32 ) );
+            CHECK( serialize_write_bits( &w, 0xFFFFu, 32 ) );
+            CHECK( serialize_write_bits( &w, 0xD83Du, 32 ) );
+            CHECK( serialize_write_bits( &w, 0xDE00u, 32 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
+            CHECK( !serialize_read_error( &r ) );
+            CHECK( ws_out[0] == (wchar_t) 0xD7FF && ws_out[1] == (wchar_t) 0xE000 && ws_out[2] == (wchar_t) 0xFFFF );
+            if ( wide_wchar )
+            {
+                CHECK( (serialize_uint32_t) ws_out[3] == 0x1F600u && ws_out[4] == 0 );
+            }
+            else
+            {
+                CHECK( ws_out[3] == (wchar_t) 0xD83Du && ws_out[4] == (wchar_t) 0xDE00u && ws_out[5] == 0 );
+            }
+        }
+
+        /* (d) an interior zero unit in a wide string: the wire says 3
+           units, wcslen would say 1 -- the same smuggling primitive as (b),
+           in units instead of bytes. The fence is the same three units with
+           the zero replaced. */
+        {
+            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+            CHECK( serialize_write_int( &w, 3, 0, 7 ) );
+            CHECK( serialize_write_bits( &w, 0x0041u, 32 ) );
+            CHECK( serialize_write_bits( &w, 0x0000u, 32 ) );
+            CHECK( serialize_write_bits( &w, 0x0042u, 32 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            CHECK( !serialize_read_wstring( &r, ws_out, 8 ) );
+            CHECK( serialize_read_error( &r ) );
+
+            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+            CHECK( serialize_write_int( &w, 3, 0, 7 ) );
+            CHECK( serialize_write_bits( &w, 0x0041u, 32 ) );
+            CHECK( serialize_write_bits( &w, 0x0020u, 32 ) );
+            CHECK( serialize_write_bits( &w, 0x0042u, 32 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
+            CHECK( !serialize_read_error( &r ) );
+            CHECK( ws_out[0] == (wchar_t) 0x41 && ws_out[1] == (wchar_t) 0x20 && ws_out[2] == (wchar_t) 0x42 && ws_out[3] == 0 );
+        }
+
+        /* refusal is the standard read-failure convention: sticky */
+        {
+            serialize_int32_t v = 0;
+            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+            CHECK( serialize_write_int( &w, 1, 0, 63 ) );
+            { static const unsigned char bad[1] = { 0x80 };
+              CHECK( serialize_write_bytes( &w, bad, 1 ) ); }
+            CHECK( serialize_write_int( &w, 7, 0, 100 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            CHECK( !serialize_read_string( &r, str_out, 64 ) );
+            CHECK( !serialize_read_int( &r, &v, 0, 100 ) );         /* the in-range int behind it is unreachable */
+            CHECK( serialize_read_error( &r ) );
+        }
+    }
+
+    /* ---- valid string round trips through the PUBLIC writer are unchanged
+            by the refusals: multi-byte UTF-8 through write_string, an astral
+            pair through write_wstring (the latter also proven above and in
+            the code-unit block) ---- */
+    {
+        static const char cafe[] = { (char) 0x63, (char) 0x61, (char) 0x66,
+                                     (char) 0xC3, (char) 0xA9,                                  /* "café" */
+                                     (char) 0x20,
+                                     (char) 0xE2, (char) 0x82, (char) 0xAC,                     /* the euro sign */
+                                     (char) 0x20,
+                                     (char) 0xF0, (char) 0x9F, (char) 0x98, (char) 0x80,        /* U+1F600 */
+                                     (char) 0x00 };
+        char str_out[64];
+
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        CHECK( serialize_write_string( &w, cafe, 64 ) );
+        serialize_write_flush( &w );
+        CHECK( !serialize_write_error( &w ) );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( serialize_read_string( &r, str_out, 64 ) );
+        CHECK( !serialize_read_error( &r ) );
+        CHECK( strcmp( str_out, cafe ) == 0 );
+    }
+
     /* ---- NaN through compressed float, in a RELEASE build only.
 
        A non-finite value is non-conforming input (serialize fork #6, the
