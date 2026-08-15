@@ -595,7 +595,11 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                 int j;
                 for ( j = 0; j < length; j++ )
                 {
-                    const serialize_uint8_t c = fuzz_pool_byte( pool );
+                    /* masked to ASCII: the string payload is well-formed UTF-8
+                       by the writer's contract, debug-asserted, and asserts
+                       are live in this harness. Arbitrary bytes still reach
+                       the READ path through the hostile pass. */
+                    const serialize_uint8_t c = fuzz_pool_byte( pool ) & 0x7F;
                     expected[j] = ( c != 0 ) ? (char) c : ' ';
                 }
                 expected[length] = '\0';
@@ -617,7 +621,14 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                 int j;
                 for ( j = 0; j < length; j++ )
                 {
-                    expected[j] = (wchar_t) ( fuzz_pool_uint32( pool ) % 0xFFFF + 1 );      /* [1,0xFFFF]: valid for 2 and 4 byte wchar_t */
+                    serialize_uint32_t unit = fuzz_pool_uint32( pool ) % 0xFFFF + 1;        /* [1,0xFFFF]: valid for 2 and 4 byte wchar_t */
+                    if ( unit >= 0xD800 && unit <= 0xDFFF )
+                    {
+                        unit -= 0x0800;     /* out of the surrogate block: the payload is well-formed
+                                               UTF-16 by the writer's contract, debug-asserted, and
+                                               asserts are live in this harness */
+                    }
+                    expected[j] = (wchar_t) unit;
                 }
                 expected[length] = L'\0';
                 if ( mode == FUZZ_WRITE )        { fuzz_check( serialize_write_wstring( w, expected, (int) ( sizeof( expected ) / sizeof( wchar_t ) ) ) ); }

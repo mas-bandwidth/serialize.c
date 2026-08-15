@@ -426,7 +426,12 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_uint64( serialize_write_stream_t * s
 SERIALIZE_ALWAYS_INLINE int serialize_read_uint64( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint64_t * SERIALIZE_RESTRICT value );
 
 /* An increasing sequence, encoded as a ladder of tier flags. A difference of
-   1 — the common case for sequence numbers — costs a single bit. */
+   1 — the common case for sequence numbers — costs a single bit.
+
+   STRICTLY increasing, and no wrap semantics exist (STANDARD.md, the ruling
+   verbatim: "no wrapping sequence numbers"): a caller with a wrapping counter
+   unwraps it before serializing, and the reader fails a current that does not
+   exceed previous. */
 int serialize_write_int_relative( serialize_write_stream_t * stream, serialize_int32_t previous, serialize_int32_t current );
 int serialize_read_int_relative( serialize_read_stream_t * stream, serialize_int32_t previous, serialize_int32_t * current );
 
@@ -460,7 +465,12 @@ int serialize_write_bytes( serialize_write_stream_t * stream, const serialize_ui
 SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT data, int bytes );
 
 /* A null-terminated string. buffer_size sets the width of the length field,
-   so both sides must agree on it; the terminator is not transmitted. */
+   so both sides must agree on it; the terminator is not transmitted.
+
+   The payload is well-formed UTF-8 BY CONTRACT (STANDARD.md): the writer's
+   obligation, debug-asserted only — never the reader's check, and never a
+   release-path cost. Genuinely arbitrary payloads belong in
+   serialize_write_bytes, which remains exactly that. */
 int serialize_write_string( serialize_write_stream_t * stream, const char * string, int buffer_size );
 int serialize_read_string( serialize_read_stream_t * stream, char * string, int buffer_size );
 
@@ -521,6 +531,10 @@ int serialize_read_int128( serialize_read_stream_t * stream, serialize_int128_t 
    bit-for-bit identical on every platform. That is what makes it usable for
    lockstep simulation and deterministic replay.
 
+   A degenerate range where min == max is legal and costs ZERO BITS on every
+   storage width (STANDARD.md): nothing is written, and the reader recovers
+   the value from the range alone -- the raw value min << fraction_bits.
+
    Three widths because C has no overloading; pick the one matching your
    storage. integer_bits + fraction_bits must equal the storage width.
    --------------------------------------------------------------------------- */
@@ -537,9 +551,15 @@ int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_
 /* ---------------------------------------------------------------------------
    wide strings
 
-   buffer_size counts WIDE CHARACTERS, not bytes. Each character rides as a
-   32-bit group regardless of the local wchar_t width, so streams are
-   compatible between 2-byte and 4-byte wchar_t platforms.
+   buffer_size counts WIDE CHARACTERS, not bytes. Each 32-bit group carries
+   one UTF-16 CODE UNIT -- not one code point -- and the payload is
+   well-formed UTF-16 by contract (STANDARD.md, adopted 2026-08-15): surrogate
+   pairs are valid, an unpaired surrogate is a writer contract violation,
+   debug-asserted. 2-byte and 4-byte wchar_t platforms produce IDENTICAL
+   bytes: the 4-byte platform converts at the boundary, splitting an astral
+   code point into its surrogate pair on write and recombining on read. A
+   reader whose wchar_t cannot hold a received value fails the read rather
+   than truncating.
 
    NO ALIGNMENT is performed anywhere in this operation -- the one place the
    wide path deliberately differs from the narrow one, which aligns via
