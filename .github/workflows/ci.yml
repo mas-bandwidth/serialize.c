@@ -159,6 +159,7 @@ jobs:
         run: |
           curl -fsSL -o /tmp/upstream-STANDARD.md \
             https://raw.githubusercontent.com/mas-bandwidth/serialize/main/STANDARD.md
+          echo "upstream: mas-bandwidth/serialize@$(git ls-remote https://github.com/mas-bandwidth/serialize.git refs/heads/main | cut -f1)"
           diff -u /tmp/upstream-STANDARD.md STANDARD.md
 
   version:
