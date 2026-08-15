@@ -22,14 +22,51 @@ jobs:
       matrix:
         os: [ ubuntu-24.04, macos-15 ]
         std: [ c89, c99, c11, c17 ]
+        # MSVC is an honoured design constraint of this port -- no __int128,
+        # a 16-bit wchar_t, __forceinline instead of always_inline -- and
+        # until this leg existed, every one of those accommodations was
+        # asserted by reasoning rather than executed by a compiler. cl has no
+        # /std:c89 or /std:c99; its default C mode is C89 plus Microsoft
+        # extensions, so the `msvc` row is the closest executable form of the
+        # C89-floor claim, and c11/c17 are the modes cl actually offers.
+        include:
+          - os: windows-2025
+            std: msvc
+          - os: windows-2025
+            std: c11
+          - os: windows-2025
+            std: c17
     steps:
       - uses: actions/checkout@v4
+
       - name: Test
+        if: runner.os != 'Windows'
         run: make test CSTD=${{ matrix.std }}
       - name: Golden wire
+        if: runner.os != 'Windows'
         run: make golden CSTD=${{ matrix.std }}
       - name: STANDARD.md wstring example
+        if: runner.os != 'Windows'
         run: make wstest CSTD=${{ matrix.std }}
+
+      # No make on the Windows runner and no /std flag in the msvc row: the
+      # three suites are the same ones the Makefile runs, compiled with cl.
+      # vswhere locates Visual Studio (the documented way), vcvars64 puts cl
+      # on the PATH. golden matters here beyond compilation: Windows is where
+      # wchar_t is 16 bits, so the pinned wide vectors prove the UTF-16 wire
+      # path on the platform the design accommodates.
+      - name: Test, golden wire, wstring example (MSVC)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          if not "${{ matrix.std }}"=="msvc" set "STDFLAG=/std:${{ matrix.std }}"
+          cl /nologo /W4 /O2 %STDFLAG% /I. test\roundtrip.c serialize.c /Fe:roundtrip.exe || exit /b 1
+          .\roundtrip.exe || exit /b 1
+          cl /nologo /W4 /O2 %STDFLAG% /I. test\golden.c serialize.c /Fe:golden.exe || exit /b 1
+          .\golden.exe || exit /b 1
+          cl /nologo /W4 /O2 %STDFLAG% /I. test\wstest.c serialize.c /Fe:wstest.exe || exit /b 1
+          .\wstest.exe || exit /b 1
 
   # THE job that matters most for this port.
   #
