@@ -23,8 +23,9 @@ SERIALIZE_CPP ?= ../serialize
 
 all: test
 
-test: build/roundtrip
+test: build/roundtrip build/assertdeath
 	./build/roundtrip
+	./build/assertdeath
 
 # The pinned wire vectors -- core and wide. Separate from `test` because these
 # are the ones that have to run on a big-endian machine: a round trip cannot
@@ -49,6 +50,15 @@ build/wstest: test/wstest.c serialize.c serialize.h
 build/roundtrip: test/roundtrip.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/roundtrip.c serialize.c -o $@ $(LDLIBS)
+
+# The writer contracts, proven to FIRE: with the write path checkless in a
+# release build (issue #52), the debug asserts are the whole enforcement,
+# and each is exercised in a forked child that must die by SIGABRT. POSIX
+# only -- CI's Windows leg runs roundtrip/golden/wstest directly with cl and
+# never builds this. Skips itself under NDEBUG.
+build/assertdeath: test/assertdeath.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -I. test/assertdeath.c serialize.c -o $@ $(LDLIBS)
 
 # Builds the same sequences with this library and with the C++ one and
 # compares the bytes. This is the test that matters: the port exists to be wire

@@ -517,21 +517,31 @@ static void fuzz_round_trip( fuzz_mode_t mode,
 
             case 7:
             {
-                /* arbitrary bit patterns again: out of range, nan and inf
-                   values must clamp into [min,max] on write, and finite in
-                   range values must round trip within the resolution */
-                const serialize_uint32_t expected_bits = fuzz_pool_uint32( pool );
+                /* arbitrary bit patterns, FORCED FINITE before the write: a
+                   non-finite value through compressed float is non-conforming
+                   and asserts out on write (serialize fork #6), and this
+                   pass's job is to generate CONFORMING writer input — so a
+                   NaN or Inf pattern has one exponent bit cleared, which
+                   keeps every pattern finite while preserving hugely
+                   out-of-range values. Those must still clamp into [min,max]
+                   on write, and finite in range values must round trip
+                   within the resolution. (Raw float, case 5, still carries
+                   NaN and Inf bit-exact: that contract is unchanged.) */
+                serialize_uint32_t expected_bits = fuzz_pool_uint32( pool );
                 float expected = 0.0f;
                 float value = 0.0f;
+                if ( ( expected_bits & 0x7F800000u ) == 0x7F800000u )       /* bit test: immune to fast math */
+                {
+                    expected_bits &= ~0x08000000u;
+                }
                 memcpy( &expected, &expected_bits, 4 );
                 if ( mode == FUZZ_WRITE )        { fuzz_check( serialize_write_compressed_float( w, expected, -10.0f, +10.0f, 0.01f ) ); }
                 else if ( mode == FUZZ_MEASURE ) { fuzz_check( serialize_measure_compressed_float( m, -10.0f, +10.0f, 0.01f ) ); }
                 else
                 {
-                    const int finite = ( expected_bits & 0x7FFFFFFFu ) < 0x7F800000u;   /* bit test: immune to fast math */
                     fuzz_check( serialize_read_compressed_float( r, &value, -10.0f, +10.0f, 0.01f ) );
                     fuzz_check( value >= -10.001f && value <= +10.001f );
-                    if ( finite && expected >= -10.0f && expected <= +10.0f )
+                    if ( expected >= -10.0f && expected <= +10.0f )
                     {
                         fuzz_check( fabs( value - expected ) <= 0.011f );
                     }

@@ -10,16 +10,27 @@ static int failed = 0;
 
 /*
     Performs one operation on a write stream and its measure counterpart on a
-    measure stream, from the same starting point, and requires the two counts
-    to agree EXACTLY. A measure that does not equal the bits actually emitted
-    is worse than no measure at all: it sizes a buffer that then overflows.
+    measure stream, from the same starting point, and requires the measured
+    count to be write + surplus EXACTLY, where surplus is the operation's
+    align worst case minus the padding actually written here.
+
+    A measure is a CONSERVATIVE bound, not an exact size (the fork ruling:
+    "measure must be large enough to serialize the message but doesn't need
+    to be exact", because "align is going to be different in 1st and 2nd
+    times serialize is called. it is bit position dependent") -- align
+    charges 7 bits wherever it appears, like the C++ MeasureStream. So a
+    position-independent operation must still measure EXACTLY (surplus 0 --
+    an overcount there is drift, and drift in a measure sizes every buffer
+    wrong), an align-bearing one measures its pinned worst case, and in
+    particular the measure is NEVER BELOW the write: an under-count sizes a
+    buffer that then overflows.
 
     The 3-bit prelude is not decoration. align, bytes, string -- everything
     that pads -- costs a number of bits that depends on where in the byte the
-    operation begins, and starting from zero would measure the one case where
-    alignment happens to be free.
+    operation begins, and an exact-from-zero measure under-counts at exactly
+    these unaligned starts. This prelude is what showed it.
 */
-#define MEASURED(w_op, m_op) do {                                                                \
+#define MEASURED(w_op, m_op, surplus) do {                                                       \
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );                              \
         serialize_measure_stream_init( &m );                                                      \
         CHECK( serialize_write_bits( &w, 5, 3 ) );                                                \
@@ -27,7 +38,8 @@ static int failed = 0;
         CHECK( w_op );                                                                            \
         CHECK( m_op );                                                                            \
         CHECK( !serialize_write_error( &w ) );                                                     \
-        CHECK( serialize_write_bits_processed( &w ) == serialize_measure_bits_processed( &m ) );  \
+        CHECK( serialize_measure_bits_processed( &m ) >= serialize_write_bits_processed( &w ) );  \
+        CHECK( serialize_measure_bits_processed( &m ) == serialize_write_bits_processed( &w ) + (surplus) ); \
     } while ( 0 )
 
 int main( void )
@@ -288,16 +300,12 @@ int main( void )
             CHECK( !serialize_read_align( &r ) );
         }
 
-        /* and on the write side: a write that does not fit stops every later
-           write, including one that would have fitted */
-        serialize_write_stream_init( &w, buffer, 4 );        /* 32 bits of room */
-        CHECK( serialize_write_bits( &w, 0xFFFFFF, 24 ) );
-        CHECK( !serialize_write_bits( &w, 0, 16 ) );         /* 8 bits past the end */
-        CHECK( serialize_write_error( &w ) );
-        CHECK( !serialize_write_bits( &w, 1, 1 ) );          /* would have fitted */
-        CHECK( !serialize_write_int( &w, 5, 0, 10 ) );
-        CHECK( !serialize_write_bool( &w, 1 ) );
-        CHECK( serialize_write_bits_processed( &w ) == 24 );
+        /* The write side has no counterpart to any of this: writes are
+           trusted and perform no release-build checks at all (issue #52) —
+           a write past the end of the buffer is caller error, asserted in a
+           debug build like every other writer contract, so there is no
+           return value to observe here. test/assertdeath.c is where that
+           contract is proven to fire. */
     }
 
     /* ---- the measure stream agrees with the writer, ONE OPERATION AT A TIME.
@@ -321,59 +329,66 @@ int main( void )
 
         ws[0] = 0x043C; ws[1] = 0x0438; ws[2] = 0x0440; ws[3] = 0;
 
-        MEASURED( serialize_write_bits( &w, 5, 3 ),  serialize_measure_bits( &m, 3 ) );
-        MEASURED( serialize_write_bool( &w, 1 ),     serialize_measure_bool( &m ) );
-        MEASURED( serialize_write_align( &w ),       serialize_measure_align( &m ) );
+        MEASURED( serialize_write_bits( &w, 5, 3 ),  serialize_measure_bits( &m, 3 ), 0 );
+        MEASURED( serialize_write_bool( &w, 1 ),     serialize_measure_bool( &m ), 0 );
+        /* the named before/after case for the fork ruling: align at bit 3
+           pads 5, so this used to measure exactly (8 == 8) and now measures
+           the pinned worst case of 7 (10 == 8 + 2) */
+        MEASURED( serialize_write_align( &w ),       serialize_measure_align( &m ), 2 );
 
-        MEASURED( serialize_write_int( &w, 42, 0, 1000 ),    serialize_measure_int( &m, 0, 1000 ) );
-        MEASURED( serialize_write_int( &w, -7, -100, 100 ),  serialize_measure_int( &m, -100, 100 ) );
-        MEASURED( serialize_write_int( &w, 5, 5, 5 ),        serialize_measure_int( &m, 5, 5 ) );
+        MEASURED( serialize_write_int( &w, 42, 0, 1000 ),    serialize_measure_int( &m, 0, 1000 ), 0 );
+        MEASURED( serialize_write_int( &w, -7, -100, 100 ),  serialize_measure_int( &m, -100, 100 ), 0 );
+        MEASURED( serialize_write_int( &w, 5, 5, 5 ),        serialize_measure_int( &m, 5, 5 ), 0 );
 
         MEASURED( serialize_write_int64( &w, -1234567890123LL, -2000000000000LL, 2000000000000LL ),
-                  serialize_measure_int64( &m, -2000000000000LL, 2000000000000LL ) );
-        MEASURED( serialize_write_int64( &w, 3, 0, 7 ), serialize_measure_int64( &m, 0, 7 ) );
+                  serialize_measure_int64( &m, -2000000000000LL, 2000000000000LL ), 0 );
+        MEASURED( serialize_write_int64( &w, 3, 0, 7 ), serialize_measure_int64( &m, 0, 7 ), 0 );
 
-        MEASURED( serialize_write_uint8( &w, 0xAB ),        serialize_measure_uint8( &m ) );
-        MEASURED( serialize_write_uint16( &w, 0xBEEF ),     serialize_measure_uint16( &m ) );
-        MEASURED( serialize_write_uint32( &w, 0xDEADBEEF ), serialize_measure_uint32( &m ) );
-        MEASURED( serialize_write_uint64( &w, 0x0123456789ABCDEFULL ), serialize_measure_uint64( &m ) );
+        MEASURED( serialize_write_uint8( &w, 0xAB ),        serialize_measure_uint8( &m ), 0 );
+        MEASURED( serialize_write_uint16( &w, 0xBEEF ),     serialize_measure_uint16( &m ), 0 );
+        MEASURED( serialize_write_uint32( &w, 0xDEADBEEF ), serialize_measure_uint32( &m ), 0 );
+        MEASURED( serialize_write_uint64( &w, 0x0123456789ABCDEFULL ), serialize_measure_uint64( &m ), 0 );
 
-        MEASURED( serialize_write_float( &w, 3.1415926f ), serialize_measure_float( &m ) );
-        MEASURED( serialize_write_double( &w, 1.0 / 3.0 ), serialize_measure_double( &m ) );
+        MEASURED( serialize_write_float( &w, 3.1415926f ), serialize_measure_float( &m ), 0 );
+        MEASURED( serialize_write_double( &w, 1.0 / 3.0 ), serialize_measure_double( &m ), 0 );
         MEASURED( serialize_write_compressed_float( &w, 0.75f, 0.0f, 1.0f, 0.01f ),
-                  serialize_measure_compressed_float( &m, 0.0f, 1.0f, 0.01f ) );
+                  serialize_measure_compressed_float( &m, 0.0f, 1.0f, 0.01f ), 0 );
         MEASURED( serialize_write_compressed_float( &w, -3.5f, -10.0f, 10.0f, 0.001f ),
-                  serialize_measure_compressed_float( &m, -10.0f, 10.0f, 0.001f ) );
+                  serialize_measure_compressed_float( &m, -10.0f, 10.0f, 0.001f ), 0 );
 
-        MEASURED( serialize_write_bytes( &w, src, 3 ),  serialize_measure_bytes( &m, 3 ) );
-        MEASURED( serialize_write_bytes( &w, src, 0 ),  serialize_measure_bytes( &m, 0 ) );
+        /* bytes aligns first: at bit 3 the write pads 5, the measure charges 7 */
+        MEASURED( serialize_write_bytes( &w, src, 3 ),  serialize_measure_bytes( &m, 3 ), 2 );
+        MEASURED( serialize_write_bytes( &w, src, 0 ),  serialize_measure_bytes( &m, 0 ), 2 );
+        /* string: the 6-bit length field lands the align at bit 9, where the
+           actual padding IS the worst case 7 -- the bound is tight here */
         MEASURED( serialize_write_string( &w, "the quick brown fox", 64 ),
-                  serialize_measure_string( &m, "the quick brown fox", 64 ) );
-        MEASURED( serialize_write_string( &w, "", 64 ), serialize_measure_string( &m, "", 64 ) );
+                  serialize_measure_string( &m, "the quick brown fox", 64 ), 0 );
+        MEASURED( serialize_write_string( &w, "", 64 ), serialize_measure_string( &m, "", 64 ), 0 );
 
-        MEASURED( serialize_write_wstring( &w, ws, 8 ),  serialize_measure_wstring( &m, ws, 8 ) );
+        /* wstring deliberately never aligns, so it must still measure EXACTLY */
+        MEASURED( serialize_write_wstring( &w, ws, 8 ),  serialize_measure_wstring( &m, ws, 8 ), 0 );
         ws[0] = 0;
-        MEASURED( serialize_write_wstring( &w, ws, 8 ),  serialize_measure_wstring( &m, ws, 8 ) );
+        MEASURED( serialize_write_wstring( &w, ws, 8 ),  serialize_measure_wstring( &m, ws, 8 ), 0 );
         ws[0] = 0x043C;
 
         MEASURED( serialize_write_uint128( &w, serialize_uint128_make( 0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL ) ),
-                  serialize_measure_uint128( &m ) );
+                  serialize_measure_uint128( &m ), 0 );
         MEASURED( serialize_write_int128( &w, serialize_int128_from_int64( -1234567890123LL ), i128lo, i128hi ),
-                  serialize_measure_int128( &m, i128lo, i128hi ) );
+                  serialize_measure_int128( &m, i128lo, i128hi ), 0 );
         /* a span wider than 64 bits, so the count covers the high lane too */
         MEASURED( serialize_write_int128( &w, wideval, widelo, widehi ),
-                  serialize_measure_int128( &m, widelo, widehi ) );
+                  serialize_measure_int128( &m, widelo, widehi ), 0 );
 
         MEASURED( serialize_write_fixed32( &w, 100 * 65536, 16, 16, -180, 180 ),
-                  serialize_measure_fixed32( &m, 16, 16, -180, 180 ) );
+                  serialize_measure_fixed32( &m, 16, 16, -180, 180 ), 0 );
         MEASURED( serialize_write_fixed32( &w, 12345, 32, 0, 0, 1000000 ),
-                  serialize_measure_fixed32( &m, 32, 0, 0, 1000000 ) );
+                  serialize_measure_fixed32( &m, 32, 0, 0, 1000000 ), 0 );
         MEASURED( serialize_write_fixed64( &w, -5000LL * 65536, 48, 16, -1000000, 1000000 ),
-                  serialize_measure_fixed64( &m, 48, 16, -1000000, 1000000 ) );
+                  serialize_measure_fixed64( &m, 48, 16, -1000000, 1000000 ), 0 );
         MEASURED( serialize_write_fixed128( &w, serialize_int128_from_int64( 777LL * 65536 ), 112, 16, -1000000, 1000000 ),
-                  serialize_measure_fixed128( &m, 112, 16, -1000000, 1000000 ) );
+                  serialize_measure_fixed128( &m, 112, 16, -1000000, 1000000 ), 0 );
         MEASURED( serialize_write_fixed128( &w, serialize_int128_from_int64( -12345LL * ( (serialize_int64_t) 1 << 48 ) ), 80, 48, -1000000, 1000000 ),
-                  serialize_measure_fixed128( &m, 80, 48, -1000000, 1000000 ) );
+                  serialize_measure_fixed128( &m, 80, 48, -1000000, 1000000 ), 0 );
 
         /* every int_relative tier, including the raw fallback */
         {
@@ -381,7 +396,7 @@ int main( void )
             for ( i = 0; i < (int) ( sizeof( deltas ) / sizeof( deltas[0] ) ); i++ )
             {
                 MEASURED( serialize_write_int_relative( &w, 1000, 1000 + deltas[i] ),
-                          serialize_measure_int_relative( &m, 1000, 1000 + deltas[i] ) );
+                          serialize_measure_int_relative( &m, 1000, 1000 + deltas[i] ), 0 );
             }
         }
 
@@ -403,8 +418,14 @@ int main( void )
         CHECK( serialize_write_compressed_float( &w, 0.5f, 0.0f, 1.0f, 0.01f ) );
         CHECK( serialize_measure_compressed_float( &m, 0.0f, 1.0f, 0.01f ) );
         CHECK( !serialize_write_error( &w ) );
-        CHECK( serialize_write_bits_processed( &w ) == serialize_measure_bits_processed( &m ) );
-        CHECK( serialize_write_bytes_processed( &w ) == serialize_measure_bytes_processed( &m ) );
+        /* never below the write -- the guarantee a fits-check depends on --
+           and above it by exactly the three aligns' worst-case surplus:
+           the standalone align lands at bit 32 and pads 0 (surplus 7), the
+           bytes align likewise (surplus 7), the string align lands at bit
+           62 and pads 2 (surplus 5). 7 + 7 + 5 = 19 bits over. */
+        CHECK( serialize_measure_bits_processed( &m ) >= serialize_write_bits_processed( &w ) );
+        CHECK( serialize_measure_bits_processed( &m ) == serialize_write_bits_processed( &w ) + 19 );
+        CHECK( serialize_measure_bytes_processed( &m ) >= serialize_write_bytes_processed( &w ) );
 
         /* measure refuses what the writer would refuse, and counts nothing
            when it does -- a count the writer could never produce is the one
@@ -550,13 +571,21 @@ int main( void )
         }
     }
 
-    /* ---- NaN through compressed float writes as min: the family behavior.
-       C++, C#, Go and Rust all clamp with the !>= form, which is false for
-       NaN, so a NaN value is forced to normalized = 0, the wire carries
-       integer 0, and the reader reconstructs min exactly. The bytes must be
-       identical to writing min itself. The NaN is built from its bit pattern
-       rather than any NAN macro so ubsan actually exercises this path and
-       finite-math builds still compile. */
+    /* ---- NaN through compressed float, in a RELEASE build only.
+
+       A non-finite value is non-conforming input (serialize fork #6, the
+       ruling: "attempting to send NaN or INF or anything else through
+       compressed float is non-conforming and should assert out on write
+       too"), so in a debug build this write ASSERTS — test/assertdeath.c
+       proves that it does, and this block cannot run there. What survives
+       under NDEBUG is the deterministic fallback: the clamp's !>= form is
+       false for NaN, so the value is forced to normalized = 0, the wire
+       carries integer 0, and the reader reconstructs min exactly — a
+       misbehaving release writer produces the bytes of min, on every
+       platform, rather than undefined bytes. The NaN is built from its bit
+       pattern rather than any NAN macro so ubsan actually exercises this
+       path and finite-math builds still compile. */
+#ifdef NDEBUG
     {
         static const serialize_uint32_t nan_patterns[2] = { 0x7FC00000UL, 0xFFC00000UL };  /* quiet NaN, and its negative */
         serialize_uint8_t nan_buffer[16];
@@ -591,6 +620,7 @@ int main( void )
             CHECK( out == 0.0f );       /* integer 0 reconstructs to min exactly */
         }
     }
+#endif /* NDEBUG */
 
     printf( failed ? "FAILED\n" : "OK\n" );
     return failed;

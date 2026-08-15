@@ -63,23 +63,37 @@ Nothing about the standard you build against changes the bytes.
 
 ## Errors
 
-Every operation returns `int`: 1 on success, 0 on failure. **Failure is
-sticky** — once a stream fails, subsequent operations fail without touching
-the buffer, so you check once at the end of a message rather than after every
-field.
+Every operation returns `int` for a uniform surface, and the two halves mean
+different things by it.
 
-**Reads reject, they do not clamp.** A value outside its declared range, a
-malformed alignment pad, or a read past the end of the buffer all fail the
-read. This library is used on packet paths facing the open internet, and a
-read is where untrusted data arrives.
+**Reads can fail, and read failure is sticky.** A read returns 1 on success,
+0 on failure, and once a read stream fails, subsequent reads fail without
+touching the buffer — so you check once at the end of a message rather than
+after every field. **Reads reject, they do not clamp.** A value outside its
+declared range, a malformed alignment pad, or a read past the end of the
+buffer all fail the read. This library is used on packet paths facing the
+open internet, and a read is where untrusted data arrives.
 
-**Your mistakes are not stream errors.** Bounds the wrong way round, a value
-outside its declared range on write, a bit count outside `[1,32]` — those are
-`serialize_assert`, which fires in a debug build and compiles out under
-`NDEBUG`. That is the same division the C++ library makes. If you need to fail
-a stream yourself, call `serialize_read_fail` or `serialize_write_fail`; do
-not set the `error` field by hand, because failure is carried by a poisoned
-bit limit as well as by that flag.
+**Writes are trusted and always return 1 in a release build.** Under `NDEBUG`
+the write path performs no validation at all — no per-field checks and no
+capacity check — exactly matching the C++ library
+([serialize#52](https://github.com/mas-bandwidth/serialize/issues/52), the
+ruling: "C should match C++ and have no checks on write at all (except
+assert). ... C and C++ should be equivalent."). Everything that can go wrong
+on write is caller error: bounds the wrong way round, a value outside its
+declared range, a bit count outside `[1,32]`, a non-finite compressed float,
+a buffer too small for the message. Those are `serialize_assert`, which fires
+in a debug build — `test/assertdeath.c` proves each one does — and compiles
+out under `NDEBUG`. Size the buffer with a measure stream if you are not
+certain the message fits: writing past the end of your buffer in a release
+build is undefined behavior, yours.
+
+If you need to mark a stream failed yourself, call `serialize_read_fail` or
+`serialize_write_fail`; do not set the `error` field by hand, because failure
+is carried by a poisoned bit limit as well as by that flag. On a read stream
+that failure is sticky as above. On a write stream the flag is reported by
+`serialize_write_error`, and continuing to write after failing is caller
+error, caught by the debug assert.
 
 ## Building
 
@@ -90,7 +104,8 @@ Drop them in your project and compile `serialize.c`. It needs `-lm` for
 The Makefile here is for developing the library itself:
 
 ```
-make test                  # round trip, rejection, and measure-stream tests
+make test                  # round trip, rejection, measure-stream and
+                           # writer-contract (assert) tests
 make golden                # the pinned wire vectors, core and wide
 make wstest                # STANDARD.md's worked wstring example
 make diff                  # byte-compare against the C++ library
@@ -124,9 +139,10 @@ of quietly turning the pin into a string that agrees only with itself.
 ## Buffer contract
 
 The **writer** commits whole 8-byte words, so the final commit may touch bytes
-past the meaningful length. Give it a buffer that is a multiple of 8 bytes and
-ask for the meaningful length with `serialize_write_bytes_processed` after
-flushing.
+past the meaningful length. Give it a buffer that is a multiple of 8 bytes —
+and big enough: the writer checks capacity only as a debug assert, never in a
+release build (see Errors). Ask for the meaningful length with
+`serialize_write_bytes_processed` after flushing.
 
 The **reader** loads through an 8-byte window, and the last such window — the
 one that would reach past the end — is assembled once when the stream is
@@ -152,8 +168,13 @@ the language can target C:
 - the measure stream, with **one operation per write operation** — including
   `int_relative` and `wstring`, whose widths depend on the value and so cannot
   be worked around with `serialize_measure_bits` by a caller unwilling to
-  reimplement the tier ladder. Every one is tested against the bits the
-  corresponding write actually emits.
+  reimplement the tier ladder. The count is a **conservative upper bound**,
+  never an under-count: align (and everything that aligns) charges its worst
+  case of 7 bits, because padding is bit position dependent and a message is
+  measured once but written at arbitrary positions — the same charge the C++
+  `MeasureStream` makes. Every operation is tested against the bits the
+  corresponding write actually emits: never below, and above by exactly the
+  align worst case.
 
 128-bit integers are **emulated as two 64-bit lanes** rather than requiring
 `__int128`, because C89 has no such type and neither does MSVC. The wire is
@@ -176,11 +197,11 @@ each success/failure split as even odds, and a few fields into a message every
 remaining callsite is judged cold and refused at a threshold these functions
 do not fit — the later fields of a message quietly fall out of line. The read
 spine took the demand first (the stranded read rows went from 0.6–0.7x of the
-C++ library to 0.8–0.9x); the write spine follows because every C write is
-fallible too — the capacity check below prices it a handful of instructions
-past the same cold threshold — measured as the stream write leg going from
-2755 to 3088 MB/s, with the stranded float, uint64 and mixed-field writes
-rescued the same way.
+C++ library to 0.8–0.9x); the write spine took it while it still carried a
+per-field capacity check (measured then as the stream write leg going from
+2755 to 3088 MB/s), and keeps it now that the check is gone, for the same
+reason the C++ library demands its own write spine: an out-of-line field
+costs the call and un-folds the bit width.
 
 Measured against the C++ library at the same `-O2` on an Apple M2, `make
 bench-all` (C++ column: the `serialize` checkout with its write-spine
@@ -196,26 +217,29 @@ inlining, [serialize PR #45](https://github.com/mas-bandwidth/serialize/pull/45)
 | bitpacker read | 2099 MB/s | 2706 MB/s |
 | bitpacker write | 2120 MB/s | 2157 MB/s |
 
-The raw bitpacker read and the packet writes are the places this port is
-meaningfully behind, and both are behind on purpose. The C++ reader loads its
+The table's write rows predate
+[serialize#52](https://github.com/mas-bandwidth/serialize/issues/52): they
+were measured while every C write still carried a release-build capacity
+check, which made every field a possible early exit and forced the compiler
+to keep the stream's scratch word, bit counts and index correct in memory at
+each field boundary — where the C++ writer, whose release build checks
+nothing, batches that bookkeeping across whole packets and keeps its scratch
+in registers. That check is now gone (see Errors): the write path matches
+C++ and the residual those rows show is expected to close. The bench harness
+re-measures it.
+
+The raw bitpacker read remains behind on purpose. The C++ reader loads its
 64-bit window unconditionally and **requires the caller's allocation to extend
 8 bytes past the data**; this one reads no byte you did not give it, and pays
 one predictable branch per read for that. Removing the branch — measured —
-takes bitpacker read to 2497 MB/s. On the write side the capacity check makes
-every field a possible early exit, so the compiler must keep the stream's
-scratch word, bit counts and index correct in memory at each field boundary —
-the C++ writer, whose release build checks nothing, batches that bookkeeping
-across whole packets and keeps its scratch in registers. The check costs more
-in lost coalescing than in executed compares, and it is the same trade as the
-reader's: never touch memory you were not given, even at a price.
+takes bitpacker read to 2497 MB/s.
 
 Caller error is `serialize_assert` and compiles out under `NDEBUG`, matching
 the C++ library operation for operation: bounds the wrong way round, a value
-outside its declared range on write, a bit count outside `[1,32]`. What stays
-in a release build is everything that judges the network — range checks on
-read, malformed align padding, reads past the end — plus a capacity check on
-write that the C++ library only asserts, because running off the end of your
-buffer is worse than being slower.
+outside its declared range on write, a bit count outside `[1,32]`, a write
+past the end of the buffer. What stays in a release build is everything that
+judges the network — range checks on read, malformed align padding, reads
+past the end — and nothing on write at all.
 
 ## Contributing
 
