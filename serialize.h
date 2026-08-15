@@ -91,9 +91,9 @@
    --------------------------------------------------------------------------- */
 
 #define SERIALIZE_VERSION_MAJOR 1
-#define SERIALIZE_VERSION_MINOR 2
+#define SERIALIZE_VERSION_MINOR 3
 #define SERIALIZE_VERSION_PATCH 0
-#define SERIALIZE_VERSION "1.2.0"
+#define SERIALIZE_VERSION "1.3.0"
 
 /* ---------------------------------------------------------------------------
    configuration
