@@ -57,20 +57,28 @@
 
     ERRORS
 
-    Every operation that can fail returns int: 1 on success, 0 on failure.
-    Failure is sticky — once a stream fails, subsequent operations fail
-    without touching the buffer, so you can check once at the end of a message
-    rather than after every field.
+    Every operation returns int for a uniform surface, and the two halves mean
+    different things by it — the same division the C++ library makes.
 
+    READS can fail: 1 on success, 0 on failure. Failure is sticky — once a
+    read stream fails, subsequent reads fail without touching the buffer, so
+    you can check once at the end of a message rather than after every field.
     Reads fail on out-of-range values rather than clamping them. This library
     is used on packet paths that face the open internet, and a read is the
     place where untrusted data arrives.
 
-    What is NOT a runtime check is caller error: bounds the wrong way round, a
-    value outside its declared range on WRITE, a bit count outside [1,32].
-    Those are serialize_assert, which compiles to nothing under NDEBUG — the
-    same division the C++ library makes, and for the same reason. A read
-    validates the network; it does not validate you.
+    WRITES are trusted and always return 1 in a release build: under NDEBUG
+    the write path performs no validation at all — no per-field checks and no
+    capacity check — exactly matching the C++ writer (serialize issue #52,
+    the ruling: "C should match C++ and have no checks on write at all
+    (except assert). ... C and C++ should be equivalent."). Everything that
+    can go wrong on write is caller error — bounds the wrong way round, a
+    value outside its declared range, a bit count outside [1,32], a buffer
+    too small for the message — and caller error is serialize_assert, which
+    fires in a debug build and compiles to nothing under NDEBUG. Size the
+    buffer with a measure stream if you are not certain the message fits:
+    writing past the end of your buffer in a release build is undefined
+    behavior, yours. A read validates the network; it does not validate you.
 */
 
 #ifndef SERIALIZE_H
@@ -179,11 +187,13 @@ typedef long long serialize_int64_t;
     into a message, every remaining callsite is judged cold and held to the
     cold-callsite inline threshold, which these functions do not fit. On the
     read side that price is the bounds-safe window and the sticky-failure
-    test; on the write side it is the capacity check this library keeps where
-    the C++ library only asserts — the check is also what makes every write
-    fallible, which is why the write chain decays exactly as the read chain
-    does. Measured on Apple silicon (Apple clang 21, schema bench, O2 and
-    O3): SERIALIZE_INLINE alone stranded the later read fields of a message
+    test. The write side no longer carries any runtime check (issue #52:
+    writes are trusted, capacity asserted in debug only, matching the C++
+    writer), but the demand stays, for the same reason the C++ library
+    demands its own write spine: an out-of-line field costs the call and
+    un-folds the bit width. Measured on Apple silicon (Apple clang 21, schema
+    bench, O2 and O3), while the write spine still carried its capacity
+    check: SERIALIZE_INLINE alone stranded the later read fields of a message
     out of line (affected read rows 0.57–0.71x of the C++ library), and once
     the C++ library demanded its own write spine the same refusals showed on
     the write side — serialize_write_bits held at cost 105 against threshold
@@ -272,16 +282,18 @@ typedef struct serialize_write_stream_t
     int word_index;
     serialize_uint64_t scratch;
     int scratch_bits;
-    int error;                  /* sticky: once set, every write is a no-op */
+    int error;                  /* set only by serialize_write_fail; the write
+                                   path itself cannot fail — see ERRORS */
 
     /*
-        num_bits again, and -1 once the stream has failed.
+        num_bits again, and -1 once serialize_write_fail has been called.
 
-        Every write already tests that it fits, so poisoning the limit is what
-        makes failure sticky WITHOUT a second test per field: one comparison
-        answers both questions. Set it through serialize_write_fail and never
-        by hand — a stream whose error flag is set and whose limit is not would
-        accept the next write.
+        The release write path never reads it: capacity is the writer's
+        contract, asserted in debug only (issue #52 — see ERRORS). The debug
+        assert tests against THIS field rather than num_bits so that writing
+        to a stream you already failed is caught too — the poisoned limit
+        fails the assert for good. The read stream keeps the real, release-
+        build version of this mechanism; see serialize_read_stream_t.
     */
     int bits_limit;
 } serialize_write_stream_t;
@@ -301,7 +313,17 @@ typedef struct serialize_read_stream_t
     int num_bits;
     int bits_read;
     int error;                  /* sticky: once set, every read fails */
-    int bits_limit;             /* num_bits, and -1 once failed. See the write stream. */
+
+    /*
+        num_bits, and -1 once the stream has failed.
+
+        Every read already tests that it fits, so poisoning the limit is what
+        makes failure sticky WITHOUT a second test per field: one comparison
+        answers both questions. Set it through serialize_read_fail and never
+        by hand — a stream whose error flag is set and whose limit is not
+        would accept the next read.
+    */
+    int bits_limit;
 
     /*
         The last window of the buffer, assembled once at init.
@@ -325,9 +347,19 @@ typedef struct serialize_read_stream_t
 } serialize_read_stream_t;
 
 /*
-    A measure stream: counts the bits a message would occupy without producing
+    A measure stream: bounds the bits a message would occupy without producing
     any. The write and measure halves must perform the same operations for the
     count to be meaningful.
+
+    The count is a CONSERVATIVE upper bound, not an exact size — align (and
+    everything that aligns: bytes, string) charges its worst case of 7 bits,
+    because a message is measured once and then written at arbitrary bit
+    positions, where the padding differs. The C++ MeasureStream makes the
+    same charge, and the fork ruling makes it the family model: "measure must
+    be large enough to serialize the message but doesn't need to be exact";
+    "the exact is not possible, since align is going to be different in 1st
+    and 2nd times serialize is called. it is bit position dependent."
+    A message with no alignment in it measures exactly.
 */
 typedef struct serialize_measure_stream_t
 {
@@ -349,10 +381,15 @@ SERIALIZE_INLINE int serialize_write_bits_available( const serialize_write_strea
 SERIALIZE_INLINE int serialize_write_error( const serialize_write_stream_t * stream );
 
 /* Fails a stream, and always returns 0 so a caller can `return` it directly.
+   This is the ONLY supported way to fail a stream: setting the error flag by
+   hand leaves the bit limit unpoisoned — see bits_limit in the stream structs.
 
-   This is the ONLY supported way to fail a stream. Setting the error flag by
-   hand leaves the bit limit unpoisoned, and the next operation would succeed —
-   see bits_limit in the stream structs. */
+   On a READ stream failure is sticky: every later read fails without touching
+   the buffer. On a WRITE stream the flag is reported by serialize_write_error
+   but the release write path never consults it — writes are trusted and
+   cannot fail (see ERRORS) — so do not keep writing to a stream you have
+   failed: that is caller error, and the poisoned bit limit makes the next
+   write assert in a debug build. */
 SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream );
 SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream );
 
@@ -373,7 +410,9 @@ SERIALIZE_INLINE int serialize_measure_bytes_processed( const serialize_measure_
 
 /* bits must be in [1,32] and value must be less than 2^bits. Both are caller
    error, so both are asserted rather than checked; a value wider than its
-   declared bits is masked, so it damages its own field and no other. */
+   declared bits is masked, so it damages its own field and no other. So is
+   capacity, on the write side: the write path performs no release-build
+   checks at all (issue #52 — see ERRORS). */
 SERIALIZE_ALWAYS_INLINE int serialize_write_bits( serialize_write_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t value, int bits );
 SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits );
 
@@ -583,14 +622,18 @@ int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, 
    the value -- int_relative, string, wstring -- the value is taken too, and
    there is no way to get the count right without it.
 
-   They return int for symmetry with the write half, and return 0 for input a
-   writer would refuse: a string or wstring longer than its buffer, an
-   int_relative that does not increase, inverted bounds. Nothing is counted in
-   that case, so a measure that returns 0 leaves the stream as it was.
+   They return int for symmetry with the write half, and return 0 for input
+   the writer's contract forbids: a string or wstring longer than its buffer,
+   an int_relative that does not increase, inverted bounds. The writer itself
+   debug-asserts these (issue #52 — see ERRORS); the measure stream keeps the
+   real refusal because a measure is how a buffer gets sized, and a count for
+   a message no conforming writer produces is the one way a measure can do
+   damage. Nothing is counted in that case, so a measure that returns 0
+   leaves the stream as it was.
 
    What a measure CANNOT refuse is a value out of its declared range, because
    it is never given the value -- only the bounds that set the width. The
-   write is where that fails.
+   write is where that is asserted.
    --------------------------------------------------------------------------- */
 
 SERIALIZE_INLINE int serialize_measure_bits( serialize_measure_stream_t * stream, int bits );
@@ -809,24 +852,19 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_bits( serialize_write_stream_t * SER
     serialize_assert( bits <= 32 );
 
     /*
-        Two things in one comparison.
-
-        Kept as a real check where the C++ BitWriter only asserts: the C++
-        writer is a trusted caller that sized its buffer with a measure stream,
-        and this one refuses to run off the end of yours in a release build.
-        That is a promise about memory rather than about the wire.
-
-        And because a failed stream has a limit of -1, this is also the sticky
-        flag — without which a write that failed for want of room would be
-        followed by a NARROWER one that fits, and the buffer would end up
-        plausible and wrong. The C++ library needs neither test: it has no
-        sticky state, and returns false up through the serialize function
-        instead.
+        Capacity is the writer's contract, not a runtime check (issue #52, the
+        ruling: "C should match C++ and have no checks on write at all (except
+        assert). ... C and C++ should be equivalent."). The C++ BitWriter
+        asserts exactly this and its release build writes unchecked; this port
+        used to keep the test as a real branch, and that branch was the
+        measured write residual against C++ — it made every write fallible, so
+        the compiler kept the scratch word and bit counts correct in memory at
+        every field boundary instead of coalescing them in registers across a
+        message. Asserted against bits_limit rather than num_bits so a stream
+        failed by serialize_write_fail is also caught in a debug build: the
+        poisoned limit fails this assert for good.
     */
-    if ( stream->bits_written + bits > stream->bits_limit )
-    {
-        return serialize_write_fail( stream );
-    }
+    serialize_assert( stream->bits_written + bits <= stream->bits_limit );
 
     /* mask rather than trust: the assert above catches a value wider than its
        declared bits in a debug build, and the mask keeps a release build
@@ -863,11 +901,6 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_bits( serialize_write_stream_t * SER
 
 SERIALIZE_INLINE void serialize_write_flush( serialize_write_stream_t * stream )
 {
-    if ( stream->error )
-    {
-        return;
-    }
-
     if ( stream->scratch_bits != 0 )
     {
         serialize_uint64_t word = serialize_host_to_wire64( stream->scratch );
@@ -1069,10 +1102,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_align( serialize_write_stream_t * st
     {
         return serialize_write_bits( stream, 0, 8 - remainder );
     }
-    /* an align on an already aligned stream writes nothing, so it never
-       reaches the bounds test that carries the sticky flag. Failure has to
-       survive an operation that does nothing. */
-    return !stream->error;
+    return 1;
 }
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_align( serialize_read_stream_t * stream )
@@ -1119,10 +1149,8 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_int( serialize_write_stream_t * stre
     bits = serialize_bits_required( (serialize_uint32_t) min, (serialize_uint32_t) max );
     if ( bits == 0 )
     {
-        /* degenerate range: the value is the range, and nothing is written.
-           The sticky flag is still honoured, so a caller checking every field
-           sees the failure here too. */
-        return !stream->error;
+        /* degenerate range: the value IS the range, and nothing is written */
+        return 1;
     }
 
     offset = (serialize_uint32_t) value - (serialize_uint32_t) min;
@@ -1178,7 +1206,8 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_int64( serialize_write_stream_t * st
     bits = serialize_bits_required64( (serialize_uint64_t) min, (serialize_uint64_t) max );
     if ( bits == 0 )
     {
-        return !stream->error;
+        /* degenerate range: the value IS the range, and nothing is written */
+        return 1;
     }
 
     offset = (serialize_uint64_t) value - (serialize_uint64_t) min;
@@ -1416,11 +1445,20 @@ SERIALIZE_INLINE int serialize_measure_bool( serialize_measure_stream_t * stream
 
 SERIALIZE_INLINE int serialize_measure_align( serialize_measure_stream_t * stream )
 {
-    int remainder = stream->bits_written % 8;
-    if ( remainder != 0 )
-    {
-        stream->bits_written += 8 - remainder;
-    }
+    /*
+        The worst case, unconditionally — never the exact padding. A measure
+        is taken once and the message is then written at arbitrary bit
+        positions, where the padding differs: an exact-from-zero count
+        under-counts at unaligned starts ({byte, align, byte} measures 16
+        bits from zero but costs 23 written from bit 1), and a fits-check
+        trusting it overflows the very buffer it sized. The C++ MeasureStream
+        returns worst case 7 from GetAlignBits for exactly this reason, and
+        the fork ruling makes that the family model: "so if some
+        implementations of serialize measure in other languages are exact,
+        they probably should not be. make them conservative bounds like in
+        C++, and the standard should specify this is what is expected."
+    */
+    stream->bits_written += 7;
     return 1;
 }
 

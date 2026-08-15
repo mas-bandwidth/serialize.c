@@ -36,15 +36,10 @@ int serialize_write_int_relative( serialize_write_stream_t * stream, serialize_i
 {
     serialize_uint32_t difference;
 
-    if ( stream->error )
-    {
-        return 0;
-    }
-
-    if ( current <= previous )
-    {
-        return serialize_write_fail( stream );
-    }
+    /* STRICTLY increasing is the writer's contract, debug-asserted exactly
+       where the C++ writer asserts it (issue #52); the reader enforces it
+       for real, because that is where untrusted data arrives */
+    serialize_assert( current > previous );
 
     /* subtract in the unsigned domain: current - previous overflows signed
        arithmetic when the gap is wider than 2^31 */
@@ -171,6 +166,19 @@ int serialize_read_int_relative( serialize_read_stream_t * stream, serialize_int
    --------------------------------------------------------------------------- */
 
 /*
+    Finite, spelled so the C89 floor holds: isfinite is C99. finite - finite
+    is zero; Inf - Inf and NaN - NaN are NaN, and NaN compares unequal to
+    everything, so the subtraction answers for every input. The Makefile's
+    -ffp-contract=off and the absence of any fast-math flag are what keep a
+    compiler from folding it. Referenced only from serialize_assert, so it
+    compiles to nothing under NDEBUG.
+*/
+static SERIALIZE_UNUSED int serialize_float_is_finite( float value )
+{
+    return value - value == 0.0f;
+}
+
+/*
     The width of a compressed float, and the quantization ceiling that goes
     with it. In one place because three callers need it -- write, read and
     measure -- and a formula copied three times is a formula that drifts twice.
@@ -180,6 +188,13 @@ static int serialize_compressed_float_bits( float min, float max, float res, ser
     float delta = max - min;
     float values = delta / res;
     serialize_assert( min < max && res > 0.0f );
+    /* a declaration whose span or step count does not compute finite is
+       non-conforming (serialize fork #6, the ruling verbatim: "it's
+       non-conforming") — caller error at the site the parameters are
+       computed, debug-asserted like every other declaration contract. The
+       clamps below keep the release build deterministic regardless. */
+    serialize_assert( serialize_float_is_finite( delta ) );
+    serialize_assert( serialize_float_is_finite( values ) );
     /* clamp with the !>= form so the uint32 conversion below is defined even
        for pathological delta / res -- NaN fails every ordered comparison, so
        the plain < form lets it through and the conversion of NaN to unsigned
@@ -209,17 +224,19 @@ int serialize_write_compressed_float( serialize_write_stream_t * stream, float v
     float scaled;
     serialize_uint32_t integer_value;
 
-    if ( stream->error )
-    {
-        return 0;
-    }
+    /* a non-finite value is non-conforming (serialize fork #6, the ruling
+       verbatim: "attempting to send NaN or INF or anything else through
+       compressed float is non-conforming and should assert out on write
+       too") — asserted at intake, per the writes-trusted doctrine */
+    serialize_assert( serialize_float_is_finite( value ) );
 
     delta = max - min;
     bits = serialize_compressed_float_bits( min, max, res, &max_integer_value );
 
-    /* clamp with the !>= / !<= form so a NaN value is forced into range
-       instead of reaching the uint32 conversion below -- the family behavior:
-       NaN writes as min. Match serialize.h exactly. */
+    /* clamp with the !>= / !<= form so a non-finite value that survives into
+       a release build (the assert above compiles out) is forced into range
+       instead of reaching the uint32 conversion below -- NaN writes as min,
+       deterministically. Match serialize.h exactly. */
     normalized = ( value - min ) / delta;
     if ( !( normalized >= 0.0f ) )
     {
@@ -313,23 +330,19 @@ int serialize_write_bytes( serialize_write_stream_t * stream, const serialize_ui
     int num_words;
     int i;
 
-    if ( bytes < 0 )
-    {
-        return serialize_write_fail( stream );
-    }
+    serialize_assert( bytes >= 0 );
 
     if ( !serialize_write_align( stream ) )
     {
         return 0;
     }
 
-    /* divided rather than multiplied: bytes * 8 overflows int on a block
-       larger than 256MB, and the check is the thing standing in front of the
-       caller's buffer */
-    if ( bytes > ( stream->bits_limit - stream->bits_written ) / 8 )
-    {
-        return serialize_write_fail( stream );
-    }
+    /* capacity is the writer's contract, asserted exactly where the C++
+       WriteBytes asserts it (issue #52). Divided rather than multiplied so
+       the comparison cannot overflow int on a block larger than 256MB, and
+       against bits_limit so a stream failed by serialize_write_fail is
+       caught too. */
+    serialize_assert( bytes <= ( stream->bits_limit - stream->bits_written ) / 8 );
 
     /* the head: whole bytes through the packer until the scratch word is
        empty and the buffer position is a whole word */
@@ -435,16 +448,11 @@ int serialize_write_string( serialize_write_stream_t * stream, const char * stri
 {
     int length;
 
-    if ( stream->error )
-    {
-        return 0;
-    }
-
     length = (int) strlen( string );
-    if ( length >= buffer_size )
-    {
-        return serialize_write_fail( stream );
-    }
+
+    /* fitting the declared buffer is the writer's contract, asserted exactly
+       where the C++ serialize_string_internal asserts it (issue #52) */
+    serialize_assert( length < buffer_size );
 
     /* the writer's contract, debug only. See serialize_string_is_valid_utf8. */
     serialize_assert( serialize_string_is_valid_utf8( string, length ) );
@@ -721,17 +729,11 @@ int serialize_write_int128( serialize_write_stream_t * stream, serialize_int128_
     serialize_uint128_t uvalue, umin, umax, span, offset;
     int bits;
 
-    if ( stream->error )
-    {
-        return 0;
-    }
-
-    if ( serialize_int128_compare( min, max ) > 0 ||
-         serialize_int128_compare( value, min ) < 0 ||
-         serialize_int128_compare( value, max ) > 0 )
-    {
-        return serialize_write_fail( stream );
-    }
+    /* bounds and range are the writer's contract, asserted exactly as the
+       C++ SerializeInteger128 asserts them (issue #52) */
+    serialize_assert( serialize_int128_compare( min, max ) <= 0 );
+    serialize_assert( serialize_int128_compare( value, min ) >= 0 );
+    serialize_assert( serialize_int128_compare( value, max ) <= 0 );
 
     /* converted to the unsigned domain first, so a range wider than 2^127 is
        exact rather than overflowing */
@@ -822,10 +824,9 @@ static int serialize_write_fixed_core( serialize_write_stream_t * stream, serial
 
     offset = serialize_u128_sub( raw_value, raw_min );
 
-    if ( serialize_u128_compare( offset, span ) > 0 )
-    {
-        return serialize_write_fail( stream );
-    }
+    /* the value must be within [min,max] whole units — the writer's contract,
+       asserted exactly as the C++ fixed point writer asserts it (issue #52) */
+    serialize_assert( serialize_u128_compare( offset, span ) <= 0 );
 
     return serialize_write_u128_bits( stream, offset, bits );
 }
@@ -876,7 +877,6 @@ int serialize_write_fixed32( serialize_write_stream_t * stream, serialize_int32_
 {
     serialize_int128_t wide;
     (void) integer_bits;
-    if ( stream->error ) return 0;
     wide = serialize_int128_from_int64( (serialize_int64_t) value );
     return serialize_write_fixed_core( stream, serialize_uint128_make( wide.hi, wide.lo ),
                                        serialize_raw_bound( (serialize_int64_t) min, fraction_bits ),
@@ -902,7 +902,6 @@ int serialize_write_fixed64( serialize_write_stream_t * stream, serialize_int64_
 {
     serialize_int128_t wide;
     (void) integer_bits;
-    if ( stream->error ) return 0;
     wide = serialize_int128_from_int64( value );
     return serialize_write_fixed_core( stream, serialize_uint128_make( wide.hi, wide.lo ),
                                        serialize_raw_bound( min, fraction_bits ),
@@ -927,7 +926,6 @@ int serialize_read_fixed64( serialize_read_stream_t * stream, serialize_int64_t 
 int serialize_write_fixed128( serialize_write_stream_t * stream, serialize_int128_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     (void) integer_bits;
-    if ( stream->error ) return 0;
     return serialize_write_fixed_core( stream, serialize_uint128_make( value.hi, value.lo ),
                                        serialize_raw_bound( min, fraction_bits ),
                                        serialize_raw_bound( max, fraction_bits ) );
@@ -1023,20 +1021,14 @@ int serialize_write_wstring( serialize_write_stream_t * stream, const wchar_t * 
     int units;
     int i;
 
-    if ( stream->error )
-    {
-        return 0;
-    }
-
     /* the writer's contract, debug only. See serialize_wstring_is_valid_utf16. */
     serialize_assert( serialize_wstring_is_valid_utf16( string ) );
 
     units = serialize_wstring_unit_count( string );
 
-    if ( units >= buffer_size )
-    {
-        return serialize_write_fail( stream );
-    }
+    /* fitting the declared buffer is the writer's contract, debug-asserted
+       (issue #52), exactly as the narrow string path asserts it */
+    serialize_assert( units < buffer_size );
 
     if ( !serialize_write_int( stream, units, 0, buffer_size - 1 ) )
     {
@@ -1156,15 +1148,23 @@ int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, 
 /* ---------------------------------------------------------------------------
    measure stream operations
 
-   One per write operation, counting the bits that write would emit without
+   One per write operation, bounding the bits that write would emit without
    emitting any. They are here, at the bottom, because they mirror the whole
    surface and reuse the same static helpers the fixed point and 128-bit paths
    are built from -- the widths are computed by the same code that computes
    them on the write path, not by a second copy that could drift from it.
 
+   The bound is CONSERVATIVE, never below: align charges its worst case of 7
+   bits wherever it appears, because the padding is bit position dependent
+   and a measure does not know where its message will land (see
+   serialize_measure_align in serialize.h -- the fork ruling, and the C++
+   MeasureStream's model). Everything position-independent counts exactly.
+
    test/roundtrip.c checks every one of these against the writer, field by
-   field: a measure that does not equal the bits actually emitted is worse
-   than no measure at all, because it sizes a buffer that then overflows.
+   field: never below the bits actually emitted -- a measure that under-counts
+   is worse than no measure at all, because it sizes a buffer that then
+   overflows -- and above them by exactly the align worst case and nothing
+   else.
    --------------------------------------------------------------------------- */
 
 /*
