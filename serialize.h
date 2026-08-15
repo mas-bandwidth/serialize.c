@@ -608,12 +608,19 @@ int serialize_measure_fixed128( serialize_measure_stream_t * stream, int integer
 
 /* Bits needed for a value in [min,max]; 0 when min == max.
 
+   The parameters live in the UNSIGNED domain, matching the C++ library's
+   bits_required( uint32_t, uint32_t ): the span is max - min modulo the
+   type's width, so signed bounds converted in give exactly the widths they
+   always did, and an unsigned bound above INT32_MAX -- the compressed float
+   ceiling reaches 4294967040 -- needs no narrowing through a signed
+   parameter, which is implementation-defined at this library's C89 floor.
+
    Inline because it is the width of every ranged field, and bounds are almost
    always constants: called from this header it folds to a literal at the call
    site, which is what the C++ macro gets for free and what an out-of-line C
    call was paying for per field. */
-SERIALIZE_INLINE int serialize_bits_required( serialize_int32_t min, serialize_int32_t max );
-SERIALIZE_INLINE int serialize_bits_required64( serialize_int64_t min, serialize_int64_t max );
+SERIALIZE_INLINE int serialize_bits_required( serialize_uint32_t min, serialize_uint32_t max );
+SERIALIZE_INLINE int serialize_bits_required64( serialize_uint64_t min, serialize_uint64_t max );
 
 /* Bounded copy that always null-terminates. */
 void serialize_copy_string( char * dest, const char * source, unsigned long dest_size );
@@ -723,24 +730,24 @@ SERIALIZE_INLINE int serialize_bit_length64( serialize_uint64_t value )
 #endif
 }
 
-SERIALIZE_INLINE int serialize_bits_required( serialize_int32_t min, serialize_int32_t max )
+SERIALIZE_INLINE int serialize_bits_required( serialize_uint32_t min, serialize_uint32_t max )
 {
     if ( min == max )
     {
         return 0;
     }
-    /* the span is computed in the unsigned domain so a range spanning the
-       whole int32 space does not overflow */
-    return serialize_bit_length32( (serialize_uint32_t) max - (serialize_uint32_t) min );
+    /* the parameters are already the unsigned domain, so a range spanning the
+       whole int32 space cannot overflow the subtraction */
+    return serialize_bit_length32( max - min );
 }
 
-SERIALIZE_INLINE int serialize_bits_required64( serialize_int64_t min, serialize_int64_t max )
+SERIALIZE_INLINE int serialize_bits_required64( serialize_uint64_t min, serialize_uint64_t max )
 {
     if ( min == max )
     {
         return 0;
     }
-    return serialize_bit_length64( (serialize_uint64_t) max - (serialize_uint64_t) min );
+    return serialize_bit_length64( max - min );
 }
 
 /* ---------------------------------------------------------------------------
@@ -1089,7 +1096,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_int( serialize_write_stream_t * stre
     serialize_assert( value >= min );
     serialize_assert( value <= max );
 
-    bits = serialize_bits_required( min, max );
+    bits = serialize_bits_required( (serialize_uint32_t) min, (serialize_uint32_t) max );
     if ( bits == 0 )
     {
         /* degenerate range: the value is the range, and nothing is written.
@@ -1110,7 +1117,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_int( serialize_read_stream_t * SERIAL
 
     serialize_assert( min <= max );
 
-    bits = serialize_bits_required( min, max );
+    bits = serialize_bits_required( (serialize_uint32_t) min, (serialize_uint32_t) max );
     if ( bits == 0 )
     {
         if ( stream->error )
@@ -1148,7 +1155,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_int64( serialize_write_stream_t * st
     serialize_assert( value >= min );
     serialize_assert( value <= max );
 
-    bits = serialize_bits_required64( min, max );
+    bits = serialize_bits_required64( (serialize_uint64_t) min, (serialize_uint64_t) max );
     if ( bits == 0 )
     {
         return !stream->error;
@@ -1178,7 +1185,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_int64( serialize_read_stream_t * SERI
 
     serialize_assert( min <= max );
 
-    bits = serialize_bits_required64( min, max );
+    bits = serialize_bits_required64( (serialize_uint64_t) min, (serialize_uint64_t) max );
     if ( bits == 0 )
     {
         if ( stream->error )
@@ -1399,13 +1406,13 @@ SERIALIZE_INLINE int serialize_measure_align( serialize_measure_stream_t * strea
 
 SERIALIZE_INLINE int serialize_measure_int( serialize_measure_stream_t * stream, serialize_int32_t min, serialize_int32_t max )
 {
-    stream->bits_written += serialize_bits_required( min, max );
+    stream->bits_written += serialize_bits_required( (serialize_uint32_t) min, (serialize_uint32_t) max );
     return 1;
 }
 
 SERIALIZE_INLINE int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int64_t min, serialize_int64_t max )
 {
-    stream->bits_written += serialize_bits_required64( min, max );
+    stream->bits_written += serialize_bits_required64( (serialize_uint64_t) min, (serialize_uint64_t) max );
     return 1;
 }
 

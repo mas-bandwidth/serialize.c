@@ -192,6 +192,38 @@ int main( void )
         CHECK( serialize_read_bits_processed( &r ) == 0 );
     }
 
+    /* ---- the quantization ceiling lives in the unsigned domain ----
+
+            The compressed float ceiling clamps at 4294967040 quantization
+            steps, above INT32_MAX. The width computation must stay in the
+            unsigned domain the whole way: narrowing the ceiling through a
+            signed parameter is implementation-defined at this library's C89
+            floor, and on two's-complement machines it happened to produce the
+            right width -- which is exactly the kind of accident that holds
+            until the compiler changes. The clamped field is 32 bits, and a
+            value must survive the round trip through it. */
+    {
+        serialize_measure_stream_t m;
+        float out = 0.0f;
+
+        CHECK( serialize_bits_required( 0, 4294967040u ) == 32 );
+        CHECK( serialize_bits_required( 0, 0x7FFFFFFFu ) == 31 );
+
+        serialize_measure_stream_init( &m );
+        CHECK( serialize_measure_compressed_float( &m, 0.0f, 1.0e9f, 0.0001f ) );
+        CHECK( serialize_measure_bits_processed( &m ) == 32 );
+
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        CHECK( serialize_write_compressed_float( &w, 123456.0f, 0.0f, 1.0e9f, 0.0001f ) );
+        CHECK( !serialize_write_error( &w ) );
+        CHECK( serialize_write_bits_processed( &w ) == 32 );
+        serialize_write_flush( &w );
+
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 1.0e9f, 0.0001f ) );
+        CHECK( !serialize_read_error( &r ) );
+    }
+
     /* ---- failure is sticky whatever caused it ----
 
             The bit limit is what every operation tests against, and failing a

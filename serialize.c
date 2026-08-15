@@ -194,7 +194,10 @@ static int serialize_compressed_float_bits( float min, float max, float res, ser
         values = 4294967040.0f;
     }
     *max_integer_value = (serialize_uint32_t) ceil( (double) values );
-    return serialize_bits_required( 0, (serialize_int32_t) *max_integer_value );
+    /* the ceiling can reach 4294967040, above INT32_MAX: the helper takes the
+       unsigned domain, so the value passes through without narrowing into a
+       signed parameter (implementation-defined at the C89 floor) */
+    return serialize_bits_required( 0, *max_integer_value );
 }
 
 int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res )
@@ -1079,7 +1082,7 @@ int serialize_measure_wstring( serialize_measure_stream_t * stream, const wchar_
         return 0;
     }
 
-    stream->bits_written += serialize_bits_required( 0, buffer_size - 1 );
+    stream->bits_written += serialize_bits_required( 0, (serialize_uint32_t) ( buffer_size - 1 ) );
     stream->bits_written += length * 32;
 
     return 1;
