@@ -301,6 +301,24 @@ typedef long long serialize_int64_t;
 #endif
 
 /*
+    SERIALIZE_BULK_COPY — the same fortify story, for the variable-length
+    payload moves: the serialize_read_bytes payload copy and the
+    serialize_write_bytes body. Darwin's capture rewrites these memcpy calls
+    into __builtin___memcpy_chk too, and the checked form rides the
+    mid-pipeline as an opaque call — priced as a call by the inliner, it
+    pushed the string body past the inline threshold in generated callers.
+    Late simplification folds the check away (the destination's object size
+    is unknowable here, so the check never checked anything), but the pricing
+    happened before the fold. Same guard as above: clang and GCC spell the
+    builtin, MSVC never fortifies.
+*/
+#if defined(__clang__) || defined(__GNUC__)
+#define SERIALIZE_BULK_COPY( dst, src, bytes ) __builtin_memcpy( ( dst ), ( src ), ( bytes ) )
+#else
+#define SERIALIZE_BULK_COPY( dst, src, bytes ) memcpy( ( dst ), ( src ), ( bytes ) )
+#endif
+
+/*
     serialize_assert — caller error, not stream error.
 
     Spelled and overridable exactly as the C++ library spells it, and for the
@@ -1483,9 +1501,11 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERI
         return serialize_read_fail( stream );
     }
 
-    /* byte aligned by the align above, so this is a straight copy */
+    /* byte aligned by the align above, so this is a straight copy — through
+       SERIALIZE_BULK_COPY, because a plain memcpy spelling here re-arms the
+       fortify capture the word moves already dodge */
     serialize_assert( ( stream->bits_read % 8 ) == 0 );
-    memcpy( data, stream->data + ( stream->bits_read >> 3 ), (size_t) bytes );
+    SERIALIZE_BULK_COPY( data, stream->data + ( stream->bits_read >> 3 ), (size_t) bytes );
     stream->bits_read += (serialize_int64_t) bytes * 8;
 
     return 1;
