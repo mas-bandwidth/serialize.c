@@ -1932,19 +1932,19 @@ SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stre
     packet code reads per field made the call the cost.
 
     A block of bytes is byte aligned by construction — serialize_write_align
-    runs first, and that alignment is part of the format — so most of it can be
-    copied straight into the buffer instead of pushed through the packer eight
-    bits at a time. The bytes are identical either way and on either endianness:
-    a byte written through the packer lands at its own offset in the buffer,
-    because the scratch word is byte swapped on a big-endian host precisely so
-    that it does. The golden vectors pin that, and CI runs them on s390x.
+    runs first, and that alignment is part of the format — so the whole payload
+    is copied straight into the buffer instead of pushed through the packer
+    eight bits at a time. The bytes are identical either way and on either
+    endianness: a byte packed through the scratch word lands at its own offset
+    in the buffer, because the scratch is byte swapped on a big-endian host
+    precisely so that it does — which is also why the partial words at the
+    block's edges can move between scratch and buffer as single stores and
+    loads. The golden vectors pin that, and CI runs them on s390x.
 */
 
 SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, const serialize_uint8_t * data, int bytes )
 {
-    int head_bytes;
-    int num_words;
-    int i;
+    int tail_bits;
 
     serialize_assert( bytes >= 0 );
 
@@ -1960,45 +1960,56 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
        caught too. */
     serialize_assert( bytes <= ( stream->bits_limit - stream->bits_written ) / 8 );
 
-    /* the head: whole bytes through the packer until the scratch word is
-       empty and the buffer position is a whole word */
-    head_bytes = ( 8 - ( stream->bits_written % 64 ) / 8 ) % 8;
-    if ( head_bytes > bytes )
+    /* byte aligned by the align above, and mid-stream the scratch tracks the
+       cursor: scratch_bits == bits_written % 64 */
+    serialize_assert( ( stream->bits_written % 8 ) == 0 );
+    serialize_assert( stream->scratch_bits == stream->bits_written % 64 );
+
+    /*
+        The head: one word store, not a byte loop. The partial scratch word
+        goes to the buffer as a whole 8-byte store — its low scratch_bits are
+        the bytes already written, its high bits are zero, and the payload
+        copy below overwrites exactly those zero bytes. The old shape pushed
+        the head AND the tail through the packer a byte at a time, which is
+        the loop that priced this function out of generated callers; the C++
+        WriteBytes has the same byte loops and pays the same way, so this is
+        not a place where mirroring the reference shape was the fast form —
+        both sides of the airport comparison were wrong here, and the wire
+        bytes are identical either way.
+    */
+    if ( stream->scratch_bits != 0 )
     {
-        head_bytes = bytes;
-    }
-    for ( i = 0; i < head_bytes; i++ )
-    {
-        if ( !serialize_write_bits( stream, (serialize_uint32_t) data[i], 8 ) )
-        {
-            return 0;
-        }
-    }
-    if ( head_bytes == bytes )
-    {
-        return 1;
+        serialize_uint64_t word = serialize_host_to_wire64( stream->scratch );
+        SERIALIZE_WORD_COPY( stream->data + (size_t) stream->word_index * 8, &word );
     }
 
-    serialize_assert( ( stream->bits_written % 64 ) == 0 );
-    serialize_assert( stream->scratch_bits == 0 );
+    /* the body: the whole payload, straight in at the byte cursor */
+    SERIALIZE_BULK_COPY( stream->data + (size_t) ( stream->bits_written >> 3 ), data, (size_t) bytes );
 
-    /* the body: whole words, straight in */
-    num_words = ( bytes - head_bytes ) / 8;
-    if ( num_words > 0 )
-    {
-        memcpy( stream->data + (size_t) stream->word_index * 8, data + head_bytes, (size_t) num_words * 8 );
-        stream->bits_written += num_words * 64;
-        stream->word_index += num_words;
-    }
+    stream->bits_written += bytes * 8;
+    stream->word_index = stream->bits_written / 64;
 
-    /* and the tail, back through the packer */
-    for ( i = head_bytes + num_words * 8; i < bytes; i++ )
+    /*
+        The tail: reload the trailing partial word into the scratch, so later
+        writes pack into it exactly as if its bytes had gone through the
+        packer. The load reads the word the final flush is already obliged to
+        store (tail_bits != 0 keeps scratch_bits != 0, so flush WILL store
+        it), so it touches no memory the stream does not already own; the
+        bits above the tail are whatever the buffer held and the mask
+        discards them.
+    */
+    tail_bits = stream->bits_written % 64;
+    if ( tail_bits != 0 )
     {
-        if ( !serialize_write_bits( stream, (serialize_uint32_t) data[i], 8 ) )
-        {
-            return 0;
-        }
+        serialize_uint64_t word;
+        SERIALIZE_WORD_COPY( &word, stream->data + (size_t) stream->word_index * 8 );
+        stream->scratch = serialize_wire_to_host64( word ) & ( ( ( (serialize_uint64_t) 1 ) << tail_bits ) - 1 );
     }
+    else
+    {
+        stream->scratch = 0;
+    }
+    stream->scratch_bits = tail_bits;
 
     return 1;
 }
