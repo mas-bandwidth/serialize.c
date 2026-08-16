@@ -33,17 +33,14 @@
     Nothing else is dropped. Dropping work from this side would make C look
     faster for free, which is the one result this benchmark must not produce.
 
-    Two API level differences are worth knowing when reading the numbers, both
-    properties of the libraries rather than of this harness:
-
-      - the C measure functions take only the arguments that determine WIDTH,
-        never the value, so bench_packet_measure takes no packet. The varying
-        call is still made in the measure loop so the loop matches C++'s.
-
-      - the C read stream assembles its 8 byte window byte by byte once it is
-        within 8 bytes of the end of the buffer, where the C++ reader loads 8
-        bytes unconditionally and relies on the caller having allocated slack.
-        For small packets that tail is most of the packet.
+    One API level difference is worth knowing when reading the numbers, a
+    property of the libraries rather than of this harness: the C measure
+    functions take only the arguments that determine WIDTH, never the value,
+    so bench_packet_measure takes no packet. The varying call is still made
+    in the measure loop so the loop matches C++'s. The read paths need no
+    such note: both libraries load their 64-bit read window unconditionally
+    and require the caller's allocation to extend 8 bytes past the data —
+    every buffer here does.
 
     Only release build numbers are meaningful, and only as ratios between legs
     measured back to back on the same machine.

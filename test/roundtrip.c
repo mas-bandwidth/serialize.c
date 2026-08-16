@@ -44,7 +44,7 @@ static int failed = 0;
 
 int main( void )
 {
-    static serialize_uint8_t buffer[2048];
+    static serialize_uint8_t buffer[2048 + 8];      /* + 8: read buffer allocations extend 8 bytes past the data */
     serialize_write_stream_t w;
     serialize_read_stream_t r;
 
@@ -793,6 +793,88 @@ int main( void )
         CHECK( strcmp( str_out, cafe ) == 0 );
     }
 
+    /* ---- past-end poison: the other half of the allocation contract ----
+
+            The reader loads 64-bit windows at byte granularity and requires
+            the allocation to extend at least 8 bytes past the end of the
+            data (see the read stream struct); near the end of the stream
+            those windows load bytes past the end. This proves the "loaded
+            but never interpreted" half, the same way the C++ test suite
+            proves it for its reader: poison planted beyond the stream end
+            must not change a single decoded value, and must not change
+            refusal behavior. ---- */
+    {
+        serialize_uint8_t clean[64 + 8];        /* + 8: read buffer allocations extend 8 bytes past the data */
+        serialize_uint8_t poison[64 + 8];
+        int n;
+
+        /* a message whose final field ends mid-byte, so the last windows
+           genuinely reach past the data: 3 + 10 + 64 + 9 = 86 bits, 11 bytes */
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        CHECK( serialize_write_bits( &w, 5, 3 ) );
+        CHECK( serialize_write_int( &w, 42, 0, 1000 ) );
+        CHECK( serialize_write_uint64( &w, 0x0123456789ABCDEFULL ) );
+        CHECK( serialize_write_bits( &w, 0x155u, 9 ) );
+        serialize_write_flush( &w );
+        CHECK( !serialize_write_error( &w ) );
+        n = serialize_write_bytes_processed( &w );
+
+        /* accept path: identical decode with a zeroed tail and a poisoned tail */
+        {
+            serialize_read_stream_t rc, rp;
+            serialize_uint32_t vc3 = 0, vp3 = 0, vc9 = 0, vp9 = 0;
+            serialize_int32_t ic = 0, ip = 0;
+            serialize_uint64_t uc = 0, up = 0;
+
+            memset( clean, 0, sizeof( clean ) );
+            memset( poison, 0xFF, sizeof( poison ) );   /* poison everywhere, including the loaded-but-never-interpreted slack */
+            memcpy( clean, buffer, (size_t) n );
+            memcpy( poison, buffer, (size_t) n );
+
+            serialize_read_stream_init( &rc, clean, n );
+            serialize_read_stream_init( &rp, poison, n );
+
+            CHECK( serialize_read_bits( &rc, &vc3, 3 ) );       CHECK( serialize_read_bits( &rp, &vp3, 3 ) );
+            CHECK( serialize_read_int( &rc, &ic, 0, 1000 ) );   CHECK( serialize_read_int( &rp, &ip, 0, 1000 ) );
+            CHECK( serialize_read_uint64( &rc, &uc ) );         CHECK( serialize_read_uint64( &rp, &up ) );
+            CHECK( serialize_read_bits( &rc, &vc9, 9 ) );       CHECK( serialize_read_bits( &rp, &vp9, 9 ) );
+            CHECK( vc3 == 5 );                  CHECK( vp3 == vc3 );
+            CHECK( ic == 42 );                  CHECK( ip == ic );
+            CHECK( uc == 0x0123456789ABCDEFULL );               CHECK( up == uc );
+            CHECK( vc9 == 0x155u );             CHECK( vp9 == vc9 );
+            CHECK( !serialize_read_error( &rc ) );
+            CHECK( !serialize_read_error( &rp ) );
+            CHECK( serialize_read_bits_processed( &rp ) == serialize_read_bits_processed( &rc ) );
+        }
+
+        /* refusal path: truncate the stream one byte short so the decode
+           must fail. The bytes at and past the truncated end are exactly
+           where the reader's windows load from, and the refusal must be
+           identical whether they are zero or poison. */
+        {
+            serialize_read_stream_t rc, rp;
+            serialize_uint32_t v = 0;
+            serialize_int32_t iv = 0;
+            serialize_uint64_t uv = 0;
+
+            memset( clean, 0, sizeof( clean ) );
+            memset( poison, 0xFF, sizeof( poison ) );
+            memcpy( clean, buffer, (size_t) ( n - 1 ) );
+            memcpy( poison, buffer, (size_t) ( n - 1 ) );
+
+            serialize_read_stream_init( &rc, clean, n - 1 );
+            serialize_read_stream_init( &rp, poison, n - 1 );
+
+            CHECK( serialize_read_bits( &rc, &v, 3 ) );         CHECK( serialize_read_bits( &rp, &v, 3 ) );
+            CHECK( serialize_read_int( &rc, &iv, 0, 1000 ) );   CHECK( serialize_read_int( &rp, &iv, 0, 1000 ) );
+            CHECK( serialize_read_uint64( &rc, &uv ) );         CHECK( serialize_read_uint64( &rp, &uv ) );
+            CHECK( !serialize_read_bits( &rc, &v, 9 ) );        CHECK( !serialize_read_bits( &rp, &v, 9 ) );
+            CHECK( serialize_read_error( &rc ) );
+            CHECK( serialize_read_error( &rp ) );
+            CHECK( serialize_read_bits_processed( &rp ) == serialize_read_bits_processed( &rc ) );
+        }
+    }
+
     /* ---- NaN through compressed float, in a RELEASE build only.
 
        A non-finite value is non-conforming input (serialize fork #6, the
@@ -810,8 +892,8 @@ int main( void )
 #ifdef NDEBUG
     {
         static const serialize_uint32_t nan_patterns[2] = { 0x7FC00000UL, 0xFFC00000UL };  /* quiet NaN, and its negative */
-        serialize_uint8_t nan_buffer[16];
-        serialize_uint8_t min_buffer[16];
+        serialize_uint8_t nan_buffer[16 + 8];       /* + 8: read buffer allocations extend 8 bytes past the data */
+        serialize_uint8_t min_buffer[16 + 8];       /* same size, so the memcmp below compares like with like */
         serialize_write_stream_t w2;
         float nan_value;
         float out;
