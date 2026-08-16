@@ -78,7 +78,14 @@
     fires in a debug build and compiles to nothing under NDEBUG. Size the
     buffer with a measure stream if you are not certain the message fits:
     writing past the end of your buffer in a release build is undefined
-    behavior, yours. A read validates the network; it does not validate you.
+    behavior, yours.
+
+    The measure stream carries the same contracts the same way — debug
+    asserts, zero release checking — and so do the caller-owned parameters
+    of a READ: bounds the wrong way round on a ranged read are your bug,
+    asserted, never a read failure. What a read checks for real, in every
+    build mode, is the data. A read validates the network; it does not
+    validate you.
 */
 
 #ifndef SERIALIZE_H
@@ -409,8 +416,8 @@ SERIALIZE_INLINE int serialize_measure_bytes_processed( const serialize_measure_
    --------------------------------------------------------------------------- */
 
 /* bits must be in [1,32] and value must be less than 2^bits. Both are caller
-   error, so both are asserted rather than checked; a value wider than its
-   declared bits is masked, so it damages its own field and no other. So is
+   error, so both are asserted rather than checked, exactly as the C++
+   BitWriter asserts them — and nothing else: no mask, no fallback. So is
    capacity, on the write side: the write path performs no release-build
    checks at all (issue #52 — see ERRORS). */
 SERIALIZE_ALWAYS_INLINE int serialize_write_bits( serialize_write_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t value, int bits );
@@ -631,18 +638,19 @@ int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, 
    the value -- int_relative, string, wstring -- the value is taken too, and
    there is no way to get the count right without it.
 
-   They return int for symmetry with the write half, and return 0 for input
-   the writer's contract forbids: a string or wstring longer than its buffer,
-   an int_relative that does not increase, inverted bounds. The writer itself
-   debug-asserts these (issue #52 — see ERRORS); the measure stream keeps the
-   real refusal because a measure is how a buffer gets sized, and a count for
-   a message no conforming writer produces is the one way a measure can do
-   damage. Nothing is counted in that case, so a measure that returns 0
-   leaves the stream as it was.
+   They return int for symmetry with the write half, and in a release build
+   they always return 1: measure carries the writer's contracts — a string or
+   wstring longer than its declared buffer, an int_relative that does not
+   increase, inverted bounds — as serialize_assert, exactly like the write
+   half (issue #52 — see ERRORS). The C++ MeasureStream makes the same split:
+   its contracts are debug asserts and its release build is pure bit
+   arithmetic with zero checks. Feeding a measure input no conforming writer
+   could produce is caller error, caught in a debug build; a release build
+   counts it unchecked, exactly as the release writer would write it.
 
-   What a measure CANNOT refuse is a value out of its declared range, because
-   it is never given the value -- only the bounds that set the width. The
-   write is where that is asserted.
+   What a measure cannot even assert is a value out of its declared range,
+   because it is never given the value -- only the bounds that set the width.
+   The write is where that is asserted.
    --------------------------------------------------------------------------- */
 
 SERIALIZE_INLINE int serialize_measure_bits( serialize_measure_stream_t * stream, int bits );
@@ -875,14 +883,14 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_bits( serialize_write_stream_t * SER
     */
     serialize_assert( stream->bits_written + bits <= stream->bits_limit );
 
-    /* mask rather than trust: the assert above catches a value wider than its
-       declared bits in a debug build, and the mask keeps a release build
-       deterministic — the damage stays inside the field it belongs to */
+    /* a value wider than its declared bits is caller error, asserted exactly
+       where the C++ BitWriter asserts it — and, like the C++ BitWriter, not
+       masked: the release write path trusts the value it is given (issue
+       #52). This port used to mask here "so the damage stays inside the
+       field", which was an invented release-build defence the C++ writer
+       does not perform; the cross-language contract is that the CALLER is
+       responsible for well-formed writes. */
     serialize_assert( bits == 32 || value <= (serialize_uint32_t) ( ( 1UL << bits ) - 1 ) );
-    if ( bits < 32 )
-    {
-        value &= (serialize_uint32_t) ( ( 1UL << bits ) - 1 );
-    }
 
     stream->scratch |= ( (serialize_uint64_t) value ) << stream->scratch_bits;
 

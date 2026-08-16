@@ -427,18 +427,12 @@ int main( void )
         CHECK( serialize_measure_bits_processed( &m ) == serialize_write_bits_processed( &w ) + 19 );
         CHECK( serialize_measure_bytes_processed( &m ) >= serialize_write_bytes_processed( &w ) );
 
-        /* measure refuses what the writer would refuse, and counts nothing
-           when it does -- a count the writer could never produce is the one
-           way a measure stream can do real damage */
-        {
-            serialize_measure_stream_init( &m );
-            CHECK( !serialize_measure_string( &m, "too long for its buffer", 8 ) );
-            CHECK( !serialize_measure_wstring( &m, ws, 3 ) );
-            CHECK( !serialize_measure_int_relative( &m, 100, 100 ) );
-            CHECK( !serialize_measure_int_relative( &m, 100, 99 ) );
-            CHECK( !serialize_measure_int128( &m, i128hi, i128lo ) );
-            CHECK( serialize_measure_bits_processed( &m ) == 0 );
-        }
+        /* measure carries the writer's contracts as debug asserts and
+           nothing else — a string that does not fit, an int_relative that
+           does not increase, inverted 128-bit bounds are all caller error,
+           asserted like every other writer contract (issue #52) and checked
+           by nothing in a release build, exactly like the C++ MeasureStream.
+           test/assertdeath.c proves each of those asserts fires. */
     }
 
     /* ---- 128-bit, fixed point and wide strings ---- */
