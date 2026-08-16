@@ -63,6 +63,11 @@
     READS can fail: 1 on success, 0 on failure. Failure is sticky — once a
     read stream fails, subsequent reads fail without touching the buffer, so
     you can check once at the end of a message rather than after every field.
+    Failure does not stop the cursor: a refused read still advances bits_read
+    by the bits it asked for (see serialize_read_bits for why), so
+    bits_processed on a FAILED stream is meaningless — it counts reads
+    ATTEMPTED, not data decoded. Check serialize_read_error; only a stream
+    that has not failed has a cursor worth reading.
     Reads fail on out-of-range values rather than clamping them. This library
     is used on packet paths that face the open internet, and a read is the
     place where untrusted data arrives.
@@ -372,8 +377,19 @@ typedef struct serialize_write_stream_t
 typedef struct serialize_read_stream_t
 {
     const serialize_uint8_t * data;
-    int num_bits;
-    int bits_read;
+
+    /*
+        The cursor fields are serialize_int64_t — the C++ BitReader's
+        int64_t m_bitsRead, matched deliberately rather than cosmetically.
+        bits_read advances UNCONDITIONALLY: a refused read still advances it
+        by the bits it asked for (see serialize_read_bits for why), so on a
+        stream that has already failed, an adversary spamming reads keeps
+        the cursor climbing — an int32 cursor could be driven to signed
+        overflow, which is undefined behavior. 64 bits puts that beyond
+        reach.
+    */
+    serialize_int64_t num_bits;
+    serialize_int64_t bits_read;
     int error;                  /* sticky: once set, every read fails */
 
     /*
@@ -381,11 +397,14 @@ typedef struct serialize_read_stream_t
 
         Every read already tests that it fits, so poisoning the limit is what
         makes failure sticky WITHOUT a second test per field: one comparison
-        answers both questions. Set it through serialize_read_fail and never
-        by hand — a stream whose error flag is set and whose limit is not
-        would accept the next read.
+        answers both questions. And it is the ONLY thing that makes failure
+        sticky — the failure path does not restore the cursor (see
+        serialize_read_bits), so an unpoisoned limit would accept the next
+        read. Set it through serialize_read_fail and never by hand — a
+        stream whose error flag is set and whose limit is not would do
+        exactly that.
     */
-    int bits_limit;
+    serialize_int64_t bits_limit;
 } serialize_read_stream_t;
 
 /*
@@ -427,7 +446,9 @@ SERIALIZE_INLINE int serialize_write_error( const serialize_write_stream_t * str
    hand leaves the bit limit unpoisoned — see bits_limit in the stream structs.
 
    On a READ stream failure is sticky: every later read fails without touching
-   the buffer. On a WRITE stream the flag is reported by serialize_write_error
+   the buffer — though each still advances the cursor, so the processed
+   counters on a failed stream are meaningless (see ERRORS at the top of this
+   file). On a WRITE stream the flag is reported by serialize_write_error
    but the release write path never consults it — writes are trusted and
    cannot fail (see ERRORS) — so do not keep writing to a stream you have
    failed: that is caller error, and the poisoned bit limit makes the next
@@ -437,9 +458,14 @@ SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream );
 
 SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stream, const void * buffer, int bytes );
 
-SERIALIZE_INLINE int serialize_read_bits_processed( const serialize_read_stream_t * stream );
-SERIALIZE_INLINE int serialize_read_bytes_processed( const serialize_read_stream_t * stream );
-SERIALIZE_INLINE int serialize_read_bits_remaining( const serialize_read_stream_t * stream );
+/* serialize_int64_t, not int, and the C++ reader's accessors return int64_t
+   for the same reason: the cursor these report is 64-bit — see the read
+   stream struct. On a FAILED stream all three are meaningless: the cursor
+   advances on refused reads too, so they reflect reads attempted, not data
+   decoded (see ERRORS at the top of this file). */
+SERIALIZE_INLINE serialize_int64_t serialize_read_bits_processed( const serialize_read_stream_t * stream );
+SERIALIZE_INLINE serialize_int64_t serialize_read_bytes_processed( const serialize_read_stream_t * stream );
+SERIALIZE_INLINE serialize_int64_t serialize_read_bits_remaining( const serialize_read_stream_t * stream );
 SERIALIZE_INLINE int serialize_read_error( const serialize_read_stream_t * stream );
 
 SERIALIZE_INLINE void serialize_measure_stream_init( serialize_measure_stream_t * stream );
@@ -996,24 +1022,49 @@ SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stre
     serialize_assert( buffer );
 
     stream->data = (const serialize_uint8_t *) buffer;
-    stream->num_bits = bytes * 8;
+    stream->num_bits = (serialize_int64_t) bytes * 8;
     stream->bits_read = 0;
     stream->error = 0;
-    stream->bits_limit = bytes * 8;
+    stream->bits_limit = (serialize_int64_t) bytes * 8;
 }
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits )
 {
     serialize_uint64_t window;
+    serialize_int64_t begin;
 
     /* caller error, asserted exactly where the C++ BitReader asserts it */
     serialize_assert( bits > 0 );
     serialize_assert( bits <= 32 );
 
+    /*
+        The cursor advances UNCONDITIONALLY, before the limit test, and the
+        failure path does not restore it — sticky failure rides entirely on
+        the poisoned limit, which already refuses every later read.
+
+        This makes bits_read an AFFINE function of the reads attempted: with
+        the advance conditional on the check, every read's bit position was
+        control-dependent on every earlier read's limit test, so across an
+        unrolled group of reads the compiler had to thread the cursor
+        serially — recompute position, then test, then advance, sixteen
+        times in a chain. With the cursor affine, every position inside a
+        group is a compile-time constant off the group base, the checks
+        fold to comparisons against precomputed bounds, and the window
+        loads schedule independently — the C++ BitReader's shape. With the
+        advance conditional, this read path measured at nearly twice the
+        C++ reader's cost, and the serial cursor thread was the mechanism.
+
+        The price is that a failed stream's cursor keeps counting attempts
+        (see ERRORS), which is why the cursor is serialize_int64_t — see
+        the read stream struct.
+    */
+    begin = stream->bits_read;
+    stream->bits_read = begin + bits;
+
     /* the network's error, not the caller's: this is C++'s WouldReadPastEnd,
        which is a real check there too — and, via the poisoned limit, the
        sticky flag as well. See serialize_write_bits. */
-    if ( stream->bits_read + bits > stream->bits_limit )
+    if ( begin + bits > stream->bits_limit )
     {
         return serialize_read_fail( stream );
     }
@@ -1022,28 +1073,29 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIA
        covers this (see the read stream struct). One unconditional load and a
        shift by the bit remainder — the C++ BitReader's read path, load for
        load, with no per-read branch beyond the buffer-end test above. */
-    SERIALIZE_WORD_COPY( &window, stream->data + ( stream->bits_read >> 3 ) );
+    SERIALIZE_WORD_COPY( &window, stream->data + ( begin >> 3 ) );
     window = serialize_wire_to_host64( window );
 
-    *value = ( (serialize_uint32_t) ( window >> ( stream->bits_read & 7 ) ) )
+    *value = ( (serialize_uint32_t) ( window >> ( (int) ( begin & 7 ) ) ) )
            & (serialize_uint32_t) ( ( ( (serialize_uint64_t) 1 ) << bits ) - 1 );
-
-    stream->bits_read += bits;
 
     return 1;
 }
 
-SERIALIZE_INLINE int serialize_read_bits_processed( const serialize_read_stream_t * stream )
+/* Meaningless on a FAILED stream — the cursor counts reads attempted, not
+   data decoded. See ERRORS at the top of this file, and the prototypes for
+   why these return serialize_int64_t. */
+SERIALIZE_INLINE serialize_int64_t serialize_read_bits_processed( const serialize_read_stream_t * stream )
 {
     return stream->bits_read;
 }
 
-SERIALIZE_INLINE int serialize_read_bytes_processed( const serialize_read_stream_t * stream )
+SERIALIZE_INLINE serialize_int64_t serialize_read_bytes_processed( const serialize_read_stream_t * stream )
 {
     return ( stream->bits_read + 7 ) / 8;
 }
 
-SERIALIZE_INLINE int serialize_read_bits_remaining( const serialize_read_stream_t * stream )
+SERIALIZE_INLINE serialize_int64_t serialize_read_bits_remaining( const serialize_read_stream_t * stream )
 {
     return stream->num_bits - stream->bits_read;
 }
@@ -1103,7 +1155,7 @@ SERIALIZE_INLINE int serialize_write_align_bits( const serialize_write_stream_t 
 
 SERIALIZE_INLINE int serialize_read_align_bits( const serialize_read_stream_t * stream )
 {
-    return ( 8 - ( stream->bits_read % 8 ) ) % 8;
+    return (int) ( ( 8 - ( stream->bits_read % 8 ) ) % 8 );
 }
 
 SERIALIZE_ALWAYS_INLINE int serialize_write_align( serialize_write_stream_t * stream )
@@ -1118,7 +1170,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_align( serialize_write_stream_t * st
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_align( serialize_read_stream_t * stream )
 {
-    int remainder = stream->bits_read % 8;
+    int remainder = (int) ( stream->bits_read % 8 );
     if ( remainder != 0 )
     {
         serialize_uint32_t padding = 0;
@@ -1430,7 +1482,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERI
     /* byte aligned by the align above, so this is a straight copy */
     serialize_assert( ( stream->bits_read % 8 ) == 0 );
     memcpy( data, stream->data + ( stream->bits_read >> 3 ), (size_t) bytes );
-    stream->bits_read += bytes * 8;
+    stream->bits_read += (serialize_int64_t) bytes * 8;
 
     return 1;
 }
