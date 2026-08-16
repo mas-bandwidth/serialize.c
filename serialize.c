@@ -797,10 +797,11 @@ int serialize_read_int128( serialize_read_stream_t * stream, serialize_int128_t 
         return 0;
     }
 
-    if ( serialize_int128_compare( min, max ) > 0 )
-    {
-        return serialize_read_fail( stream );
-    }
+    /* bounds are the caller's, not the network's: asserted exactly as the
+       C++ ReadStream::SerializeInteger128 asserts them, never checked in a
+       release build. What IS checked for real, below, is the decoded offset
+       against the span — that is where untrusted data arrives. */
+    serialize_assert( serialize_int128_compare( min, max ) <= 0 );
 
     umin = serialize_uint128_make( min.hi, min.lo );
     umax = serialize_uint128_make( max.hi, max.lo );
@@ -1238,10 +1239,11 @@ int serialize_measure_int_relative( serialize_measure_stream_t * stream, seriali
 {
     serialize_uint32_t difference;
 
-    if ( current <= previous )
-    {
-        return 0;
-    }
+    /* STRICTLY increasing is the caller's contract on measure exactly as it
+       is on write, debug-asserted (issue #52). The C++ measure path rides
+       the same assert — MeasureStream is a writing stream — and its release
+       build checks nothing. */
+    serialize_assert( current > previous );
 
     difference = (serialize_uint32_t) current - (serialize_uint32_t) previous;
 
@@ -1302,12 +1304,10 @@ int serialize_measure_string( serialize_measure_stream_t * stream, const char * 
 {
     int length = (int) strlen( string );
 
-    /* the writer refuses a string that does not fit, so a count for one would
-       be a number no write could ever produce */
-    if ( length >= buffer_size )
-    {
-        return 0;
-    }
+    /* fitting the declared buffer is the caller's contract on measure exactly
+       as it is on write, debug-asserted (issue #52) and never checked in a
+       release build — the C++ measure path rides the same assert */
+    serialize_assert( length < buffer_size );
 
     serialize_measure_int( stream, 0, buffer_size - 1 );
     serialize_measure_bytes( stream, length );
@@ -1322,10 +1322,9 @@ int serialize_measure_wstring( serialize_measure_stream_t * stream, const wchar_
 {
     int units = serialize_wstring_unit_count( string );
 
-    if ( units >= buffer_size )
-    {
-        return 0;
-    }
+    /* the caller's contract, debug-asserted exactly as the narrow path
+       asserts it (issue #52) */
+    serialize_assert( units < buffer_size );
 
     stream->bits_written += serialize_bits_required( 0, (serialize_uint32_t) ( buffer_size - 1 ) );
     stream->bits_written += units * 32;
@@ -1343,10 +1342,10 @@ int serialize_measure_int128( serialize_measure_stream_t * stream, serialize_int
 {
     serialize_uint128_t umin, umax, span;
 
-    if ( serialize_int128_compare( min, max ) > 0 )
-    {
-        return 0;
-    }
+    /* bounds are the caller's contract on measure exactly as they are on
+       write, debug-asserted (issue #52) — the C++ MeasureStream asserts
+       min <= max the same way and its release build checks nothing */
+    serialize_assert( serialize_int128_compare( min, max ) <= 0 );
 
     umin = serialize_uint128_make( min.hi, min.lo );
     umax = serialize_uint128_make( max.hi, max.lo );
