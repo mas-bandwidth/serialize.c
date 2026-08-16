@@ -260,6 +260,38 @@ typedef long long serialize_int64_t;
 #endif
 
 /*
+    SERIALIZE_WORD_COPY — how the packer's 8-byte word moves are spelled.
+
+    These moves were plain memcpy, and on Darwin that spelling is not what
+    the optimizer prices: _FORTIFY_SOURCE is on by default there, and its
+    macro capture rewrites memcpy into __builtin___memcpy_chk before the
+    compiler proper ever sees the call. The checked form survives into
+    LLVM's mid-pipeline as an opaque call, and the loop-unroll cost model
+    prices it as one — the 16-wide bitpacker write group came out ~24% over
+    the full-unroll budget and lost its unroll, measured C at 180% of C++
+    where the airport era had exact parity, and the same opacity sits in
+    every generated-C write spine. The C++ leg is never fortified (Darwin's
+    fortify capture applies only to C), so the two legs were not being
+    priced on the same IR: defeating the capture IS check-model parity.
+
+    __builtin_memcpy is the same operation, byte for byte — only the
+    mid-pipeline IR form changes, from opaque call back to the intrinsic
+    the unroll pricer folds. Guarded to clang/GCC, which both spell the
+    builtin; MSVC never fortifies, so plain memcpy is already the intrinsic
+    there.
+
+    Do not "simplify" this back to memcpy: that spelling re-arms the
+    fortify capture and re-loses the unroll. Receipts: the 2026-08-16
+    post-law investigation (r-candidate.txt and the per-SHA remark
+    ledgers).
+*/
+#if defined(__clang__) || defined(__GNUC__)
+#define SERIALIZE_WORD_COPY( dst, src ) __builtin_memcpy( ( dst ), ( src ), 8 )
+#else
+#define SERIALIZE_WORD_COPY( dst, src ) memcpy( ( dst ), ( src ), 8 )
+#endif
+
+/*
     serialize_assert — caller error, not stream error.
 
     Spelled and overridable exactly as the C++ library spells it, and for the
@@ -902,7 +934,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_bits( serialize_write_stream_t * SER
     if ( new_scratch_bits >= 64 )
     {
         serialize_uint64_t word = serialize_host_to_wire64( stream->scratch );
-        memcpy( stream->data + (size_t) stream->word_index * 8, &word, sizeof( word ) );
+        SERIALIZE_WORD_COPY( stream->data + (size_t) stream->word_index * 8, &word );
         stream->word_index++;
         /* recover the bits that spilled past 64. new_scratch_bits >= 64 with
            bits <= 32 means the shift is in [1,32], never the undefined 64 */
@@ -924,7 +956,7 @@ SERIALIZE_INLINE void serialize_write_flush( serialize_write_stream_t * stream )
     if ( stream->scratch_bits != 0 )
     {
         serialize_uint64_t word = serialize_host_to_wire64( stream->scratch );
-        memcpy( stream->data + (size_t) stream->word_index * 8, &word, sizeof( word ) );
+        SERIALIZE_WORD_COPY( stream->data + (size_t) stream->word_index * 8, &word );
         stream->scratch = 0;
         stream->scratch_bits = 0;
         stream->word_index++;
@@ -990,7 +1022,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIA
        covers this (see the read stream struct). One unconditional load and a
        shift by the bit remainder — the C++ BitReader's read path, load for
        load, with no per-read branch beyond the buffer-end test above. */
-    memcpy( &window, stream->data + ( stream->bits_read >> 3 ), sizeof( window ) );
+    SERIALIZE_WORD_COPY( &window, stream->data + ( stream->bits_read >> 3 ) );
     window = serialize_wire_to_host64( window );
 
     *value = ( (serialize_uint32_t) ( window >> ( stream->bits_read & 7 ) ) )
