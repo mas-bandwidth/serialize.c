@@ -193,8 +193,10 @@ typedef long long serialize_int64_t;
     and block frequency decays geometrically down the chain — so a few fields
     into a message, every remaining callsite is judged cold and held to the
     cold-callsite inline threshold, which these functions do not fit. On the
-    read side that price is the bounds-safe window and the sticky-failure
-    test. The write side no longer carries any runtime check (issue #52:
+    read side that price is the buffer-end test, which via the poisoned
+    limit is the sticky-failure test as well — the one release-build branch
+    the read path carries, same as the C++ ReadStream's WouldReadPastEnd.
+    The write side no longer carries any runtime check (issue #52:
     writes are trusted, capacity asserted in debug only, matching the C++
     writer), but the demand stays, for the same reason the C++ library
     demands its own write spine: an out-of-line field costs the call and
@@ -308,11 +310,22 @@ typedef struct serialize_write_stream_t
 /*
     A read stream over a buffer produced by a write stream.
 
-    The reader loads through an 8-byte window, so it may read up to 7 bytes
-    past the last meaningful byte. The buffer must therefore have 8 readable
-    bytes from the start of the final word — the same allocation contract the
-    C++ library documents. Rounding the buffer up to a multiple of 8 satisfies
-    it.
+    IMPORTANT: the allocation backing the buffer must extend AT LEAST 8 BYTES
+    PAST THE END of the data, because the reader loads a 64-bit window from
+    the current byte position, and near the end of the stream that window
+    begins inside the final bytes — exactly the allocation contract the C++
+    BitReader documents. The bytes past the end are loaded but never
+    interpreted: poison there changes no decoded value and no refusal, and
+    test/roundtrip.c proves it. This is the family's accepted best practice
+    (STANDARD.md, Implementation Law — the buffer contract): machinery that
+    avoids the slack obligation at the cost of per-operation work in the hot
+    path is a slower correct option, and is refused.
+
+    The data pointer itself does not need to be aligned: each window is
+    loaded with memcpy, which packet payloads require because they typically
+    start at an unaligned offset once the transport header is stripped.
+
+    The buffer must not change while the stream is reading it.
 */
 typedef struct serialize_read_stream_t
 {
@@ -331,26 +344,6 @@ typedef struct serialize_read_stream_t
         would accept the next read.
     */
     int bits_limit;
-
-    /*
-        The last window of the buffer, assembled once at init.
-
-        The reader loads a 64-bit window at the current byte. Within the first
-        bytes - 8 of the buffer that window is a single load; past
-        that it would run off the end, so the final window is built up front
-        from the bytes that are there and every read in the last 8 bytes uses
-        it, shifted. tail_base is the byte index that window starts at, and is
-        0 for a buffer shorter than 8 bytes — which is then entirely in tail.
-
-        This is what lets the read path stay two straight-line instructions per
-        arm and require nothing of the caller's allocation. The C++ reader
-        instead loads unconditionally and requires 8 bytes of slack past the
-        data; this port asks nothing, and the price is one predictable branch.
-
-        The buffer must not change while the stream is reading it.
-    */
-    serialize_uint64_t tail;    /* host order, ready to shift */
-    int tail_base;
 } serialize_read_stream_t;
 
 /*
@@ -954,46 +947,22 @@ SERIALIZE_INLINE int serialize_write_error( const serialize_write_stream_t * str
 
 SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stream, const void * buffer, int bytes )
 {
-    const serialize_uint8_t * data = (const serialize_uint8_t *) buffer;
+    /* caller error, asserted exactly where the C++ BitReader asserts it.
+       The allocation contract — at least 8 bytes past the end of the data,
+       see the read stream struct — is the caller's, like every allocation,
+       and is checked by nothing here: there is nothing to test it against. */
+    serialize_assert( buffer );
 
-    stream->data = data;
+    stream->data = (const serialize_uint8_t *) buffer;
     stream->num_bits = bytes * 8;
     stream->bits_read = 0;
     stream->error = 0;
     stream->bits_limit = bytes * 8;
-
-    /* the final window, built once. See the struct. */
-    if ( bytes >= 8 )
-    {
-        serialize_uint64_t word;
-        stream->tail_base = bytes - 8;
-        memcpy( &word, data + bytes - 8, sizeof( word ) );
-        stream->tail = serialize_wire_to_host64( word );
-    }
-    else
-    {
-        /* Spelled out rather than looped: a loop here is a loop the caller's
-           per-message code has to carry, and there are at most seven bytes.
-           Shifting from the low byte up IS the wire order, so this needs no
-           byte swap on either host. */
-        serialize_uint64_t word = 0;
-        stream->tail_base = 0;
-        if ( bytes > 0 ) word |= ( (serialize_uint64_t) data[0] );
-        if ( bytes > 1 ) word |= ( (serialize_uint64_t) data[1] ) << 8;
-        if ( bytes > 2 ) word |= ( (serialize_uint64_t) data[2] ) << 16;
-        if ( bytes > 3 ) word |= ( (serialize_uint64_t) data[3] ) << 24;
-        if ( bytes > 4 ) word |= ( (serialize_uint64_t) data[4] ) << 32;
-        if ( bytes > 5 ) word |= ( (serialize_uint64_t) data[5] ) << 40;
-        if ( bytes > 6 ) word |= ( (serialize_uint64_t) data[6] ) << 48;
-        stream->tail = word;
-    }
 }
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits )
 {
     serialize_uint64_t window;
-    int byte_index;
-    int shift;
 
     /* caller error, asserted exactly where the C++ BitReader asserts it */
     serialize_assert( bits > 0 );
@@ -1007,32 +976,15 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIA
         return serialize_read_fail( stream );
     }
 
-    /*
-        The window. Inside the buffer it is one load; in the last 8 bytes it is
-        the word init already assembled, shifted to where this read starts. Two
-        instructions either way, and neither runs off the end of the buffer —
-        which is what this port promises and the C++ reader does not. See the
-        read stream struct.
-    */
-    byte_index = stream->bits_read >> 3;
+    /* loads up to 7 bytes past the last data byte: the allocation contract
+       covers this (see the read stream struct). One unconditional load and a
+       shift by the bit remainder — the C++ BitReader's read path, load for
+       load, with no per-read branch beyond the buffer-end test above. */
+    memcpy( &window, stream->data + ( stream->bits_read >> 3 ), sizeof( window ) );
+    window = serialize_wire_to_host64( window );
 
-    if ( byte_index < stream->tail_base )
-    {
-        memcpy( &window, stream->data + byte_index, sizeof( window ) );
-        window = serialize_wire_to_host64( window );
-        shift = stream->bits_read & 7;
-    }
-    else
-    {
-        window = stream->tail;
-        shift = stream->bits_read - stream->tail_base * 8;
-    }
-
-    *value = (serialize_uint32_t) ( window >> shift );
-    if ( bits < 32 )
-    {
-        *value &= (serialize_uint32_t) ( ( 1UL << bits ) - 1 );
-    }
+    *value = ( (serialize_uint32_t) ( window >> ( stream->bits_read & 7 ) ) )
+           & (serialize_uint32_t) ( ( ( (serialize_uint64_t) 1 ) << bits ) - 1 );
 
     stream->bits_read += bits;
 

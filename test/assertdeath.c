@@ -145,14 +145,20 @@ static void violate_measure_int128_bounds( void )
 
 static void violate_read_int128_bounds( void )
 {
-    serialize_uint8_t buffer[16];
+    serialize_uint8_t buffer[16 + 8];                   /* + 8: read buffer allocations extend 8 bytes past the data */
     serialize_read_stream_t r;
     serialize_int128_t out;
     memset( buffer, 0, sizeof( buffer ) );
-    serialize_read_stream_init( &r, buffer, sizeof( buffer ) );
+    serialize_read_stream_init( &r, buffer, 16 );
     serialize_read_int128( &r, &out,
                            serialize_int128_from_int64( 1 ),
                            serialize_int128_from_int64( -1 ) );     /* min > max */
+}
+
+static void violate_read_null_buffer( void )
+{
+    serialize_read_stream_t r;
+    serialize_read_stream_init( &r, NULL, 8 );          /* the C++ BitReader asserts data; init asserts the same */
 }
 
 static void violate_write_after_fail( void )
@@ -255,6 +261,7 @@ int main( void )
     must_abort( violate_measure_int_relative_order,      "measure_int_relative_order" );
     must_abort( violate_measure_int128_bounds,           "measure_int128_bounds" );
     must_abort( violate_read_int128_bounds,              "read_int128_bounds" );
+    must_abort( violate_read_null_buffer,                "read_null_buffer" );
     must_abort( violate_write_after_fail,                "write_after_fail" );
     must_abort( violate_compressed_float_nan_value,      "compressed_float_nan_value" );
     must_abort( violate_compressed_float_inf_value,      "compressed_float_inf_value" );

@@ -63,7 +63,7 @@ static int check_bytes( const char * label, const serialize_uint8_t * buffer, in
 
 static int golden_core( void )
 {
-    static serialize_uint8_t buffer[1024];
+    static serialize_uint8_t buffer[1024 + 8];      /* + 8: read buffer allocations extend 8 bytes past the data */
     static const serialize_uint8_t blob[5] = { 1, 2, 3, 250, 255 };
     serialize_write_stream_t w;
     int n;
@@ -166,7 +166,7 @@ static int golden_core( void )
 
 static int golden_wide( void )
 {
-    static serialize_uint8_t buffer[1024];
+    static serialize_uint8_t buffer[1024 + 8];      /* + 8: read buffer allocations extend 8 bytes past the data */
     serialize_write_stream_t w;
     wchar_t ws[8];
     int n;
