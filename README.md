@@ -112,9 +112,13 @@ error, caught by the debug assert.
 
 ## Building
 
-There is no build system to adopt: two files, `serialize.h` and `serialize.c`.
-Drop them in your project and compile `serialize.c`. It needs `-lm` for
-`ceil` and `floor` on the compressed-float path, and nothing else.
+There is no build system to adopt: the library is header-only. Include
+`serialize.h` and you have all of it. It needs `-lm` for `ceil` and `floor`
+on the compressed-float path, and nothing else.
+
+`serialize.c` still ships as an empty compatibility stub, so a build that
+compiles and links it keeps working unchanged — but linking it is optional,
+the way a single-header library works.
 
 The Makefile here is for developing the library itself:
 
@@ -214,14 +218,16 @@ from least significant upward, which two lanes reproduce exactly.
 
 ## Speed
 
-The per-field operations — bits, bool, align, ranged `int` and `int64`, the
-fixed-width helpers, float, double, the byte-block read, the stream lifecycle
-and the measure operations — are defined in `serialize.h` rather than
-`serialize.c`, so they inline into your code and their bit widths fold to
-literals the way the C++ macros do. You get that by compiling normally: no
-LTO flag, no define.
+The whole library is defined in `serialize.h`, so every operation inlines
+into your code and its bit width folds to a literal the way the C++ macros
+do. You get that by compiling normally: no LTO flag, no define. The bulk
+bodies — strings, the byte-block write, int_relative, 128-bit, fixed point —
+are ordinary inline header functions whose cost is the work rather than the
+call, but header residency is what lets a call site carrying literal bounds
+fold their width computations too; as separate-TU functions every short
+string paid a boundary call the C++ template did not.
 
-Both halves of that surface go one step further: they **demand** inlining
+The per-field spines go one step further: they **demand** inlining
 (`SERIALIZE_ALWAYS_INLINE`) instead of hinting at it. A serialize path is a
 chain of fallible operations, the compiler's static branch heuristics treat
 each success/failure split as even odds, and a few fields into a message every
