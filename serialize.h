@@ -209,8 +209,17 @@ typedef long long serialize_int64_t;
     45, write_bool at 110, write_uint64 at 245 — with the C write rows at
     0.59–0.71x. So both per-field spines demand inlining instead of hinting
     at it. What deliberately does NOT make the demand: the bulk and branchy
-    bodies (byte blocks, strings, int_relative, compressed float, fixed
-    point), whose cost is the work rather than the call.
+    bodies (byte blocks, strings, int_relative, compressed float), whose
+    cost is the work rather than the call. Fixed point LEFT that list when
+    the align-up read path (#21) thinned the read body enough that the fixed
+    core's price fell to one call's width of the threshold (clang priced it
+    260 against 250 and stranded it out of the fixed32/64/128 wrappers —
+    schema's inline gate caught the strand on probearray read). The deeper
+    reason it belongs in the demand set: the C++ reference takes the fixed
+    bounds as template parameters, so every fixed field instantiates a
+    specialization whose span arithmetic constant-folds away; this port
+    takes them as runtime arguments, and demanding the core into wrappers
+    that receive literals is the C spelling of that same fold.
 
     Branch-weight hints are not the fix and are not used: __builtin_expect
     on the error edges was measured in this library (bits read −6.5%, mixed
@@ -266,6 +275,7 @@ typedef long long serialize_int64_t;
 
 #include <stddef.h>   /* wchar_t */
 #include <string.h>   /* memcpy — the packer moves whole words through it */
+#include <math.h>     /* ceil, floor — compressed float quantization */
 
 #ifdef __cplusplus
 extern "C" {
@@ -485,8 +495,8 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_double( serialize_write_stream_t * s
 SERIALIZE_ALWAYS_INLINE int serialize_read_double( serialize_read_stream_t * SERIALIZE_RESTRICT stream, double * SERIALIZE_RESTRICT value );
 
 /* Lossy by construction: a round trip returns the nearest quantum. */
-int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res );
-int serialize_read_compressed_float( serialize_read_stream_t * stream, float * value, float min, float max, float res );
+SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res );
+SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float( serialize_read_stream_t * stream, float * value, float min, float max, float res );
 
 /* ---------------------------------------------------------------------------
    bytes and strings
@@ -662,7 +672,7 @@ int serialize_measure_int_relative( serialize_measure_stream_t * stream, seriali
 
 SERIALIZE_INLINE int serialize_measure_float( serialize_measure_stream_t * stream );
 SERIALIZE_INLINE int serialize_measure_double( serialize_measure_stream_t * stream );
-int serialize_measure_compressed_float( serialize_measure_stream_t * stream, float min, float max, float res );
+SERIALIZE_ALWAYS_INLINE int serialize_measure_compressed_float( serialize_measure_stream_t * stream, float min, float max, float res );
 
 SERIALIZE_INLINE int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes );
 int serialize_measure_string( serialize_measure_stream_t * stream, const char * string, int buffer_size );
@@ -1483,6 +1493,169 @@ SERIALIZE_INLINE int serialize_measure_bytes( serialize_measure_stream_t * strea
 {
     serialize_measure_align( stream );
     stream->bits_written += bytes * 8;
+    return 1;
+}
+
+/* ---------------------------------------------------------------------------
+   compressed float — header-resident, and the inlining is DEMANDED.
+
+   Hoisted from the translation unit (2026-08-16): the C++ reference's
+   compressed float is a header template, so at a call site carrying literal
+   min/max/res the whole body inlines and the width computation constant-folds
+   away — schema's inline gate shows cpp probearray read at full, zero calls
+   out of line. As a TU function this port's version could never inline at
+   any threshold: every generated call site paid a boundary call AND
+   recomputed the width at runtime. Same rough algorithm, demonstrated in
+   C++; this is the C spelling of it. The demand rather than a hint for the
+   same reason as the per-field spine above: fallible-chain block-frequency
+   decay prices these call sites cold.
+   --------------------------------------------------------------------------- */
+
+/*
+    Finite, spelled so the C89 floor holds: isfinite is C99. finite - finite
+    is zero; Inf - Inf and NaN - NaN are NaN, and NaN compares unequal to
+    everything, so the subtraction answers for every input. The Makefile's
+    -ffp-contract=off and the absence of any fast-math flag are what keep a
+    compiler from folding it. Referenced only from serialize_assert, so it
+    compiles to nothing under NDEBUG.
+*/
+SERIALIZE_INLINE int serialize_float_is_finite( float value )
+{
+    return value - value == 0.0f;
+}
+
+/*
+    The width of a compressed float, and the quantization ceiling that goes
+    with it. In one place because three callers need it -- write, read and
+    measure -- and a formula copied three times is a formula that drifts twice.
+*/
+SERIALIZE_INLINE int serialize_compressed_float_bits( float min, float max, float res, serialize_uint32_t * max_integer_value )
+{
+    float delta = max - min;
+    float values = delta / res;
+    serialize_assert( min < max && res > 0.0f );
+    /* a declaration whose span or step count does not compute finite is
+       non-conforming (serialize fork #6, the ruling verbatim: "it's
+       non-conforming") — caller error at the site the parameters are
+       computed, debug-asserted like every other declaration contract. The
+       clamps below keep the release build deterministic regardless. */
+    serialize_assert( serialize_float_is_finite( delta ) );
+    serialize_assert( serialize_float_is_finite( values ) );
+    /* clamp with the !>= form so the uint32 conversion below is defined even
+       for pathological delta / res -- NaN fails every ordered comparison, so
+       the plain < form lets it through and the conversion of NaN to unsigned
+       is undefined in C. The !>= form catches it. Match serialize.h's
+       serialize_compressed_float_internal exactly. */
+    if ( !( values >= 1.0f ) )
+    {
+        values = 1.0f;
+    }
+    else if ( values > 4294967040.0f )
+    {
+        values = 4294967040.0f;
+    }
+    *max_integer_value = (serialize_uint32_t) ceil( (double) values );
+    /* the ceiling can reach 4294967040, above INT32_MAX: the helper takes the
+       unsigned domain, so the value passes through without narrowing into a
+       signed parameter (implementation-defined at the C89 floor) */
+    return serialize_bits_required( 0, *max_integer_value );
+}
+
+SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res )
+{
+    float delta;
+    serialize_uint32_t max_integer_value;
+    int bits;
+    float normalized;
+    float scaled;
+    serialize_uint32_t integer_value;
+
+    /* a non-finite value is non-conforming (serialize fork #6, the ruling
+       verbatim: "attempting to send NaN or INF or anything else through
+       compressed float is non-conforming and should assert out on write
+       too") — asserted at intake, per the writes-trusted doctrine */
+    serialize_assert( serialize_float_is_finite( value ) );
+
+    delta = max - min;
+    bits = serialize_compressed_float_bits( min, max, res, &max_integer_value );
+
+    /* clamp with the !>= / !<= form so a non-finite value that survives into
+       a release build (the assert above compiles out) is forced into range
+       instead of reaching the uint32 conversion below -- NaN writes as min,
+       deterministically. Match serialize.h exactly. */
+    normalized = ( value - min ) / delta;
+    if ( !( normalized >= 0.0f ) )
+    {
+        normalized = 0.0f;
+    }
+    else if ( !( normalized <= 1.0f ) )
+    {
+        normalized = 1.0f;
+    }
+
+    /* The arithmetic is float32, and the two roundings are REQUIRED. Widening
+       to double here looks harmless and is not: it changes the wire. Over
+       [0,10] at resolution 0.01, value 0.005 quantizes to 1 in float32 and 0
+       in double, and 0.025 / 0.105 / 9.995 diverge the same way. Only values
+       that land exactly on a quantum agree, which is why a golden built from
+       such values stays green while the wire is wrong. The product is stored
+       through a local before the add so the intermediate rounds to float32 --
+       a compiler is otherwise free to contract the multiply and add into a
+       single FMA and round ONCE, which diverges again. Match serialize.h's
+       serialize_compressed_float_internal exactly. */
+    scaled = normalized * (float) max_integer_value;
+    integer_value = (serialize_uint32_t) floor( (double) ( scaled + 0.5f ) );
+
+    return serialize_write_bits( stream, integer_value, bits );
+}
+
+SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float( serialize_read_stream_t * stream, float * value, float min, float max, float res )
+{
+    float delta;
+    serialize_uint32_t max_integer_value;
+    int bits;
+    serialize_uint32_t integer_value = 0;
+    float normalized;
+    float scaled;
+
+    if ( stream->error )
+    {
+        return 0;
+    }
+
+    delta = max - min;
+    bits = serialize_compressed_float_bits( min, max, res, &max_integer_value );
+
+    if ( !serialize_read_bits( stream, &integer_value, bits ) )
+    {
+        return 0;
+    }
+
+    if ( integer_value > max_integer_value )
+    {
+        return serialize_read_fail( stream );
+    }
+
+    /* The reconstruction is float32 like the writer's quantization, and the
+       same contraction hazard applies: written as one expression, a compiler
+       permitted to contract (clang's default is -ffp-contract=on) may fuse
+       the multiply and the add into a single FMA and round once instead of
+       twice, and two hosts then reconstruct different floats from the same
+       bytes. The wire does not change -- the decoded VALUE does, which is a
+       cross-platform divergence of its own. Store the product through a
+       local, exactly as the writer does, and see the Makefile's
+       -ffp-contract=off for the compilers that fuse across statements. */
+    normalized = (float) integer_value / (float) max_integer_value;
+    scaled = normalized * delta;
+    *value = scaled + min;
+
+    return 1;
+}
+
+SERIALIZE_ALWAYS_INLINE int serialize_measure_compressed_float( serialize_measure_stream_t * stream, float min, float max, float res )
+{
+    serialize_uint32_t max_integer_value;
+    stream->bits_written += serialize_compressed_float_bits( min, max, res, &max_integer_value );
     return 1;
 }
 
