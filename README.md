@@ -159,12 +159,28 @@ and big enough: the writer checks capacity only as a debug assert, never in a
 release build (see Errors). Ask for the meaningful length with
 `serialize_write_bytes_processed` after flushing.
 
-The **reader** loads through an 8-byte window, and the last such window — the
-one that would reach past the end — is assembled once when the stream is
-initialized, from the bytes that are there. Unlike the C++ library, which
-loads unconditionally and documents the slack as the caller's responsibility,
-you can hand this reader a buffer of exactly the meaningful length. The buffer
-must not change while the stream is reading it.
+The **reader** loads whole 8-byte windows at byte granularity,
+unconditionally — the same read path as the C++ library, load for load. The
+allocation backing the buffer must therefore extend **at least 8 bytes past
+the end of the data**: near the end of the stream the final window begins
+inside the last bytes and reaches past them. The bytes past the end are
+loaded but **never interpreted** — poison there changes no decoded value and
+no refusal, and the test suite proves it. Any allocation at least 8 bytes
+longer than the data satisfies the contract; the in-tree tests and benches
+spell it `[N + 8]`. The data pointer itself needs no alignment — windows are
+loaded with `memcpy`, because packet payloads typically start at an unaligned
+offset once the transport header is stripped.
+
+This is the family's accepted best practice, and law (STANDARD.md,
+"Implementation Law" — the buffer contract): reading whole words through the
+end of the buffer, with the allocation extended so the final word load is
+legal, is how a conforming implementation reads. Machinery that avoids the
+slack obligation at the cost of per-operation work in the hot path is a
+slower correct option, and is refused.
+
+The buffer must not change while the stream is reading it. Handing the reader
+an allocation without the slack is caller error with no runtime check at any
+build setting — like every allocation, it is yours.
 
 ## The full surface
 
@@ -243,11 +259,12 @@ in registers. That check is now gone (see Errors): the write path matches
 C++ and the residual those rows show is expected to close. The bench harness
 re-measures it.
 
-The raw bitpacker read remains behind on purpose. The C++ reader loads its
-64-bit window unconditionally and **requires the caller's allocation to extend
-8 bytes past the data**; this one reads no byte you did not give it, and pays
-one predictable branch per read for that. Removing the branch — measured —
-takes bitpacker read to 2497 MB/s.
+The bitpacker read row also predates the align-up buffer contract (see Buffer
+contract): it was measured while every read still paid a window-select branch
+that spared the caller the 8-bytes-past allocation. That branch is gone — the
+reader now loads its 64-bit window unconditionally, exactly as C++ does — and
+removing it was measured, at the time of that table, taking bitpacker read
+from 2099 to 2497 MB/s. The bench harness re-measures it.
 
 Caller error is `serialize_assert` and compiles out under `NDEBUG`, matching
 the C++ library operation for operation: bounds the wrong way round, a value
