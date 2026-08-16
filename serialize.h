@@ -78,7 +78,14 @@
     fires in a debug build and compiles to nothing under NDEBUG. Size the
     buffer with a measure stream if you are not certain the message fits:
     writing past the end of your buffer in a release build is undefined
-    behavior, yours. A read validates the network; it does not validate you.
+    behavior, yours.
+
+    The measure stream carries the same contracts the same way — debug
+    asserts, zero release checking — and so do the caller-owned parameters
+    of a READ: bounds the wrong way round on a ranged read are your bug,
+    asserted, never a read failure. What a read checks for real, in every
+    build mode, is the data. A read validates the network; it does not
+    validate you.
 */
 
 #ifndef SERIALIZE_H

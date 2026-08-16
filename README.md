@@ -88,6 +88,21 @@ out under `NDEBUG`. Size the buffer with a measure stream if you are not
 certain the message fits: writing past the end of your buffer in a release
 build is undefined behavior, yours.
 
+That trust is the whole caller-facing surface, not just the write half. The
+**measure stream carries the same contracts the same way**: a string longer
+than its declared buffer, an `int_relative` that does not increase, inverted
+128-bit bounds are debug asserts, and a release-build measure is pure bit
+arithmetic with zero checks — like the C++ `MeasureStream`, whose release
+build checks nothing either. The parameters you pass a **read** are yours
+too: inverted bounds on a ranged read are caller error, asserted in debug
+and never checked in release, exactly as the C++ `ReadStream` asserts them.
+What a reader checks for real — in every build mode — is the **data**: a
+value outside its declared range, a read past the end of the buffer, nonzero
+align padding, and malformed string/wstring content are refused, the same
+refusals the C++ reader keeps in its release build. The model is exact
+parity with C++, operation by operation: zero release-build validation of
+the caller, full release-build refusal of the wire.
+
 If you need to mark a stream failed yourself, call `serialize_read_fail` or
 `serialize_write_fail`; do not set the `error` field by hand, because failure
 is carried by a poisoned bit limit as well as by that flag. On a read stream
@@ -239,7 +254,8 @@ the C++ library operation for operation: bounds the wrong way round, a value
 outside its declared range on write, a bit count outside `[1,32]`, a write
 past the end of the buffer. What stays in a release build is everything that
 judges the network — range checks on read, malformed align padding, reads
-past the end — and nothing on write at all.
+past the end, malformed string and wstring content — and nothing on write,
+measure, or the caller-owned parameters of a read at all.
 
 ## Contributing
 
