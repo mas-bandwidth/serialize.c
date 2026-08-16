@@ -170,14 +170,14 @@ typedef long long serialize_int64_t;
 #endif
 
 /*
-    SERIALIZE_INLINE — how the hot path is spelled.
+    SERIALIZE_INLINE — how the library's functions are spelled.
 
     C89 has no inline keyword, so the floor is plain static: a private copy per
     translation unit, which the compiler inlines anyway at any optimization
     level and which needs SERIALIZE_UNUSED so an unused one does not warn.
     Everything above C89 spells it properly. static either way, so a caller
-    that includes only this header links, and nothing here collides with
-    serialize.c.
+    that includes only this header links, and two translation units that both
+    include it get their own copies and never collide.
 */
 #ifndef SERIALIZE_INLINE
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
