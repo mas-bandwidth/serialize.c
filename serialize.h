@@ -34,7 +34,7 @@
     build still compiles the stub. The per-field spines DEMAND inlining as
     SERIALIZE_ALWAYS_INLINE, which says why where it is defined. The bulk and
     branchy bodies — strings, the byte-block write, int_relative, the 128-bit
-    lanes, fixed point — are ordinary SERIALIZE_INLINE header functions, the
+    lanes — are ordinary SERIALIZE_INLINE header functions, the
     residency the C++ reference gives its own string and block internals:
     their cost is dominated by the work rather than the call, but as TU
     functions they could never inline at ANY threshold, and every short
@@ -215,20 +215,28 @@ typedef long long serialize_int64_t;
     45, write_bool at 110, write_uint64 at 245 — with the C write rows at
     0.59–0.71x. So both per-field spines demand inlining instead of hinting
     at it. What deliberately does NOT make the demand: the bulk and branchy
-    bodies (the byte-block write, strings, int_relative, the 128-bit lanes,
-    the fixed point wrappers), whose cost is the work rather than the call —
-    header-resident as SERIALIZE_INLINE since the 2026-08-17 hoist, so a
-    call site carrying literal bounds may inline and fold them, but nothing
-    forces it. The fixed point CORES left that list when
-    the align-up read path (#21) thinned the read body enough that the fixed
-    core's price fell to one call's width of the threshold (clang priced it
-    260 against 250 and stranded it out of the fixed32/64/128 wrappers —
-    schema's inline gate caught the strand on probearray read). The deeper
-    reason it belongs in the demand set: the C++ reference takes the fixed
-    bounds as template parameters, so every fixed field instantiates a
-    specialization whose span arithmetic constant-folds away; this port
-    takes them as runtime arguments, and demanding the core into wrappers
-    that receive literals is the C spelling of that same fold.
+    bodies (the byte-block write, strings, int_relative, the 128-bit lanes),
+    whose cost is the work rather than the call — header-resident as
+    SERIALIZE_INLINE since the 2026-08-17 hoist, so a call site carrying
+    literal bounds may inline and fold them, but nothing forces it.
+
+    The fixed point family is in the demand set END TO END — wrappers, cores,
+    the measure half, and the raw-bound helper that exists only to serve
+    them. The cores joined first, when the align-up read path (#21) thinned
+    the read body enough that the fixed core's price fell to one call's
+    width of the threshold (clang priced it 260 against 250 and stranded it
+    out of the fixed32/64/128 wrappers — schema's inline gate caught the
+    strand on probearray read). The wrappers joined when the real-world
+    bench (space-game packets, 2026-08-17) showed why hinting was not
+    enough: the schema-generated spine passes the bounds as literals at
+    every fixed call site, but the parameters are runtime arguments, so
+    clang priced the wrappers 145-250 against the cold-callsite threshold
+    of 45 and left every fixed field of the real packet outlined — and the
+    C real_packet rows ran far behind the C++ reference, whose templates
+    take the same bounds as template parameters and fold the span
+    arithmetic to literals. Demanding the whole chain — spine literals into
+    wrapper, wrapper into core, raw bound folded on the way — is the C
+    spelling of that same fold.
 
     Branch-weight hints are not the fix and are not used: __builtin_expect
     on the error edges was measured in this library (bits read −6.5%, mixed
@@ -673,14 +681,14 @@ SERIALIZE_INLINE int serialize_read_int128( serialize_read_stream_t * stream, se
    storage. integer_bits + fraction_bits must equal the storage width.
    --------------------------------------------------------------------------- */
 
-SERIALIZE_INLINE int serialize_write_fixed32( serialize_write_stream_t * stream, serialize_int32_t value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max );
-SERIALIZE_INLINE int serialize_read_fixed32( serialize_read_stream_t * stream, serialize_int32_t * value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_write_fixed32( serialize_write_stream_t * stream, serialize_int32_t value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_read_fixed32( serialize_read_stream_t * stream, serialize_int32_t * value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max );
 
-SERIALIZE_INLINE int serialize_write_fixed64( serialize_write_stream_t * stream, serialize_int64_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
-SERIALIZE_INLINE int serialize_read_fixed64( serialize_read_stream_t * stream, serialize_int64_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_write_fixed64( serialize_write_stream_t * stream, serialize_int64_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_read_fixed64( serialize_read_stream_t * stream, serialize_int64_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
 
-SERIALIZE_INLINE int serialize_write_fixed128( serialize_write_stream_t * stream, serialize_int128_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
-SERIALIZE_INLINE int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_write_fixed128( serialize_write_stream_t * stream, serialize_int128_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
 
 /* ---------------------------------------------------------------------------
    wide strings
@@ -761,9 +769,9 @@ SERIALIZE_INLINE int serialize_measure_wstring( serialize_measure_stream_t * str
 SERIALIZE_INLINE int serialize_measure_uint128( serialize_measure_stream_t * stream );
 SERIALIZE_INLINE int serialize_measure_int128( serialize_measure_stream_t * stream, serialize_int128_t min, serialize_int128_t max );
 
-SERIALIZE_INLINE int serialize_measure_fixed32( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max );
-SERIALIZE_INLINE int serialize_measure_fixed64( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
-SERIALIZE_INLINE int serialize_measure_fixed128( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed32( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed64( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
+SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed128( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
 
 /* ---------------------------------------------------------------------------
    helpers
@@ -2521,8 +2529,12 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_fixed_core( serialize_read_stream_t *
     return 1;
 }
 
-/* min and max are WHOLE units; the raw bound is min << fraction_bits */
-SERIALIZE_INLINE serialize_uint128_t serialize_raw_bound( serialize_int64_t whole, int fraction_bits )
+/* min and max are WHOLE units; the raw bound is min << fraction_bits.
+   In the demand set with the rest of the fixed family: fraction_bits is a
+   literal at every schema call site, so this whole body folds to a constant
+   — unless a cold-callsite inliner strands it, which is exactly what the
+   demand forbids. */
+SERIALIZE_ALWAYS_INLINE serialize_uint128_t serialize_raw_bound( serialize_int64_t whole, int fraction_bits )
 {
     serialize_int128_t wide = serialize_int128_from_int64( whole );
     serialize_uint128_t u = serialize_uint128_make( wide.hi, wide.lo );
@@ -2535,7 +2547,7 @@ SERIALIZE_INLINE serialize_uint128_t serialize_raw_bound( serialize_int64_t whol
     return u;
 }
 
-SERIALIZE_INLINE int serialize_write_fixed32( serialize_write_stream_t * stream, serialize_int32_t value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_write_fixed32( serialize_write_stream_t * stream, serialize_int32_t value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
 {
     serialize_int128_t wide;
     (void) integer_bits;
@@ -2545,7 +2557,7 @@ SERIALIZE_INLINE int serialize_write_fixed32( serialize_write_stream_t * stream,
                                        serialize_raw_bound( (serialize_int64_t) max, fraction_bits ) );
 }
 
-SERIALIZE_INLINE int serialize_read_fixed32( serialize_read_stream_t * stream, serialize_int32_t * value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_read_fixed32( serialize_read_stream_t * stream, serialize_int32_t * value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
 {
     serialize_uint128_t raw;
     (void) integer_bits;
@@ -2560,7 +2572,7 @@ SERIALIZE_INLINE int serialize_read_fixed32( serialize_read_stream_t * stream, s
     return 1;
 }
 
-SERIALIZE_INLINE int serialize_write_fixed64( serialize_write_stream_t * stream, serialize_int64_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_write_fixed64( serialize_write_stream_t * stream, serialize_int64_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     serialize_int128_t wide;
     (void) integer_bits;
@@ -2570,7 +2582,7 @@ SERIALIZE_INLINE int serialize_write_fixed64( serialize_write_stream_t * stream,
                                        serialize_raw_bound( max, fraction_bits ) );
 }
 
-SERIALIZE_INLINE int serialize_read_fixed64( serialize_read_stream_t * stream, serialize_int64_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_read_fixed64( serialize_read_stream_t * stream, serialize_int64_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     serialize_uint128_t raw;
     (void) integer_bits;
@@ -2585,7 +2597,7 @@ SERIALIZE_INLINE int serialize_read_fixed64( serialize_read_stream_t * stream, s
     return 1;
 }
 
-SERIALIZE_INLINE int serialize_write_fixed128( serialize_write_stream_t * stream, serialize_int128_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_write_fixed128( serialize_write_stream_t * stream, serialize_int128_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     (void) integer_bits;
     return serialize_write_fixed_core( stream, serialize_uint128_make( value.hi, value.lo ),
@@ -2593,7 +2605,7 @@ SERIALIZE_INLINE int serialize_write_fixed128( serialize_write_stream_t * stream
                                        serialize_raw_bound( max, fraction_bits ) );
 }
 
-SERIALIZE_INLINE int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     serialize_uint128_t raw;
     (void) integer_bits;
@@ -2981,7 +2993,7 @@ SERIALIZE_INLINE int serialize_measure_int128( serialize_measure_stream_t * stre
 
 /* the shared core, mirroring serialize_write_fixed_core: the width comes from
    the span of the RAW (scaled) bounds, and nothing else */
-SERIALIZE_INLINE int serialize_measure_fixed_core( serialize_measure_stream_t * stream, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed_core( serialize_measure_stream_t * stream, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     serialize_uint128_t raw_min = serialize_raw_bound( min, fraction_bits );
     serialize_uint128_t raw_max = serialize_raw_bound( max, fraction_bits );
@@ -2992,19 +3004,19 @@ SERIALIZE_INLINE int serialize_measure_fixed_core( serialize_measure_stream_t * 
     return 1;
 }
 
-SERIALIZE_INLINE int serialize_measure_fixed32( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed32( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
 {
     (void) integer_bits;
     return serialize_measure_fixed_core( stream, fraction_bits, (serialize_int64_t) min, (serialize_int64_t) max );
 }
 
-SERIALIZE_INLINE int serialize_measure_fixed64( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed64( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     (void) integer_bits;
     return serialize_measure_fixed_core( stream, fraction_bits, min, max );
 }
 
-SERIALIZE_INLINE int serialize_measure_fixed128( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed128( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     (void) integer_bits;
     return serialize_measure_fixed_core( stream, fraction_bits, min, max );
