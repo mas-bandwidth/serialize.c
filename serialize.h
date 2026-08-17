@@ -2323,8 +2323,17 @@ SERIALIZE_INLINE serialize_uint128_t serialize_u128_add( serialize_uint128_t a, 
     from the bottom with the final group carrying the remainder. This is the
     same splitting rule serialize_bits uses for wide values, and the one the
     128-bit and fixed point paths share.
+
+    In the demand set with the fixed point family (#27): every schema fixed
+    call site hands the cores a literal bit count, so this loop folds to one
+    or two serialize_write_bits calls at a folded width — but spelled
+    SERIALIZE_INLINE the loop priced over the cold-callsite threshold and
+    clang stranded exactly this call out of the folded spine (8 `bl
+    serialize_write_u128_bits` in the real packet's write spine, one per
+    fixed field, each re-deriving the fold at runtime). The wrappers' demand
+    is worthless if the chain breaks one level down; this is the last link.
 */
-SERIALIZE_INLINE int serialize_write_u128_bits( serialize_write_stream_t * stream, serialize_uint128_t value, int bits )
+SERIALIZE_ALWAYS_INLINE int serialize_write_u128_bits( serialize_write_stream_t * stream, serialize_uint128_t value, int bits )
 {
     int written = 0;
     int group = 0;
@@ -2347,7 +2356,7 @@ SERIALIZE_INLINE int serialize_write_u128_bits( serialize_write_stream_t * strea
     return 1;
 }
 
-SERIALIZE_INLINE int serialize_read_u128_bits( serialize_read_stream_t * stream, serialize_uint128_t * value, int bits )
+SERIALIZE_ALWAYS_INLINE int serialize_read_u128_bits( serialize_read_stream_t * stream, serialize_uint128_t * value, int bits )
 {
     int read = 0;
     int group = 0;
