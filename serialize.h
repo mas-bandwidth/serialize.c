@@ -215,10 +215,15 @@ typedef long long serialize_int64_t;
     45, write_bool at 110, write_uint64 at 245 — with the C write rows at
     0.59–0.71x. So both per-field spines demand inlining instead of hinting
     at it. What deliberately does NOT make the demand: the bulk and branchy
-    bodies (the byte-block write, strings, int_relative, the 128-bit lanes),
-    whose cost is the work rather than the call — header-resident as
-    SERIALIZE_INLINE since the 2026-08-17 hoist, so a call site carrying
-    literal bounds may inline and fold them, but nothing forces it.
+    bodies (the byte-block write, strings, int_relative), whose cost is the
+    work rather than the call — header-resident as SERIALIZE_INLINE since
+    the 2026-08-17 hoist, so a call site carrying literal bounds may inline
+    and fold them, but nothing forces it. The 128-bit lane cluster was in
+    that exempt list until gcc x86-64 showed why it cannot be: a flattened
+    real-world spine exhausts gcc's --param large-function-growth budget
+    and every remaining plain-inline lane call is refused regardless of
+    size. The lanes are instructions in the C++ reference (native
+    __int128), so they demand too — receipts at the cluster's own comment.
 
     The fixed point family is in the demand set END TO END — wrappers, cores,
     the measure half, and the raw-bound helper that exists only to serve
@@ -639,17 +644,17 @@ typedef struct serialize_int128_t
     serialize_uint64_t hi;
 } serialize_int128_t;
 
-SERIALIZE_INLINE serialize_uint128_t serialize_uint128_make( serialize_uint64_t hi, serialize_uint64_t lo );
-SERIALIZE_INLINE serialize_int128_t serialize_int128_make( serialize_uint64_t hi, serialize_uint64_t lo );
+SERIALIZE_ALWAYS_INLINE serialize_uint128_t serialize_uint128_make( serialize_uint64_t hi, serialize_uint64_t lo );
+SERIALIZE_ALWAYS_INLINE serialize_int128_t serialize_int128_make( serialize_uint64_t hi, serialize_uint64_t lo );
 
 /* Sign-extends a 64-bit value into the 128-bit domain. */
-SERIALIZE_INLINE serialize_int128_t serialize_int128_from_int64( serialize_int64_t value );
+SERIALIZE_ALWAYS_INLINE serialize_int128_t serialize_int128_from_int64( serialize_int64_t value );
 
-SERIALIZE_INLINE int serialize_uint128_equal( serialize_uint128_t a, serialize_uint128_t b );
-SERIALIZE_INLINE int serialize_int128_equal( serialize_int128_t a, serialize_int128_t b );
+SERIALIZE_ALWAYS_INLINE int serialize_uint128_equal( serialize_uint128_t a, serialize_uint128_t b );
+SERIALIZE_ALWAYS_INLINE int serialize_int128_equal( serialize_int128_t a, serialize_int128_t b );
 
 /* -1, 0 or 1. The signed form compares in the signed domain. */
-SERIALIZE_INLINE int serialize_int128_compare( serialize_int128_t a, serialize_int128_t b );
+SERIALIZE_ALWAYS_INLINE int serialize_int128_compare( serialize_int128_t a, serialize_int128_t b );
 
 /* Always 128 bits: the low half first, then the high half. NOT ranged. */
 SERIALIZE_INLINE int serialize_write_uint128( serialize_write_stream_t * stream, serialize_uint128_t value );
@@ -1644,8 +1649,15 @@ SERIALIZE_INLINE int serialize_float_is_finite( float value )
     The width of a compressed float, and the quantization ceiling that goes
     with it. In one place because three callers need it -- write, read and
     measure -- and a formula copied three times is a formula that drifts twice.
+
+    In the demand set with its callers: spelled SERIALIZE_INLINE, gcc x86-64
+    stranded exactly this call (x48) out of a flattened real-world spine once
+    the --param large-function-growth budget was spent — see the 128-bit lane
+    cluster's comment for the full receipts — and every stranded call
+    recomputed at runtime a width that folds to a literal whenever min, max
+    and res are literals, as the schema-generated call sites always pass them.
 */
-SERIALIZE_INLINE int serialize_compressed_float_bits( float min, float max, float res, serialize_uint32_t * max_integer_value )
+SERIALIZE_ALWAYS_INLINE int serialize_compressed_float_bits( float min, float max, float res, serialize_uint32_t * max_integer_value )
 {
     float delta = max - min;
     float values = delta / res;
@@ -2205,9 +2217,27 @@ SERIALIZE_INLINE void serialize_copy_string( char * dest, const char * source, u
    Requiring __int128 would exclude MSVC and every C89 toolchain, and buys
    nothing: STANDARD.md defines the 128-bit operations in terms of 32-bit
    groups from least significant upward, which two lanes reproduce exactly.
+
+   The whole lane cluster is in the demand set. The C++ reference gets these
+   operations as native unsigned __int128 arithmetic where the compiler has
+   it (its serialize.h documents native as "the fastest representation"), so
+   its flattened spine carries them as instructions, never as calls. Spelled
+   SERIALIZE_INLINE here, gcc x86-64 disagreed at exactly one place: a
+   flattened real-world spine (97 fields) exhausts gcc's
+   --param large-function-growth budget, after which every remaining plain
+   inline candidate is refused regardless of size — opt-info showed 2,346
+   refusals on that spine, stranding ~320 lane-helper calls per message
+   (u128_sub x80, u128_bit_length and compressed_float_bits x48 each,
+   u128_group32 and int128_from_int64 x32 each, set_group32/compare/add x16
+   each — down to uint128_make, which is two stores). Each stranded call
+   also un-folds the literal-bounds arithmetic behind it. always_inline is
+   exempt from the growth budget (proven on the same binary by #27/#28,
+   whose functions vanished from the stranded list), so the demand is the C
+   spelling of the reference's native-__int128 shape. clang was already
+   inlining all of these; for it the demand is a no-op.
    --------------------------------------------------------------------------- */
 
-SERIALIZE_INLINE serialize_uint128_t serialize_uint128_make( serialize_uint64_t hi, serialize_uint64_t lo )
+SERIALIZE_ALWAYS_INLINE serialize_uint128_t serialize_uint128_make( serialize_uint64_t hi, serialize_uint64_t lo )
 {
     serialize_uint128_t r;
     r.hi = hi;
@@ -2215,7 +2245,7 @@ SERIALIZE_INLINE serialize_uint128_t serialize_uint128_make( serialize_uint64_t 
     return r;
 }
 
-SERIALIZE_INLINE serialize_int128_t serialize_int128_make( serialize_uint64_t hi, serialize_uint64_t lo )
+SERIALIZE_ALWAYS_INLINE serialize_int128_t serialize_int128_make( serialize_uint64_t hi, serialize_uint64_t lo )
 {
     serialize_int128_t r;
     r.hi = hi;
@@ -2223,7 +2253,7 @@ SERIALIZE_INLINE serialize_int128_t serialize_int128_make( serialize_uint64_t hi
     return r;
 }
 
-SERIALIZE_INLINE serialize_int128_t serialize_int128_from_int64( serialize_int64_t value )
+SERIALIZE_ALWAYS_INLINE serialize_int128_t serialize_int128_from_int64( serialize_int64_t value )
 {
     serialize_int128_t r;
     r.lo = (serialize_uint64_t) value;
@@ -2233,18 +2263,18 @@ SERIALIZE_INLINE serialize_int128_t serialize_int128_from_int64( serialize_int64
     return r;
 }
 
-SERIALIZE_INLINE int serialize_uint128_equal( serialize_uint128_t a, serialize_uint128_t b )
+SERIALIZE_ALWAYS_INLINE int serialize_uint128_equal( serialize_uint128_t a, serialize_uint128_t b )
 {
     return a.lo == b.lo && a.hi == b.hi;
 }
 
-SERIALIZE_INLINE int serialize_int128_equal( serialize_int128_t a, serialize_int128_t b )
+SERIALIZE_ALWAYS_INLINE int serialize_int128_equal( serialize_int128_t a, serialize_int128_t b )
 {
     return a.lo == b.lo && a.hi == b.hi;
 }
 
 /* a - b in the unsigned 128-bit domain, wrapping like the hardware would */
-SERIALIZE_INLINE serialize_uint128_t serialize_u128_sub( serialize_uint128_t a, serialize_uint128_t b )
+SERIALIZE_ALWAYS_INLINE serialize_uint128_t serialize_u128_sub( serialize_uint128_t a, serialize_uint128_t b )
 {
     serialize_uint128_t r;
     r.lo = a.lo - b.lo;
@@ -2252,7 +2282,7 @@ SERIALIZE_INLINE serialize_uint128_t serialize_u128_sub( serialize_uint128_t a, 
     return r;
 }
 
-SERIALIZE_INLINE int serialize_u128_compare( serialize_uint128_t a, serialize_uint128_t b )
+SERIALIZE_ALWAYS_INLINE int serialize_u128_compare( serialize_uint128_t a, serialize_uint128_t b )
 {
     if ( a.hi != b.hi )
     {
@@ -2265,7 +2295,7 @@ SERIALIZE_INLINE int serialize_u128_compare( serialize_uint128_t a, serialize_ui
     return 0;
 }
 
-SERIALIZE_INLINE int serialize_int128_compare( serialize_int128_t a, serialize_int128_t b )
+SERIALIZE_ALWAYS_INLINE int serialize_int128_compare( serialize_int128_t a, serialize_int128_t b )
 {
     /* flip the sign bit and compare unsigned: the standard trick, and it
        avoids any signed overflow */
@@ -2277,7 +2307,7 @@ SERIALIZE_INLINE int serialize_int128_compare( serialize_int128_t a, serialize_i
     return serialize_u128_compare( ua, ub );
 }
 
-SERIALIZE_INLINE int serialize_u128_bit_length( serialize_uint128_t v )
+SERIALIZE_ALWAYS_INLINE int serialize_u128_bit_length( serialize_uint128_t v )
 {
     if ( v.hi != 0 )
     {
@@ -2287,7 +2317,7 @@ SERIALIZE_INLINE int serialize_u128_bit_length( serialize_uint128_t v )
 }
 
 /* the 32-bit group at index i, counting from least significant */
-SERIALIZE_INLINE serialize_uint32_t serialize_u128_group32( serialize_uint128_t v, int i )
+SERIALIZE_ALWAYS_INLINE serialize_uint32_t serialize_u128_group32( serialize_uint128_t v, int i )
 {
     switch ( i )
     {
@@ -2298,7 +2328,7 @@ SERIALIZE_INLINE serialize_uint32_t serialize_u128_group32( serialize_uint128_t 
     }
 }
 
-SERIALIZE_INLINE void serialize_u128_set_group32( serialize_uint128_t * v, int i, serialize_uint32_t g )
+SERIALIZE_ALWAYS_INLINE void serialize_u128_set_group32( serialize_uint128_t * v, int i, serialize_uint32_t g )
 {
     switch ( i )
     {
@@ -2309,7 +2339,7 @@ SERIALIZE_INLINE void serialize_u128_set_group32( serialize_uint128_t * v, int i
     }
 }
 
-SERIALIZE_INLINE serialize_uint128_t serialize_u128_add( serialize_uint128_t a, serialize_uint128_t b )
+SERIALIZE_ALWAYS_INLINE serialize_uint128_t serialize_u128_add( serialize_uint128_t a, serialize_uint128_t b )
 {
     serialize_uint128_t r;
     r.lo = a.lo + b.lo;
