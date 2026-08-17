@@ -108,13 +108,24 @@ jobs:
 
   # Byte-compares this library against the C++ one over the same sequence.
   # The port exists to be wire compatible; everything else is detail.
+  #
+  # The C++ checkout is PINNED to its latest RELEASED tag, never main: an
+  # upstream merge mid-day must not change what a serialize.c commit's CI
+  # proves — the sibling-HEAD race broke family gates three separate times
+  # (2026-08-16/17). This is the one pin in this workflow; bumping it is a
+  # one-line edit of SERIALIZE_TAG below. Find the newest tag with:
+  #   gh release list --repo mas-bandwidth/serialize --limit 1
+  # (spec-sync below deliberately stays on upstream main: drift DETECTION is
+  # that job's whole purpose.)
   wire-compat:
     name: wire compatible with the C++ library
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Check out the C++ library
-        run: git clone --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git ../serialize
+      - name: Check out the C++ library (pinned release)
+        env:
+          SERIALIZE_TAG: v1.10.0
+        run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git ../serialize
       - name: Compare
         run: make diff
 
