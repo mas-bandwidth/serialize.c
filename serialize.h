@@ -591,6 +591,23 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_double( serialize_read_stream_t * SER
 SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res );
 SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float( serialize_read_stream_t * stream, float * value, float min, float max, float res );
 
+/* The same wire from constants derived ONCE instead of per call, for the
+   generated path (mas-bandwidth/schema#82, the ruling verbatim: "Runtime
+   side-entry point could be something that supports schema." / "But in
+   addition to, not instead of, the current function."). The constants depend
+   only on the declaration, never on the value, so a schema compiler derives
+   them at code generation time — with exactly the arithmetic of
+   serialize_compressed_float_params — and passes them as literals, skipping
+   the per-field divide, clamp, ceil and bits_required. The entry points
+   above derive with that same function and forward to these, so the two
+   spellings are wire identical by construction; test/precomputed.c holds
+   the composition, and a frozen copy of the pre-split bodies, to byte and
+   bit identity. Constants that are not what the derivation produces are
+   caller error, debug-asserted like every other writer contract. */
+SERIALIZE_ALWAYS_INLINE void serialize_compressed_float_params( float min, float max, float res, serialize_uint32_t * max_integer_value, int * bits, float * delta );
+SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serialize_write_stream_t * stream, float value, serialize_uint32_t max_integer_value, int bits, float delta, float min );
+SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float_precomputed( serialize_read_stream_t * stream, float * value, serialize_uint32_t max_integer_value, int bits, float delta, float min );
+
 /* ---------------------------------------------------------------------------
    bytes and strings
    --------------------------------------------------------------------------- */
@@ -766,6 +783,12 @@ SERIALIZE_INLINE int serialize_measure_int_relative( serialize_measure_stream_t 
 SERIALIZE_INLINE int serialize_measure_float( serialize_measure_stream_t * stream );
 SERIALIZE_INLINE int serialize_measure_double( serialize_measure_stream_t * stream );
 SERIALIZE_ALWAYS_INLINE int serialize_measure_compressed_float( serialize_measure_stream_t * stream, float min, float max, float res );
+
+/* The precomputed companion takes bits alone, not the four constants the
+   write and read halves take: the measure doctrine above — the arguments
+   that determine the WIDTH and nothing else — and for a precomputed
+   compressed float the width IS bits. */
+SERIALIZE_ALWAYS_INLINE int serialize_measure_compressed_float_precomputed( serialize_measure_stream_t * stream, int bits );
 
 SERIALIZE_INLINE int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes );
 SERIALIZE_INLINE int serialize_measure_string( serialize_measure_stream_t * stream, const char * string, int buffer_size );
@@ -1689,14 +1712,63 @@ SERIALIZE_ALWAYS_INLINE int serialize_compressed_float_bits( float min, float ma
     return serialize_bits_required( 0, *max_integer_value );
 }
 
-SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res )
+/*
+    The full constant set for a compressed float declaration, derived once:
+    the step count and wire width serialize_compressed_float_bits computes,
+    plus the float32 range width the quantization divides by. This is exactly
+    the derivation every compressed float call above performs on the way to
+    the wire, exposed so it can be paid once instead — the constants depend
+    only on the declaration, never on the value, so a schema compiler runs
+    this same derivation at code generation time and passes the results to
+    the *_compressed_float_precomputed entry points at every generated call
+    site (mas-bandwidth/schema#82, the ruling verbatim: "Runtime side-entry
+    point could be something that supports schema." / "But in addition to,
+    not instead of, the current function."). The legacy entry points derive
+    with exactly this function and forward to exactly those entry points, so
+    the two spellings are wire identical by construction; test/precomputed.c
+    holds the composition, plus a frozen copy of the pre-split bodies, to
+    byte and bit identity across the declaration corpus.
+
+    delta is max - min COMPUTED IN FLOAT32: the quantization arithmetic is
+    pinned to float32 (STANDARD.md), so the wire depends on this exact value,
+    not on the real-number difference. A declaration whose delta or step
+    count does not compute finite in float32 is non-conforming and asserts
+    in the helper above, like every other declaration contract.
+*/
+SERIALIZE_ALWAYS_INLINE void serialize_compressed_float_params( float min, float max, float res, serialize_uint32_t * max_integer_value, int * bits, float * delta )
 {
-    float delta;
-    serialize_uint32_t max_integer_value;
-    int bits;
+    *delta = max - min;
+    *bits = serialize_compressed_float_bits( min, max, res, max_integer_value );
+}
+
+/*
+    The compressed float write from precomputed constants — the audited home
+    of the write-side quantization arithmetic. serialize_write_compressed_float
+    derives its constants per call and forwards here; generated code passes
+    constants a schema compiler derived at generation time with the same
+    arithmetic as serialize_compressed_float_params, as literals, so the
+    per-field derivation is never paid at runtime. The C++ reference's
+    audited home is serialize_compressed_float_precomputed_internal; this is
+    the write half of the C spelling of it.
+
+    The constants must be exactly what serialize_compressed_float_params
+    derives for a conforming declaration — anything else is caller error,
+    debug-asserted per the writes-trusted doctrine and checked nowhere in a
+    release build. A wire width that disagrees with the step count would
+    occupy a width no other conforming implementation of the declaration
+    expects, which is why bits is asserted against the step count rather
+    than merely against [1,32].
+*/
+SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serialize_write_stream_t * stream, float value, serialize_uint32_t max_integer_value, int bits, float delta, float min )
+{
     float normalized;
     float scaled;
     serialize_uint32_t integer_value;
+
+    serialize_assert( max_integer_value >= 1 );
+    serialize_assert( bits == serialize_bits_required( 0, max_integer_value ) );
+    serialize_assert( delta > 0.0f );
+    serialize_assert( serialize_float_is_finite( delta ) );
 
     /* a non-finite value is non-conforming (serialize fork #6, the ruling
        verbatim: "attempting to send NaN or INF or anything else through
@@ -1704,13 +1776,11 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float( serialize_write_st
        too") — asserted at intake, per the writes-trusted doctrine */
     serialize_assert( serialize_float_is_finite( value ) );
 
-    delta = max - min;
-    bits = serialize_compressed_float_bits( min, max, res, &max_integer_value );
-
     /* clamp with the !>= / !<= form so a non-finite value that survives into
        a release build (the assert above compiles out) is forced into range
        instead of reaching the uint32 conversion below -- NaN writes as min,
-       deterministically. Match serialize.h exactly. */
+       deterministically. Match the C++ serialize.h's
+       serialize_compressed_float_precomputed_internal exactly. */
     normalized = ( value - min ) / delta;
     if ( !( normalized >= 0.0f ) )
     {
@@ -1729,30 +1799,36 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float( serialize_write_st
        such values stays green while the wire is wrong. The product is stored
        through a local before the add so the intermediate rounds to float32 --
        a compiler is otherwise free to contract the multiply and add into a
-       single FMA and round ONCE, which diverges again. Match serialize.h's
-       serialize_compressed_float_internal exactly. */
+       single FMA and round ONCE, which diverges again. Match the C++
+       serialize.h's serialize_compressed_float_precomputed_internal exactly. */
     scaled = normalized * (float) max_integer_value;
     integer_value = (serialize_uint32_t) floor( (double) ( scaled + 0.5f ) );
 
     return serialize_write_bits( stream, integer_value, bits );
 }
 
-SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float( serialize_read_stream_t * stream, float * value, float min, float max, float res )
+/*
+    The read half of the audited home. What a read checks for real, in every
+    build mode, is the data: an integer above max_integer_value smuggled into
+    the bit headroom is refused, the same refusal the derive-per-call read
+    makes. The constants are the CALLER's, asserted like every other
+    caller-owned read parameter and never checked in release.
+*/
+SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float_precomputed( serialize_read_stream_t * stream, float * value, serialize_uint32_t max_integer_value, int bits, float delta, float min )
 {
-    float delta;
-    serialize_uint32_t max_integer_value;
-    int bits;
     serialize_uint32_t integer_value = 0;
     float normalized;
     float scaled;
+
+    serialize_assert( max_integer_value >= 1 );
+    serialize_assert( bits == serialize_bits_required( 0, max_integer_value ) );
+    serialize_assert( delta > 0.0f );
+    serialize_assert( serialize_float_is_finite( delta ) );
 
     if ( stream->error )
     {
         return 0;
     }
-
-    delta = max - min;
-    bits = serialize_compressed_float_bits( min, max, res, &max_integer_value );
 
     if ( !serialize_read_bits( stream, &integer_value, bits ) )
     {
@@ -1780,11 +1856,52 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float( serialize_read_stre
     return 1;
 }
 
+SERIALIZE_ALWAYS_INLINE int serialize_measure_compressed_float_precomputed( serialize_measure_stream_t * stream, int bits )
+{
+    /* bits alone: the measure doctrine takes the arguments that determine
+       the width and nothing else, and here the width IS bits. All the
+       measure can hold the caller to without the step count is the range a
+       conforming derivation can produce. */
+    serialize_assert( bits >= 1 );
+    serialize_assert( bits <= 32 );
+    stream->bits_written += bits;
+    return 1;
+}
+
+/*
+    The derive-per-call entry points, since the mas-bandwidth/schema#82 split:
+    each body IS its pre-split function, split at the line that issue names —
+    everything that depends only on the declaration lives in
+    serialize_compressed_float_params, everything that touches the value or
+    the wire lives in the precomputed entry point above, statement for
+    statement. test/precomputed.c holds this composition to byte and bit
+    identity against a frozen verbatim copy of the original unsplit bodies.
+*/
+SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res )
+{
+    serialize_uint32_t max_integer_value;
+    int bits;
+    float delta;
+    serialize_compressed_float_params( min, max, res, &max_integer_value, &bits, &delta );
+    return serialize_write_compressed_float_precomputed( stream, value, max_integer_value, bits, delta, min );
+}
+
+SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float( serialize_read_stream_t * stream, float * value, float min, float max, float res )
+{
+    serialize_uint32_t max_integer_value;
+    int bits;
+    float delta;
+    serialize_compressed_float_params( min, max, res, &max_integer_value, &bits, &delta );
+    return serialize_read_compressed_float_precomputed( stream, value, max_integer_value, bits, delta, min );
+}
+
 SERIALIZE_ALWAYS_INLINE int serialize_measure_compressed_float( serialize_measure_stream_t * stream, float min, float max, float res )
 {
     serialize_uint32_t max_integer_value;
-    stream->bits_written += serialize_compressed_float_bits( min, max, res, &max_integer_value );
-    return 1;
+    int bits;
+    float delta;
+    serialize_compressed_float_params( min, max, res, &max_integer_value, &bits, &delta );
+    return serialize_measure_compressed_float_precomputed( stream, bits );
 }
 
 /* ===========================================================================
