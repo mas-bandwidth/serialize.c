@@ -23,8 +23,9 @@ SERIALIZE_CPP ?= ../serialize
 
 all: test
 
-test: build/roundtrip build/assertdeath
+test: build/roundtrip build/precomputed build/assertdeath
 	./build/roundtrip
+	./build/precomputed
 	./build/assertdeath
 
 # The pinned wire vectors -- core and wide. Separate from `test` because these
@@ -50,6 +51,17 @@ build/wstest: test/wstest.c serialize.c serialize.h
 build/roundtrip: test/roundtrip.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/roundtrip.c serialize.c -o $@ $(LDLIBS)
+
+# The mas-bandwidth/schema#82 differential: since the split, the compressed
+# float entry points derive their constants with
+# serialize_compressed_float_params and forward to the precomputed audited
+# home, and this suite holds that composition -- plus the precomputed entry
+# points a schema compiler targets -- to byte and bit identity against a
+# FROZEN verbatim copy of the pre-split bodies, across the family's
+# declaration corpus. ~4.7 million checks, three implementations.
+build/precomputed: test/precomputed.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -I. test/precomputed.c serialize.c -o $@ $(LDLIBS)
 
 # The writer contracts, proven to FIRE: with the write path checkless in a
 # release build (issue #52), the debug asserts are the whole enforcement,

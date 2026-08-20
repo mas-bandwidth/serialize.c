@@ -210,6 +210,35 @@ static void violate_compressed_float_infinite_values( void )
     serialize_write_compressed_float( &w, 0.0f, 0.0f, 1.0e38f, 1.0e-38f );
 }
 
+/* the precomputed entry points (mas-bandwidth/schema#82) carry the same
+   write-side contract as the derive-per-call path -- a non-finite value
+   asserts -- plus their own: constants that are not what
+   serialize_compressed_float_params derives are caller error */
+
+static void violate_compressed_float_precomputed_nan_value( void )
+{
+    /* the same non-conforming NaN write, through the precomputed entry
+       point directly, with the conforming constants for [0,10] at 0.01 */
+    static const serialize_uint32_t nan_pattern = 0x7FC00000UL;
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    float nan_value;
+    memcpy( &nan_value, &nan_pattern, 4 );
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_compressed_float_precomputed( &w, nan_value, 1000, 10, 10.0f, 0.0f );
+}
+
+static void violate_compressed_float_precomputed_bits_mismatch( void )
+{
+    /* a wire width that disagrees with the step count is a caller bug: the
+       field would not occupy the width every other conforming implementation
+       of the declaration expects */
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_compressed_float_precomputed( &w, 5.0f, 1000, 11, 10.0f, 0.0f );
+}
+
 /*
     Forks, runs the violation in the child with stderr pointed at /dev/null
     so the expected assert message does not read as a failing test, and
@@ -267,6 +296,8 @@ int main( void )
     must_abort( violate_compressed_float_inf_value,      "compressed_float_inf_value" );
     must_abort( violate_compressed_float_infinite_delta, "compressed_float_infinite_delta" );
     must_abort( violate_compressed_float_infinite_values, "compressed_float_infinite_values" );
+    must_abort( violate_compressed_float_precomputed_nan_value, "compressed_float_precomputed_nan_value" );
+    must_abort( violate_compressed_float_precomputed_bits_mismatch, "compressed_float_precomputed_bits_mismatch" );
 
     printf( failed ? "FAILED\n" : "OK\n" );
     return failed;
