@@ -47,6 +47,13 @@
 #include <math.h>
 #include "../serialize.h"
 
+/* The caption for this build, so the two runs `make test` performs are
+   telling apart in a CI log. The Makefile defines it on the second build;
+   the default covers a hand build and says nothing it cannot know. */
+#ifndef SERIALIZE_TEST_FP_CONTRACT
+#define SERIALIZE_TEST_FP_CONTRACT "the default flags"
+#endif
+
 static int failed = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAILED %s:%d: %s\n", __FILE__, __LINE__, #c); failed = 1; } } while (0)
 
@@ -210,6 +217,167 @@ static float float_ulp_down( float value )
 }
 
 /* ---------------------------------------------------------------------------
+   THE NEGATIVE CONTROLS -- proof that this differential's eyes are open.
+
+   Every check below compares three implementations that are supposed to
+   agree, and a test where everything agrees cannot distinguish "the split
+   changed nothing" from "the comparison cannot see this class of change".
+   The distinction is not hypothetical here: the whole FMA discipline in the
+   audited home is a pair of stores through float locals, and whether
+   removing them is VISIBLE depends on the build.
+
+   Measured on this port, clang 21 / arm64, folding the reader's two
+   roundings into one expression in serialize.h:
+
+       -ffp-contract=off   the falsified build PASSES  -- no teeth
+       -ffp-contract=on    the falsified build is RED  -- teeth
+       -ffp-contract=fast  the falsified build PASSES  -- no teeth
+
+   which is the C confirmation of the C++ reference's finding
+   (mas-bandwidth/schema#82, comment 5364784769): the discriminating build is
+   the compiler's DEFAULT contraction, not the most aggressive one, because
+   `fast` fuses the frozen oracle too and the two forms stop being
+   distinguishable. This repo pins -ffp-contract=off for the wire (see the
+   Makefile), which is correct for the wire and toothless for this property,
+   so `make test` builds this suite a SECOND time at -ffp-contract=on.
+
+   That covers the compiler. These two sentinels cover the rest, and they do
+   it on EVERY host and every flag: they are the same one-rounding
+   perturbations spelled in double, where no FMA hardware and no contraction
+   setting is required to produce the divergence. Each is run alongside the
+   real path over the whole corpus, and the differential FAILS if either ever
+   stops diverging -- i.e. if a future edit ever makes the wire bytes or the
+   decoded bit patterns blind to a single-rounding quantization. The
+   divergence counts are printed, so the mass is visible and not just the
+   verdict.
+
+   These are deliberately NOT compared against the frozen oracle for
+   equality. They are supposed to disagree. That is the whole point.
+   --------------------------------------------------------------------------- */
+
+static unsigned long sentinel_write_divergences = 0;
+static unsigned long sentinel_read_divergences = 0;
+
+/* the writer's quantization with the two float roundings collapsed: the
+   product and the +0.5 both taken in double, rounded once by the floor.
+   This is the "widened to double" perturbation, permanently on watch. */
+static serialize_uint32_t sentinel_write_code_one_rounding( float value, serialize_uint32_t max_integer_value, float delta, float min )
+{
+    float normalized;
+
+    normalized = ( value - min ) / delta;
+    if ( !( normalized >= 0.0f ) )
+    {
+        normalized = 0.0f;
+    }
+    else if ( !( normalized <= 1.0f ) )
+    {
+        normalized = 1.0f;
+    }
+
+    return (serialize_uint32_t) floor( (double) normalized * (double) max_integer_value + 0.5 );
+}
+
+/* the reader's reconstruction with the multiply and the add collapsed into
+   one rounding -- exactly what an FMA contraction produces, spelled in
+   double so it happens on hosts without FMA too. */
+static float sentinel_read_value_one_rounding( serialize_uint32_t integer_value, serialize_uint32_t max_integer_value, float delta, float min )
+{
+    float normalized = (float) integer_value / (float) max_integer_value;
+    return (float) ( (double) normalized * (double) delta + (double) min );
+}
+
+/* ---------------------------------------------------------------------------
+   Does THIS build actually fuse? -ffp-contract=on only has teeth where the
+   target has an FMA instruction: on x86-64 without -mfma the compiler cannot
+   contract even when permitted, and the flag then buys nothing. Rather than
+   let a build claim a discipline it is not exercising, measure it and say so.
+
+   The probe is the reconstruction under test: one statement the compiler may
+   contract, against the same arithmetic forced through a volatile store,
+   which must round to float32 and cannot be fused across.
+   --------------------------------------------------------------------------- */
+
+static int fp_contraction_is_live( void )
+{
+    volatile float vnorm;
+    volatile float vprod;
+    volatile float vdelta = 200.0f;
+    volatile float vmin = -100.0f;
+    serialize_uint32_t code;
+
+    for ( code = 1; code < 20000; code++ )
+    {
+        float norm, fused, unfused;
+        serialize_uint32_t pattern_fused, pattern_unfused;
+
+        vnorm = (float) code / 20000.0f;
+        norm = vnorm;
+
+        fused = norm * vdelta + vmin;       /* one statement: contractible */
+        vprod = norm * vdelta;              /* volatile: the store must round */
+        unfused = vprod + vmin;
+
+        memcpy( &pattern_fused, &fused, 4 );
+        memcpy( &pattern_unfused, &unfused, 4 );
+        if ( pattern_fused != pattern_unfused )
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Does this build contract ACROSS a statement boundary? That is the `fast`
+   behaviour, and it is not a stricter version of `on` -- it is a different
+   thing, in which the frozen oracle fuses too, every spelling of the
+   arithmetic becomes indistinguishable, and STANDARD.md's requirement of
+   distinct roundings simply does not hold. The library therefore does not
+   support such a build: this repo pins -ffp-contract=off for exactly that
+   reason, and a build at =fast fails the pinned decoded patterns below.
+
+   It has to be DETECTED rather than assumed from the flag, because GCC
+   before 14 mapped -ffp-contract=on onto fast. On such a compiler, asking
+   for `on` gets `fast`, and the pinned patterns would fail with a message
+   about a bit pattern instead of the truth, which is that the build is
+   unsupported. So the patterns are skipped and the reason is printed.
+
+   The discriminator is a plain local store against a volatile one. ISO C
+   requires the plain store to round to float32; only a compiler contracting
+   across the statement can make the two disagree. */
+static int fp_contraction_crosses_statements( void )
+{
+    volatile float vnorm;
+    volatile float vprod;
+    volatile float vdelta = 200.0f;
+    volatile float vmin = -100.0f;
+    serialize_uint32_t code;
+
+    for ( code = 1; code < 20000; code++ )
+    {
+        float norm, plain_prod, via_plain, via_volatile;
+        serialize_uint32_t pattern_plain, pattern_volatile;
+
+        vnorm = (float) code / 20000.0f;
+        norm = vnorm;
+
+        plain_prod = norm * vdelta;         /* a plain local: ISO C rounds here */
+        via_plain = plain_prod + vmin;
+
+        vprod = norm * vdelta;              /* volatile: nothing may fuse through it */
+        via_volatile = vprod + vmin;
+
+        memcpy( &pattern_plain, &via_plain, 4 );
+        memcpy( &pattern_volatile, &via_volatile, 4 );
+        if ( pattern_plain != pattern_volatile )
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
    the two check primitives
    --------------------------------------------------------------------------- */
 
@@ -273,6 +441,24 @@ static void check_value_agrees( float value, float min, float max, float res,
     memcpy( &pattern_precomputed, &decoded_precomputed, 4 );
     DCHECK( pattern_frozen == pattern_legacy );
     DCHECK( pattern_frozen == pattern_precomputed );
+
+    /* the write-side negative control: the one-rounding quantization must
+       still be able to produce a DIFFERENT wire code than the audited home
+       does, or the byte comparison above has gone blind. Read the code back
+       off the frozen wire rather than recomputing it, so the control is
+       measured against the bytes the comparison actually made. */
+    {
+        serialize_read_stream_t rs;
+        serialize_uint32_t wire_code = 0;
+        serialize_read_stream_init( &rs, buffer_frozen, 8 );
+        if ( serialize_read_bits( &rs, &wire_code, bits ) )
+        {
+            if ( sentinel_write_code_one_rounding( value, max_integer_value, delta, min ) != wire_code )
+            {
+                sentinel_write_divergences++;
+            }
+        }
+    }
 }
 
 /* one wire integer through all three read paths: acceptance must agree (the
@@ -308,11 +494,24 @@ static void check_code_agrees( serialize_uint32_t code, float min, float max, fl
     if ( ok_frozen )
     {
         serialize_uint32_t pattern_frozen, pattern_legacy, pattern_precomputed;
+        float sentinel_value;
+        serialize_uint32_t pattern_sentinel;
         memcpy( &pattern_frozen, &decoded_frozen, 4 );
         memcpy( &pattern_legacy, &decoded_legacy, 4 );
         memcpy( &pattern_precomputed, &decoded_precomputed, 4 );
         DCHECK( pattern_frozen == pattern_legacy );
         DCHECK( pattern_frozen == pattern_precomputed );
+
+        /* the read-side negative control: a one-rounding reconstruction must
+           still be able to land on a DIFFERENT bit pattern, or the pattern
+           comparison above has gone blind. The divergence is one ulp, which
+           is exactly why this file never compares with a tolerance. */
+        sentinel_value = sentinel_read_value_one_rounding( code, max_integer_value, delta, min );
+        memcpy( &pattern_sentinel, &sentinel_value, 4 );
+        if ( pattern_sentinel != pattern_frozen )
+        {
+            sentinel_read_divergences++;
+        }
     }
     else
     {
@@ -470,9 +669,22 @@ static void test_precomputed_conformance( void )
         memcpy( &bits_a, &a, 4 );
         memcpy( &bits_b, &b, 4 );
         memcpy( &bits_c, &c, 4 );
-        CHECK( bits_a == 0x00000000UL );
-        CHECK( bits_b == 0xC2C7BD71UL );
-        CHECK( bits_c == 0xC2055C2AUL );
+        /* the decoded patterns are pinned only where the build keeps the
+           roundings distinct. A build that contracts across statements
+           reconstructs one of these one ulp away by design, and the honest
+           report is that the build is unsupported -- not a bit pattern
+           mismatch that reads like a port bug. The wire bytes above are
+           pinned unconditionally: they do not move under contraction. */
+        if ( fp_contraction_crosses_statements() )
+        {
+            printf( "precomputed differential: SKIPPING the pinned decoded patterns -- this build contracts ACROSS statements (-ffp-contract=fast, or a GCC before 14 mapping =on onto =fast), which STANDARD.md's compressed float does not admit\n" );
+        }
+        else
+        {
+            CHECK( bits_a == 0x00000000UL );
+            CHECK( bits_b == 0xC2C7BD71UL );
+            CHECK( bits_c == 0xC2055C2AUL );
+        }
     }
 }
 
@@ -673,10 +885,46 @@ static void test_precomputed_differential( void )
 
     printf( "precomputed differential: %lu checks, three implementations, %d declarations\n",
             check_count, num_shapes );
+
+    /* the negative controls, checked rather than merely reported: if a
+       one-rounding writer ever stops producing a different wire code, or a
+       one-rounding reader ever stops producing a different bit pattern,
+       then the comparisons above agree for a reason that has nothing to do
+       with the split being correct, and this suite is decoration. */
+    CHECK( sentinel_write_divergences > 0 );
+    CHECK( sentinel_read_divergences > 0 );
+    printf( "precomputed differential: negative controls diverge on %lu wire codes and %lu decoded patterns (both must be nonzero, or the comparison cannot see a single-rounding quantization)\n",
+            sentinel_write_divergences, sentinel_read_divergences );
 }
 
 int main( void )
 {
+#ifdef SERIALIZE_TEST_FP_CONTRACT_REQUESTED_ON
+    /* The Makefile's second build asked for STATEMENT-LOCAL contraction. GCC
+       before 14 mapped -ffp-contract=on onto =fast and gives cross-statement
+       contraction instead, which is a different and unsupported thing. That
+       is a fact about the toolchain, not a defect in the library, so this
+       build stands down rather than reporting a failure it did not find.
+       The -ffp-contract=off run is still the gate on such a compiler, and
+       the negative controls below carry the discrimination there. */
+    if ( fp_contraction_crosses_statements() )
+    {
+        printf( "precomputed differential: asked for -ffp-contract=on and this compiler produced CROSS-STATEMENT contraction (GCC before 14 maps =on onto =fast), so the discriminating build is not available on this toolchain -- standing down\n" );
+        printf( "OK (skipped)\n" );
+        return 0;
+    }
+#endif
+
+    /* which build this is, and whether its contraction setting is buying
+       anything on this target. Reported, never asserted: a host without an
+       FMA instruction cannot fuse however the flag is set, and that is a
+       fact about the host, not a failure. */
+    printf( "precomputed differential: built with %s; fp contraction is %s in this build\n",
+            SERIALIZE_TEST_FP_CONTRACT,
+            !fp_contraction_is_live()             ? "not available -- this target does not fuse, so the float stores are compiled but not exercised"
+            : fp_contraction_crosses_statements() ? "LIVE but crossing statements -- a =fast build, in which no spelling of this arithmetic is distinguishable from another"
+                                                  : "LIVE and statement-local -- the audited home's float stores are under test" );
+
     test_precomputed_validation();
     test_precomputed_conformance();
     test_precomputed_differential();

@@ -23,9 +23,10 @@ SERIALIZE_CPP ?= ../serialize
 
 all: test
 
-test: build/roundtrip build/precomputed build/assertdeath
+test: build/roundtrip build/precomputed build/precomputed-fma build/assertdeath
 	./build/roundtrip
 	./build/precomputed
+	./build/precomputed-fma
 	./build/assertdeath
 
 # The pinned wire vectors -- core and wide. Separate from `test` because these
@@ -62,6 +63,49 @@ build/roundtrip: test/roundtrip.c serialize.c serialize.h
 build/precomputed: test/precomputed.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/precomputed.c serialize.c -o $@ $(LDLIBS)
+
+# The same differential a SECOND time, at -ffp-contract=on. This is not
+# belt and braces; it is the only build in which the property has teeth.
+#
+# The audited home's FMA discipline is a pair of stores through float locals
+# that keep the quantization's roundings distinct. Whether DELETING them is
+# visible depends entirely on the contraction setting, measured on this port
+# (clang 21 / arm64) by folding the reader's two roundings into one and
+# rebuilding:
+#
+#   -ffp-contract=off    the falsified build PASSES -- contraction is
+#                        forbidden in the frozen oracle too, so the fused
+#                        spelling and the stored one compute the same thing
+#   -ffp-contract=on     the falsified build is RED on the decoded bit
+#                        patterns -- the compiler fuses one form and not
+#                        the other, which is the divergence being guarded
+#   -ffp-contract=fast   the falsified build PASSES -- `fast` fuses ACROSS
+#                        statements, so the frozen oracle fuses as well and
+#                        the two forms stop being distinguishable
+#
+# The mode that looks strictest is the one with no teeth, and the mode this
+# repo pins for the wire is the other one with no teeth. Same result the C++
+# reference reached (mas-bandwidth/schema#82, comment 5364784769). So the
+# default build above stays at -ffp-contract=off, because that is what the
+# wire requires, and this build adds back the discrimination it costs.
+#
+# -ffp-contract=on comes AFTER $(CFLAGS) so it wins over the =off in there,
+# including when CI overrides CFLAGS wholesale (the sanitizers job does).
+# Nothing new is required of the compiler: the default CFLAGS already spell
+# -ffp-contract, so any compiler that can build the suite at all can build
+# this. The binary reports whether contraction is actually LIVE on the
+# target -- x86-64 without FMA cannot fuse however the flag is set -- so a
+# green log never claims a discipline it did not exercise.
+#
+# And it detects the one compiler trap here: GCC before 14 mapped
+# -ffp-contract=on onto =fast, so on gcc 13 asking for statement-local
+# contraction gets cross-statement contraction, which is the unsupported
+# mode. SERIALIZE_TEST_FP_CONTRACT_REQUESTED_ON tells the binary this build
+# asked for =on, and it stands down with a printed reason instead of failing
+# for a toolchain quirk that is not a defect in the library.
+build/precomputed-fma: test/precomputed.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -ffp-contract=on -DSERIALIZE_TEST_FP_CONTRACT='"-ffp-contract=on"' -DSERIALIZE_TEST_FP_CONTRACT_REQUESTED_ON=1 -I. test/precomputed.c serialize.c -o $@ $(LDLIBS)
 
 # The writer contracts, proven to FIRE: with the write path checkless in a
 # release build (issue #52), the debug asserts are the whole enforcement,
