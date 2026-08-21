@@ -23,9 +23,10 @@ SERIALIZE_CPP ?= ../serialize
 
 all: test
 
-test: build/roundtrip build/precomputed build/assertdeath
+test: build/roundtrip build/precomputed build/precomputed_contract build/assertdeath
 	./build/roundtrip
 	./build/precomputed
+	./build/precomputed_contract
 	./build/assertdeath
 
 # The pinned wire vectors -- core and wide. Separate from `test` because these
@@ -62,6 +63,22 @@ build/roundtrip: test/roundtrip.c serialize.c serialize.h
 build/precomputed: test/precomputed.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/precomputed.c serialize.c -o $@ $(LDLIBS)
+
+# The same differential again, built with contraction PERMITTED. -O2 alone is
+# not the discriminating build: with -ffp-contract=off the compiler is
+# forbidden to fuse in either form, so a reader that folds its two roundings
+# into one expression is byte and bit identical to the frozen reference and
+# the differential passes -- measured, exit 0, all 4,717,569 checks OK. Fold
+# the same reader with contraction permitted and it goes red immediately on
+# the decoded bit pattern. So the flag that protects the WIRE is the flag
+# that blinds the TEST, and the suite needs both builds to mean anything.
+#
+# -ffp-contract=on is appended after CFLAGS so it wins on any override: the
+# sanitizer leg in CI pins -ffp-contract=off for the whole build, and this
+# one differential has to keep its teeth there too.
+build/precomputed_contract: test/precomputed.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -ffp-contract=on -I. test/precomputed.c serialize.c -o $@ $(LDLIBS)
 
 # The writer contracts, proven to FIRE: with the write path checkless in a
 # release build (issue #52), the debug asserts are the whole enforcement,
