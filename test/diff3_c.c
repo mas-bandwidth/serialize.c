@@ -25,7 +25,10 @@ int main( void )
     serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
 
     /* [0,10] res 0.01 -- max_integer_value 1000 */
-    serialize_write_compressed_float( &w, 0.005f, 0.0f, 10.0f, 0.01f );  /* 1     double 0, FMA 0 */
+    /* The FMA-boundary value rides the PRECOMPUTED entry point (schema #107): constants
+       exactly what the derived path computes for (0, 10, 0.01), so this differential now
+       proves the precomputed path bit-identical with the derived one beside it. */
+    serialize_write_compressed_float_precomputed( &w, 0.005f, 1000, 10, 10.0f, 0.0f );  /* 1     double 0, FMA 0 */
     serialize_write_compressed_float( &w, 0.025f, 0.0f, 10.0f, 0.01f );  /* 3     double 2 */
     serialize_write_compressed_float( &w, 0.155f, 0.0f, 10.0f, 0.01f );  /* 16    double 15 */
     serialize_write_compressed_float( &w, 0.165f, 0.0f, 10.0f, 0.01f );  /* 17    double 16 */
