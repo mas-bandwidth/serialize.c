@@ -25,7 +25,13 @@ template <typename Stream> bool write_sequence( Stream & stream )
     q = 2.5f;     serialize_compressed_float( stream, q, 0.0f, 10.0f, 0.01f );
 
     // [0,1] res 0.001
-    q = 0.0005f;  serialize_compressed_float( stream, q, 0.0f, 1.0f, 0.001f );
+    // This one field rides the PRECOMPUTED entry point, mirroring diff3_c.c, which
+    // crosses the other way on [0,10] res 0.01. So each side's precomputed path is
+    // held to the other side's derived path, and neither crossing proves the other.
+    // Constants are exactly serialize_compressed_float_params( 0, 1, 0.001 ):
+    // max_integer_value 1000, bits 10, delta 1 — read out of that function, not
+    // hand-derived. The value is the FMA discriminator of this group.
+    q = 0.0005f;  serialize_compressed_float_precomputed( stream, q, 1000, 10, 1.0f, 0.0f );
     q = 0.0025f;  serialize_compressed_float( stream, q, 0.0f, 1.0f, 0.001f );
     q = 0.0045f;  serialize_compressed_float( stream, q, 0.0f, 1.0f, 0.001f );
     q = 0.0055f;  serialize_compressed_float( stream, q, 0.0f, 1.0f, 0.001f );
