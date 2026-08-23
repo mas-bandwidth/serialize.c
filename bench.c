@@ -7,8 +7,10 @@
     reporting format and units.
 
     It measures throughput of the raw bit packer with mixed bit widths, and of
-    the stream path with a representative packet, and then three packet shapes
-    that look like schema generated code.
+    the stream path with a representative packet, then three packet shapes
+    that look like schema generated code, and then the string and wstring
+    rows (schema#64): the last serialize paths in the family that no bench
+    measured at all.
 
     WHAT IT EXISTS TO ANSWER
 
@@ -726,15 +728,122 @@ static int bench_gen_fields_read( serialize_read_stream_t * stream, BenchGenFiel
     return 1;
 }
 
+/* shapes 4 and 5: a string packet and a wstring packet -- the measure-first rows
+
+   Until schema#64 no benchmark anywhere in the serialize family measured the
+   string or wstring paths at all: chat-shaped rows saw the narrow path only
+   through 85% of a 13 byte message, and the wide path was measured nowhere.
+   Glenn's ruling (2026-08-17): "You can't improve what you don't measure" --
+   so these rows land BEFORE any further string or wstring optimization, and
+   any such fix is judged by what it does to them.
+
+   Both rows are string-dominated BY DESIGN, and say so the way BENCH-STANDARD
+   §1.7 requires of any bulk-heavy row: they exist to time the string bodies,
+   not to model a realistic packet -- a real packet very rarely carries one
+   (§1.7, Glenn, verbatim: "and very rarely is it wstring, string or byte
+   array"). They must not be folded into any headline median.
+
+   The pinned length is STRUCTURE (§2.7): held fixed at 24, so bytes per op
+   cannot move under variation -- the driver macro's setup pass rewrites
+   bytes_per_packet once per variant and equal lengths keep it constant. The
+   CONTENT is what varies: every character, every iteration, through the same
+   serially dependent LCG as every other shape. A constant string would let
+   the optimizer fold the writer's strlen walk and precompute the scratch
+   words, reporting fictional throughput.
+
+   string packet: 6 bit length prefix + align + 24 bytes = 200 bits, 25 bytes
+   on the wire. 96% of wire bits (192/200) go through the fused write_bytes /
+   bulk-copy read_bytes body (#26); the read side additionally pays the
+   unconditional interior-NUL scan and UTF-8 validation (ruling #8) that are
+   part of this library's contract in every build mode. Those bodies and those
+   checks are what this row watches. Content is printable ASCII (0x20..0x5F):
+   never NUL, always valid UTF-8, one byte per character so length == strlen.
+
+   wstring packet: 6 bit unit-count prefix + 24 x 32 bit units = 774 bits,
+   97 bytes on the wire, and NO align after the prefix -- the wide path
+   deliberately does not align where the narrow one does (STANDARD.md, and
+   wstest pins it). By §1.7's mechanism test this payload is not bulk at all:
+   every unit rides as an individual 32 bit write_bits/read_bits group, which
+   is exactly why the row is needed -- the same 24 characters cost 4x the
+   narrow wire, paid a unit at a time, plus the writer's unit-count walk and
+   the reader's per-unit refusal checks (zero, above-0xFFFF, surrogate
+   pairing). Content is hiragana (U+3040..U+307F): real wide text, one UTF-16
+   unit per character, no surrogates -- and cost-identical to any other BMP
+   choice, since every unit rides as 32 bits regardless of value.
+
+   The C++ bench.cpp gains the same two rows under the same issue; the
+   operation-for-operation mirror includes them from both sides. */
+
+#define BenchTextLength 24          /* pinned: STRUCTURE (§2.7), fixed under variation */
+#define BenchTextBufferSize 64      /* declared capacity: a 6 bit length prefix on both rows */
+
+typedef struct BenchStringFields
+{
+    char text[BenchTextBufferSize];
+} BenchStringFields;
+
+static serialize_uint64_t bench_vary_string_fields( BenchStringFields * f, serialize_uint64_t rng )
+{
+    int i;
+    rng = rng * BENCH_LCG_MUL + BENCH_LCG_ADD;
+    for ( i = 0; i < BenchTextLength; i++ )
+    {
+        f->text[i] = (char) ( 0x20 + ( ( rng >> ( ( i & 7 ) * 8 ) ) & 0x3F ) );
+    }
+    f->text[BenchTextLength] = '\0';
+    return rng;
+}
+
+static int bench_string_fields_write( serialize_write_stream_t * stream, const BenchStringFields * f )
+{
+    return serialize_write_string( stream, f->text, BenchTextBufferSize );
+}
+
+static int bench_string_fields_read( serialize_read_stream_t * stream, BenchStringFields * f )
+{
+    return serialize_read_string( stream, f->text, BenchTextBufferSize );
+}
+
+typedef struct BenchWStringFields
+{
+    wchar_t text[BenchTextBufferSize];
+} BenchWStringFields;
+
+static serialize_uint64_t bench_vary_wstring_fields( BenchWStringFields * f, serialize_uint64_t rng )
+{
+    int i;
+    rng = rng * BENCH_LCG_MUL + BENCH_LCG_ADD;
+    for ( i = 0; i < BenchTextLength; i++ )
+    {
+        f->text[i] = (wchar_t) ( 0x3040 + ( ( rng >> ( ( i & 7 ) * 8 ) ) & 0x3F ) );
+    }
+    f->text[BenchTextLength] = 0;
+    return rng;
+}
+
+static int bench_wstring_fields_write( serialize_write_stream_t * stream, const BenchWStringFields * f )
+{
+    return serialize_write_wstring( stream, f->text, BenchTextBufferSize );
+}
+
+static int bench_wstring_fields_read( serialize_read_stream_t * stream, BenchWStringFields * f )
+{
+    return serialize_read_wstring( stream, f->text, BenchTextBufferSize );
+}
+
 BENCH_PACKET_SHAPE( bench_int_shape, BenchIntFields, bench_vary_int_fields, bench_int_fields_write, bench_int_fields_read )
 BENCH_PACKET_SHAPE( bench_bits_shape, BenchBitsFields, bench_vary_bits_fields, bench_bits_fields_write, bench_bits_fields_read )
 BENCH_PACKET_SHAPE( bench_gen_shape, BenchGenFields, bench_vary_gen_fields, bench_gen_fields_write, bench_gen_fields_read )
+BENCH_PACKET_SHAPE( bench_string_shape, BenchStringFields, bench_vary_string_fields, bench_string_fields_write, bench_string_fields_read )
+BENCH_PACKET_SHAPE( bench_wstring_shape, BenchWStringFields, bench_vary_wstring_fields, bench_wstring_fields_write, bench_wstring_fields_read )
 
 static void bench_packet_shapes( void )
 {
-    bench_int_shape ( "int packet   (runtime):     " );
-    bench_bits_shape( "bits packet  (runtime):     " );
-    bench_gen_shape ( "mixed packet (runtime):     " );
+    bench_int_shape    ( "int packet   (runtime):     " );
+    bench_bits_shape   ( "bits packet  (runtime):     " );
+    bench_gen_shape    ( "mixed packet (runtime):     " );
+    bench_string_shape ( "string packet  (24 chars):  " );
+    bench_wstring_shape( "wstring packet (24 units):  " );
 }
 
 /* ------------------------------------------------------------------------------------------ */
