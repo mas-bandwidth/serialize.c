@@ -1804,6 +1804,18 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serial
     scaled = normalized * (float) max_integer_value;
     integer_value = (serialize_uint32_t) floor( (double) ( scaled + 0.5f ) );
 
+    /* STANDARD.md: the integer clamp is normative (2026-08-23, schema#109).
+       Once max_integer_value >= 2^23 the float32 ulp at the top of the range
+       reaches 1, so the rounded sum can exceed max_integer_value itself: the
+       writer emits a code its own reader rejects, or one bit wider than the
+       field. Clamping after the floor closes both; no byte changes for any
+       declaration outside [2^23, 2^24). Match the C++ serialize.h's
+       serialize_compressed_float_precomputed_internal exactly. */
+    if ( integer_value > max_integer_value )
+    {
+        integer_value = max_integer_value;
+    }
+
     return serialize_write_bits( stream, integer_value, bits );
 }
 

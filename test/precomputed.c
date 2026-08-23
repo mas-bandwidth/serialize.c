@@ -124,6 +124,14 @@ SERIALIZE_INLINE int frozen_write_compressed_float( serialize_write_stream_t * s
 
     scaled = normalized * (float) max_integer_value;
     integer_value = (serialize_uint32_t) floor( (double) ( scaled + 0.5f ) );
+    /* STANDARD.md: the integer clamp is normative (2026-08-23, schema#109) --
+       same clamp as the audited home in serialize.h, same reason. The one
+       amendment the frozen oracle carries, exactly as the C++ reference
+       amended its own frozen reference (serialize PR #88). */
+    if ( integer_value > max_integer_value )
+    {
+        integer_value = max_integer_value;
+    }
 
     return serialize_write_bits( stream, integer_value, bits );
 }
@@ -568,7 +576,12 @@ static const compressed_float_shape_t compressed_float_shapes[] =
        half a step of one, so all of them derive the same constants under either rule -- the
        corpus could not see a swap (mas-bandwidth/schema#108). */
     { 0.0f,       10.0f,          0.3f,       34,          6  },       /* 33.333332 steps: ceil 34, round 33 -- same width, different step count */
-    { 0.0f,       63.3f,          1.0f,       64,          7  }        /* 63.3 steps: ceil 64 (7 bits), round 63 (6 bits) -- straddles a power of two, so the WIRE WIDTH moves */
+    { 0.0f,       63.3f,          1.0f,       64,          7  },       /* 63.3 steps: ceil 64 (7 bits), round 63 (6 bits) -- straddles a power of two, so the WIRE WIDTH moves */
+    /* shapes in [2^23, 2^24), where the float32 ulp reaches 1 and the +0.5 rounding can push
+       the code past max_integer_value before the normative clamp (2026-08-23, schema#109).
+       The corpus was empty in this band, which is how the defect hid. */
+    { 0.0f,       8388609.0f,     1.0f,       8388609u,    24 },       /* 2^23+1: the reader-rejects witness */
+    { 0.0f,       16777215.0f,    1.0f,       16777215u,   24 }        /* 2^24-1: the wire-divergence witness */
 };
 
 /* ---------------------------------------------------------------------------
