@@ -253,6 +253,43 @@ int main( void )
         CHECK( !serialize_read_error( &r ) );
     }
 
+    /* ---- the normative integer clamp after the floor ----
+
+            STANDARD.md, amended 2026-08-23 (schema#109; ruling: Glenn, live):
+            in [2^23, 2^24) the float32 ulp is 1, so scaled + 0.5f lands on a
+            tie and round-to-even can push the quantized integer past
+            max_integer_value. Both witnesses write max. Before the clamp the
+            first wrote a top-of-range code its own reader rejected, and the
+            second wrote a code one bit wider than its 24-bit field. */
+    {
+        float out;
+
+        /* witness A: [0, 8388609] at resolution 1 -> max_integer_value 2^23+1,
+           24 bits -- the reader-rejects class */
+        out = 0.0f;
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        CHECK( serialize_write_compressed_float( &w, 8388609.0f, 0.0f, 8388609.0f, 1.0f ) );
+        serialize_write_flush( &w );
+        CHECK( !serialize_write_error( &w ) );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 8388609.0f, 1.0f ) );
+        CHECK( !serialize_read_error( &r ) );
+        CHECK( out == 8388609.0f );
+
+        /* witness B: [0, 16777215] at resolution 1 -> max_integer_value 2^24-1,
+           24 bits -- the wire-divergence class: the unclamped code was 2^24,
+           one bit wider than the field */
+        out = 0.0f;
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        CHECK( serialize_write_compressed_float( &w, 16777215.0f, 0.0f, 16777215.0f, 1.0f ) );
+        serialize_write_flush( &w );
+        CHECK( !serialize_write_error( &w ) );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 16777215.0f, 1.0f ) );
+        CHECK( !serialize_read_error( &r ) );
+        CHECK( out == 16777215.0f );
+    }
+
     /* ---- failure is sticky whatever caused it ----
 
             The bit limit is what every operation tests against, and failing a
