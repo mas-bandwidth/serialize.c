@@ -134,12 +134,17 @@ jobs:
   # Byte-compares this library against the C++ one over the same sequence.
   # The port exists to be wire compatible; everything else is detail.
   #
-  # The C++ checkout is PINNED to its latest RELEASED tag, never main: an
-  # upstream merge mid-day must not change what a serialize.c commit's CI
-  # proves — the sibling-HEAD race broke family gates three separate times
-  # (2026-08-16/17). This is the one pin in this workflow; bumping it is a
-  # one-line edit of SERIALIZE_TAG below. Find the newest tag with:
+  # THE FAMILY PIN -- ONE POLICY, ONE VERSION. The C++ checkout is pinned to the
+  # latest RELEASED tag of mas-bandwidth/serialize, never main, and to the SAME
+  # tag in all four wire-compat gates, so "compatible with C++" means the same
+  # thing in every port. Never main, because an upstream merge mid-day must not
+  # change what a commit's CI proves -- the sibling-HEAD race broke family gates
+  # three separate times (2026-08-16/17). Find the newest tag with:
   #   gh release list --repo mas-bandwidth/serialize --limit 1
+  # Bump family-wide, deliberately, in its own commit per repo, and only
+  # alongside the byte-identity check this gate runs.
+  # This is the one pin in this workflow; bumping it is a one-line edit of
+  # SERIALIZE_TAG below.
   # (spec-sync below deliberately stays on upstream main: drift DETECTION is
   # that job's whole purpose.)
   wire-compat:
