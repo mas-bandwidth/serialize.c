@@ -42,7 +42,10 @@ int main( void )
     /* no asserts to prove under NDEBUG: the write and measure paths check
        nothing at all, which is the contract — see roundtrip.c's release-only
        NaN block for what remains observable there */
-    printf( "assertdeath: skipped (NDEBUG: the caller contracts have no checks to fire)\n" );
+    if ( serialize_test_verbose() )
+    {
+        printf( "assertdeath: skipped (NDEBUG: the caller contracts have no checks to fire)\n" );
+    }
     return 0;
 }
 
@@ -55,6 +58,7 @@ int main( void )
 #include <fcntl.h>
 #include <sys/wait.h>
 #include "../serialize.h"
+#include "verbose.h"
 
 static int failed = 0;
 
