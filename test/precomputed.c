@@ -46,6 +46,7 @@
 #include <string.h>
 #include <math.h>
 #include "../serialize.h"
+#include "verbose.h"
 
 /* The caption for this build, so the two runs `make test` performs are
    telling apart in a CI log. The Makefile defines it on the second build;
@@ -696,7 +697,10 @@ static void test_precomputed_conformance( void )
            pinned unconditionally: they do not move under contraction. */
         if ( fp_contraction_crosses_statements() )
         {
-            printf( "precomputed differential: SKIPPING the pinned decoded patterns -- this build contracts ACROSS statements (-ffp-contract=fast, or a GCC before 14 mapping =on onto =fast), which STANDARD.md's compressed float does not admit\n" );
+            if ( serialize_test_verbose() )
+            {
+                printf( "precomputed differential: SKIPPING the pinned decoded patterns -- this build contracts ACROSS statements (-ffp-contract=fast, or a GCC before 14 mapping =on onto =fast), which STANDARD.md's compressed float does not admit\n" );
+            }
         }
         else
         {
@@ -902,8 +906,11 @@ static void test_precomputed_differential( void )
        of fading quietly */
     CHECK( check_count >= 3000000UL );
 
-    printf( "precomputed differential: %lu checks, three implementations, %d declarations\n",
-            check_count, num_shapes );
+    if ( serialize_test_verbose() )
+    {
+        printf( "precomputed differential: %lu checks, three implementations, %d declarations\n",
+                check_count, num_shapes );
+    }
 
     /* the negative controls, checked rather than merely reported: if a
        one-rounding writer ever stops producing a different wire code, or a
@@ -912,8 +919,11 @@ static void test_precomputed_differential( void )
        with the split being correct, and this suite is decoration. */
     CHECK( sentinel_write_divergences > 0 );
     CHECK( sentinel_read_divergences > 0 );
-    printf( "precomputed differential: negative controls diverge on %lu wire codes and %lu decoded patterns (both must be nonzero, or the comparison cannot see a single-rounding quantization)\n",
-            sentinel_write_divergences, sentinel_read_divergences );
+    if ( serialize_test_verbose() )
+    {
+        printf( "precomputed differential: negative controls diverge on %lu wire codes and %lu decoded patterns (both must be nonzero, or the comparison cannot see a single-rounding quantization)\n",
+                sentinel_write_divergences, sentinel_read_divergences );
+    }
 }
 
 int main( void )
@@ -928,7 +938,10 @@ int main( void )
        the negative controls below carry the discrimination there. */
     if ( fp_contraction_crosses_statements() )
     {
-        printf( "precomputed differential: asked for -ffp-contract=on and this compiler produced CROSS-STATEMENT contraction (GCC before 14 maps =on onto =fast), so the discriminating build is not available on this toolchain -- standing down\n" );
+        if ( serialize_test_verbose() )
+        {
+            printf( "precomputed differential: asked for -ffp-contract=on and this compiler produced CROSS-STATEMENT contraction (GCC before 14 maps =on onto =fast), so the discriminating build is not available on this toolchain -- standing down\n" );
+        }
         printf( "OK (skipped)\n" );
         return 0;
     }
@@ -938,11 +951,14 @@ int main( void )
        anything on this target. Reported, never asserted: a host without an
        FMA instruction cannot fuse however the flag is set, and that is a
        fact about the host, not a failure. */
-    printf( "precomputed differential: built with %s; fp contraction is %s in this build\n",
-            SERIALIZE_TEST_FP_CONTRACT,
-            !fp_contraction_is_live()             ? "not available -- this target does not fuse, so the float stores are compiled but not exercised"
-            : fp_contraction_crosses_statements() ? "LIVE but crossing statements -- a =fast build, in which no spelling of this arithmetic is distinguishable from another"
-                                                  : "LIVE and statement-local -- the audited home's float stores are under test" );
+    if ( serialize_test_verbose() )
+    {
+        printf( "precomputed differential: built with %s; fp contraction is %s in this build\n",
+                SERIALIZE_TEST_FP_CONTRACT,
+                !fp_contraction_is_live()             ? "not available -- this target does not fuse, so the float stores are compiled but not exercised"
+                : fp_contraction_crosses_statements() ? "LIVE but crossing statements -- a =fast build, in which no spelling of this arithmetic is distinguishable from another"
+                                                      : "LIVE and statement-local -- the audited home's float stores are under test" );
+    }
 
     test_precomputed_validation();
     test_precomputed_conformance();
