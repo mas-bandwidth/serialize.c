@@ -17,7 +17,7 @@
 
 #include <stdlib.h>
 
-static inline int serialize_test_verbose( void )
+static int serialize_test_verbose( void )
 {
     const char * value = getenv( "SERIALIZE_TEST_VERBOSE" );
     return value != NULL && value[0] != '\0' && !( value[0] == '0' && value[1] == '\0' );

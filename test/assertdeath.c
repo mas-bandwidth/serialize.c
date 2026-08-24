@@ -37,6 +37,8 @@
 
 #ifdef NDEBUG
 
+#include "verbose.h"
+
 int main( void )
 {
     /* no asserts to prove under NDEBUG: the write and measure paths check
@@ -58,7 +60,6 @@ int main( void )
 #include <fcntl.h>
 #include <sys/wait.h>
 #include "../serialize.h"
-#include "verbose.h"
 
 static int failed = 0;
 
