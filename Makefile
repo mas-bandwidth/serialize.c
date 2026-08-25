@@ -30,14 +30,14 @@ SERIALIZE_CPP ?= ../serialize
 # between the two variables into a red `make` on every Makefile-driven leg.
 # Adding a suite therefore reaches every CI leg by construction, or fails
 # loudly; it never skips silently.
-TEST_SUITES = roundtrip precomputed precomputed-fma assertdeath ci_probe
+TEST_SUITES = roundtrip precomputed precomputed-fma assertdeath
 
 # Not on MSVC, with reasons: assertdeath forks (POSIX); precomputed-fma is
 # precomputed rebuilt at -ffp-contract=on, and cl has no contraction flag
 # to vary.
 NOT_ON_MSVC = precomputed-fma assertdeath
 
-MSVC_SUITES = roundtrip precomputed golden wstest ci_probe
+MSVC_SUITES = roundtrip precomputed golden wstest
 
 ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) golden wstest)))
 $(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden + wstest minus NOT_ON_MSVC (issue 37))
@@ -133,11 +133,6 @@ build/precomputed-fma: test/precomputed.c serialize.c serialize.h
 # and each is exercised in a forked child that must die by SIGABRT. POSIX
 # only -- NOT_ON_MSVC above excludes it from CI's Windows leg. Skips itself
 # under NDEBUG.
-# issue 37 negative control -- removed with test/ci_probe.c
-build/ci_probe: test/ci_probe.c
-	@mkdir -p build
-	$(CC) $(CFLAGS) -I. test/ci_probe.c -o $@ $(LDLIBS)
-
 build/assertdeath: test/assertdeath.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/assertdeath.c serialize.c -o $@ $(LDLIBS)
