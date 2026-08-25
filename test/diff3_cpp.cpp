@@ -60,6 +60,13 @@ template <typename Stream> bool write_sequence( Stream & stream )
     q = -5.0f;    serialize_compressed_float( stream, q, 0.0f, 10.0f, 0.01f );
     q = 15.0f;    serialize_compressed_float( stream, q, 0.0f, 10.0f, 0.01f );
 
+    // the normative INTEGER clamp's witnesses (STANDARD.md, schema#109), writing max --
+    // see diff3_c.c. Requires the C++ library at v1.12.0 or later (the first release
+    // carrying the clamp): against an older header these rows go red, which is the
+    // cross-language discrimination serialize#94 found missing.
+    q = 8388609.0f;  serialize_compressed_float( stream, q, 0.0f, 8388609.0f, 1.0f );   // witness A: reader-rejects class
+    q = 16777215.0f; serialize_compressed_float( stream, q, 0.0f, 16777215.0f, 1.0f );  // witness B: wire-divergence class
+
     return true;
 }
 
