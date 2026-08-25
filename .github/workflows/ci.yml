@@ -154,9 +154,13 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check out the C++ library (pinned release)
         env:
-          # v1.11.0 is the floor: it is the first release carrying
-          # serialize_compressed_float_precomputed, which diff3_cpp.cpp drives.
-          SERIALIZE_TAG: v1.11.0
+          # v1.12.0 is the floor: v1.11.0 is the first release carrying
+          # serialize_compressed_float_precomputed, which diff3_cpp.cpp drives,
+          # and v1.12.0 is the first carrying the normative integer clamp
+          # (STANDARD.md, schema#109), which diff3's two clamp witnesses make
+          # load-bearing -- against an older header those rows go red, the
+          # cross-language proof serialize#94 found missing.
+          SERIALIZE_TAG: v1.14.0
         run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git ../serialize
       - name: Compare
         run: make diff

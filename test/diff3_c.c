@@ -68,6 +68,17 @@ int main( void )
     serialize_write_compressed_float( &w, -5.0f, 0.0f, 10.0f, 0.01f );   /* clamps to 0 */
     serialize_write_compressed_float( &w, 15.0f, 0.0f, 10.0f, 0.01f );   /* clamps to 1000 */
 
+    /* The normative INTEGER clamp's witnesses (STANDARD.md, schema#109),
+       writing max. Step counts in [2^23, 2^24) are where the float32 ulp of
+       the scaled product reaches 1: an unclamped writer quantizes these to a
+       code its own reader rejects ([0,8388609]: code 8388610) or to a code
+       one bit wider than the field ([0,16777215]: code 2^24). Until these
+       rows existed the clamp was proven in-language only (serialize#94):
+       this gate stayed green against the pre-clamp v1.11.0 reference because
+       no cross-language value exercised the band. */
+    serialize_write_compressed_float( &w, 8388609.0f, 0.0f, 8388609.0f, 1.0f );   /* witness A: reader-rejects class */
+    serialize_write_compressed_float( &w, 16777215.0f, 0.0f, 16777215.0f, 1.0f ); /* witness B: wire-divergence class */
+
     serialize_write_flush( &w );
 
     if ( serialize_write_error( &w ) )
