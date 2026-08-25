@@ -19,15 +19,36 @@ LDLIBS  ?= -lm
 # The C++ library, for the differential test. Override if it lives elsewhere.
 SERIALIZE_CPP ?= ../serialize
 
+# THE SUITE LIST (issue 37). One enumeration, derived everywhere: `make test`
+# runs TEST_SUITES; golden and wstest keep their own targets because they are
+# the pinned-wire suites a big-endian machine must run; CI's big-endian leg
+# drives this same Makefile through the s390x cross compiler and qemu, so it
+# inherits all of it with no list of its own. The MSVC CI leg has no make
+# (and these recipes are not cl-shaped anyway), so it PARSES the MSVC_SUITES
+# line with findstr -- keep that line a single fully expanded line: no
+# continuations, no $(...) -- and the parse-time guard below turns any drift
+# between the two variables into a red `make` on every Makefile-driven leg.
+# Adding a suite therefore reaches every CI leg by construction, or fails
+# loudly; it never skips silently.
+TEST_SUITES = roundtrip precomputed precomputed-fma assertdeath
+
+# Not on MSVC, with reasons: assertdeath forks (POSIX); precomputed-fma is
+# precomputed rebuilt at -ffp-contract=on, and cl has no contraction flag
+# to vary.
+NOT_ON_MSVC = precomputed-fma assertdeath
+
+MSVC_SUITES = roundtrip precomputed golden wstest
+
+ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) golden wstest)))
+$(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden + wstest minus NOT_ON_MSVC (issue 37))
+endif
+
 .PHONY: all test golden wstest test-all-standards diff fuzz bench bench-lto bench-cpp bench-all clean
 
 all: test
 
-test: build/roundtrip build/precomputed build/precomputed-fma build/assertdeath
-	./build/roundtrip
-	./build/precomputed
-	./build/precomputed-fma
-	./build/assertdeath
+test: $(TEST_SUITES:%=build/%)
+	@for suite in $(TEST_SUITES); do echo "./build/$$suite"; ./build/$$suite || exit 1; done
 
 # The pinned wire vectors -- core and wide. Separate from `test` because these
 # are the ones that have to run on a big-endian machine: a round trip cannot
@@ -110,8 +131,8 @@ build/precomputed-fma: test/precomputed.c serialize.c serialize.h
 # The writer contracts, proven to FIRE: with the write path checkless in a
 # release build (issue #52), the debug asserts are the whole enforcement,
 # and each is exercised in a forked child that must die by SIGABRT. POSIX
-# only -- CI's Windows leg runs roundtrip/golden/wstest directly with cl and
-# never builds this. Skips itself under NDEBUG.
+# only -- NOT_ON_MSVC above excludes it from CI's Windows leg. Skips itself
+# under NDEBUG.
 build/assertdeath: test/assertdeath.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/assertdeath.c serialize.c -o $@ $(LDLIBS)

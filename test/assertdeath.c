@@ -16,10 +16,10 @@
     string/wstring content refusals are real checks in every build mode, and
     test/roundtrip.c proves those as ordinary failing reads.
 
-    POSIX only (fork), which is fine: CI's Windows leg compiles and runs
-    roundtrip/golden/wstest directly and never builds this file. Under
-    NDEBUG every assert compiles to nothing, so this test skips itself —
-    the violations here would be undefined behavior, deliberately.
+    POSIX only (fork), which is fine: the Makefile's NOT_ON_MSVC keeps this
+    file off CI's Windows leg. Under NDEBUG every assert compiles to
+    nothing, so this test skips itself — the violations here would be
+    undefined behavior, deliberately.
 
     The compressed float cases pin serialize fork #6 (the ruling: "it's
     non-conforming. also, attempting to send NaN or INF or anything else

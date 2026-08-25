@@ -50,11 +50,17 @@ jobs:
         run: make wstest CSTD=${{ matrix.std }}
 
       # No make on the Windows runner and no /std flag in the msvc row: the
-      # suites are the same ones the Makefile runs, compiled with cl.
-      # vswhere locates Visual Studio (the documented way), vcvars64 puts cl
-      # on the PATH. golden matters here beyond compilation: Windows is where
-      # wchar_t is 16 bits, so the pinned wide vectors prove the UTF-16 wire
-      # path on the platform the design accommodates.
+      # suites are the same ones the Makefile runs, compiled with cl -- and
+      # the LIST is the Makefile's too (issue #37): MSVC_SUITES there is the
+      # one enumeration, parsed here with findstr, and a parse-time guard in
+      # the Makefile turns any drift between it and `make test`'s own list
+      # into a red make on every Makefile-driven leg. A suite added to the
+      # Makefile reaches this leg with no edit to this file; what stays out,
+      # and why, is NOT_ON_MSVC beside it. vswhere locates Visual Studio
+      # (the documented way), vcvars64 puts cl on the PATH. golden matters
+      # here beyond compilation: Windows is where wchar_t is 16 bits, so the
+      # pinned wide vectors prove the UTF-16 wire path on the platform the
+      # design accommodates.
       #
       # precomputed is the mas-bandwidth/schema#82 differential, and this is
       # the one leg in the matrix that never receives -ffp-contract=off:
@@ -62,22 +68,20 @@ jobs:
       # here by whatever /fp:precise does and by nothing else. That makes it
       # the only place the library's own default-contraction behaviour is
       # executed rather than reasoned about, which is exactly where a
-      # differential over the quantization arithmetic belongs. assertdeath
-      # stays out: it forks, and that is POSIX.
-      - name: Test, precomputed differential, golden wire, wstring example (MSVC)
+      # differential over the quantization arithmetic belongs.
+      - name: Run the Makefile's MSVC suite list (cl)
         if: runner.os == 'Windows'
         shell: cmd
         run: |
           for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
           if not "${{ matrix.std }}"=="msvc" set "STDFLAG=/std:${{ matrix.std }}"
-          cl /nologo /W4 /O2 %STDFLAG% /I. test\roundtrip.c serialize.c /Fe:roundtrip.exe || exit /b 1
-          .\roundtrip.exe || exit /b 1
-          cl /nologo /W4 /O2 %STDFLAG% /I. test\precomputed.c serialize.c /Fe:precomputed.exe || exit /b 1
-          .\precomputed.exe || exit /b 1
-          cl /nologo /W4 /O2 %STDFLAG% /I. test\golden.c serialize.c /Fe:golden.exe || exit /b 1
-          .\golden.exe || exit /b 1
-          cl /nologo /W4 /O2 %STDFLAG% /I. test\wstest.c serialize.c /Fe:wstest.exe || exit /b 1
-          .\wstest.exe || exit /b 1
+          for /f "tokens=1,* delims==" %%a in ('findstr /r /c:"^MSVC_SUITES *=" Makefile') do set "SUITES=%%b"
+          if not defined SUITES ( echo MSVC_SUITES not found in Makefile & exit /b 1 )
+          echo suites:%SUITES%
+          for %%t in (%SUITES%) do (
+            cl /nologo /W4 /O2 %STDFLAG% /I. test\%%t.c serialize.c /Fe:%%t.exe || exit /b 1
+            .\%%t.exe || exit /b 1
+          )
 
   # THE job that matters most for this port.
   #
@@ -104,32 +108,28 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-s390x-linux-gnu qemu-user-static
 
-      # static so the emulated binaries need no s390x sysroot at runtime
-      - name: Build and run the golden wire test
-        run: |
-          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -ffp-contract=off -static -I. \
-            test/golden.c serialize.c -o golden-s390x -lm
-          qemu-s390x-static ./golden-s390x
-          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -ffp-contract=off -static -I. \
-            test/wstest.c serialize.c -o wstest-s390x -lm
-          qemu-s390x-static ./wstest-s390x
-          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -ffp-contract=off -static -I. \
-            test/roundtrip.c serialize.c -o roundtrip-s390x -lm
-          qemu-s390x-static ./roundtrip-s390x
-
-      # The mas-bandwidth/schema#82 differential pins wire bytes and decoded
-      # bit patterns, and this repo's law is that pinned wire bytes run on
-      # the big-endian machine -- a round trip agrees with itself in any byte
-      # order. It carries the family's non-zero-min conformance vector and
-      # ~4.7 million byte comparisons between the split compressed float and
-      # a frozen copy of the code it replaced, so running it here is what
+      # The suite list is the Makefile's own (issue #37): this leg runs the
+      # same `make test golden wstest` the ubuntu/macos legs run, only
+      # through the s390x cross compiler, so a suite added to the Makefile
+      # runs big-endian by construction -- this file holds no list to forget.
+      # -static so the emulated binaries need no s390x sysroot, and
+      # binfmt_misc (registered when qemu-user-static installs) runs them
+      # transparently, which is what lets make's ordinary ./build/<suite>
+      # recipe lines execute unchanged.
+      #
+      # That list includes the mas-bandwidth/schema#82 precomputed
+      # differential, which pins wire bytes and decoded bit patterns --
+      # ~4.7 million comparisons between the split compressed float and a
+      # frozen copy of the code it replaced -- so running it here is what
       # says the split is byte identical on a big-endian host and not merely
-      # on the two little-endian ones.
-      - name: Build and run the precomputed differential
+      # on the two little-endian ones. It also includes assertdeath
+      # (qemu-user forwards fork, waitpid and SIGABRT) and precomputed-fma
+      # (gcc 13 maps -ffp-contract=on to =fast, so that binary stands down
+      # with its printed reason until the cross toolchain reaches gcc 14).
+      - name: Build and run every suite big-endian
         run: |
-          s390x-linux-gnu-gcc -std=c99 -Wall -Wextra -O2 -ffp-contract=off -static -I. \
-            test/precomputed.c serialize.c -o precomputed-s390x -lm
-          qemu-s390x-static ./precomputed-s390x
+          make test golden wstest CC=s390x-linux-gnu-gcc \
+            CFLAGS='-std=c99 -Wall -Wextra -O2 -ffp-contract=off -static'
 
   # Byte-compares this library against the C++ one over the same sequence.
   # The port exists to be wire compatible; everything else is detail.
