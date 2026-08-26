@@ -282,10 +282,8 @@ measure, or the caller-owned parameters of a read at all.
 
 ## Contributing
 
-Contributions require a signed
-[Contributor Assignment Agreement](https://github.com/mas-bandwidth/.github/blob/main/CAA.md).
-The check on each pull request explains how to sign: one exact comment, posted
-once, and the signature counts across every Más Bandwidth repository.
+Contributions are accepted under the repository's
+[BSD 3-Clause license](LICENSE).
 
 ## Licence
 
