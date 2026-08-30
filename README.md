@@ -282,6 +282,14 @@ judges the network — range checks on read, malformed align padding, reads
 past the end, malformed string and wstring content — and nothing on write,
 measure, or the caller-owned parameters of a read at all.
 
+## Zig and Odin
+
+There is no native Zig or Odin port, deliberately: both languages import C as
+a first-class act, and a header-only C89 library is exactly the C they import
+best. [bindings/](bindings) holds working, tested examples of each — Zig
+through `@cImport`, Odin through a `foreign` block — round trip and truncated
+read refusal both.
+
 ## Contributing
 
 Contributions are accepted under the repository's

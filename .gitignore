@@ -1,3 +1,6 @@
 build/
-tending/
+tending/logs/
+dist/
 *.o
+bindings/zig/.zig-cache/
+bindings/zig/zig-out/
