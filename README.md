@@ -172,7 +172,7 @@ the end of the data**: near the end of the stream the final window begins
 inside the last bytes and reaches past them. The bytes past the end are
 loaded but **never interpreted** — poison there changes no decoded value and
 no refusal, and the test suite proves it. Any allocation at least 8 bytes
-longer than the data satisfies the contract; the in-tree tests and benches
+longer than the data satisfies the contract; the in-tree tests
 spell it `[N + 8]`. The data pointer itself needs no alignment — windows are
 loaded with `memcpy`, because packet payloads typically start at an unaligned
 offset once the transport header is stripped.
@@ -242,37 +242,7 @@ per-field capacity check (measured then as the stream write leg going from
 reason the C++ library demands its own write spine: an out-of-line field
 costs the call and un-folds the bit width.
 
-Measured against the C++ library at the same `-O2` on an Apple M2, `make
-bench-all` (C++ column: the `serialize` checkout with its write-spine
-inlining, [serialize PR #45](https://github.com/mas-bandwidth/serialize/pull/45)):
-
-| | C | C++ |
-|---|---|---|
-| int packet read | 244 M/s | 188 M/s |
-| int packet write | 122 M/s | 174 M/s |
-| mixed packet read | 250 M/s | 193 M/s |
-| stream read | 9263 MB/s | 5273 MB/s |
-| stream write | 3088 MB/s | 3989 MB/s |
-| bitpacker read | 2099 MB/s | 2706 MB/s |
-| bitpacker write | 2120 MB/s | 2157 MB/s |
-
-The table's write rows predate
-[serialize#52](https://github.com/mas-bandwidth/serialize/issues/52): they
-were measured while every C write still carried a release-build capacity
-check, which made every field a possible early exit and forced the compiler
-to keep the stream's scratch word, bit counts and index correct in memory at
-each field boundary — where the C++ writer, whose release build checks
-nothing, batches that bookkeeping across whole packets and keeps its scratch
-in registers. That check is now gone (see Errors): the write path matches
-C++ and the residual those rows show is expected to close. The bench harness
-re-measures it.
-
-The bitpacker read row also predates the align-up buffer contract (see Buffer
-contract): it was measured while every read still paid a window-select branch
-that spared the caller the 8-bytes-past allocation. That branch is gone — the
-reader now loads its 64-bit window unconditionally, exactly as C++ does — and
-removing it was measured, at the time of that table, taking bitpacker read
-from 2099 to 2497 MB/s. The bench harness re-measures it.
+Benchmarking for the serialize family lives in [mas-bandwidth/schema](https://github.com/mas-bandwidth/schema)'s data-driven bench, which measures the generated codecs across every language on one corpus.
 
 Caller error is `serialize_assert` and compiles out under `NDEBUG`, matching
 the C++ library operation for operation: bounds the wrong way round, a value
