@@ -235,11 +235,10 @@ chain of fallible operations, the compiler's static branch heuristics treat
 each success/failure split as even odds, and a few fields into a message every
 remaining callsite is judged cold and refused at a threshold these functions
 do not fit — the later fields of a message quietly fall out of line. The read
-spine took the demand first (the stranded read rows went from 0.6–0.7x of the
-C++ library to 0.8–0.9x); the write spine took it while it still carried a
-per-field capacity check (measured then as the stream write leg going from
-2755 to 3088 MB/s), and keeps it now that the check is gone, for the same
-reason the C++ library demands its own write spine: an out-of-line field
+spine took the demand first, closing most of the gap to the C++ library on
+the stranded read rows; the write spine took it while it still carried a
+per-field capacity check, and keeps it now that the check is gone, for the
+same reason the C++ library demands its own write spine: an out-of-line field
 costs the call and un-folds the bit width.
 
 Benchmarking for the serialize family lives in [mas-bandwidth/schema](https://github.com/mas-bandwidth/schema)'s data-driven bench, which measures the generated codecs across every language on one corpus.
