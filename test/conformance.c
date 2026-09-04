@@ -27,6 +27,16 @@
     vector states one and nothing here checks one.
 */
 
+/* MSVC's CRT deprecates sprintf in favour of sprintf_s, which no other
+   toolchain has. Every use here writes a bounded string into a fixed
+   destination -- failure messages from fields capped by MAX_TEXT, and vector
+   file paths -- so the portable spelling stays and the warning stands down;
+   without this the Windows leg carries seven C4996 lines and nothing else.
+   Must precede every CRT header. */
+#ifdef _MSC_VER
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200112L
 #endif
