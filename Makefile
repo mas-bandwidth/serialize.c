@@ -199,8 +199,8 @@ build/diff_cpp: test/diff_cpp.cpp test/vectors.h $(SERIALIZE_CPP)/serialize.h
 	@mkdir -p build
 	c++ -std=c++17 -O2 -I$(SERIALIZE_CPP) test/diff_cpp.cpp -o $@
 
-# The libFuzzer harness, mirroring the C++ library's fuzz.cpp: a hostile read
-# pass over the untrusted boundary and a differential round trip pass. Clang
+# The libFuzzer harness, mirroring the C++ library's fuzz.cpp: two hostile read
+# passes over the untrusted boundary and a differential round trip pass. Clang
 # only, because libFuzzer is clang's; the link goes through clang++ because
 # the fuzzer runtime is C++ and needs its standard library. Asserts stay live
 # (no NDEBUG) and asan/ubsan ride along, so a hostile input that corrupts

@@ -912,6 +912,110 @@ int main( void )
         }
     }
 
+    /* ---- the padded-copy wrapper reads an exactly sized payload ----
+
+            serialize_read_stream_init_padded is the supported way to read a
+            payload that arrived in an allocation with no slack. It must
+            decode identically to the direct path over a padded buffer, and
+            it must zero the 8 slack bytes it writes past the copy.
+
+            The message is deliberately 11 bytes, not a multiple of 8, so the
+            final window of the read genuinely reaches past the data and the
+            slack is load bearing. A length that happened to be a multiple of
+            8 would prove nothing about the tail. ---- */
+    {
+        serialize_uint8_t direct[64 + 8];       /* + 8: read buffer allocations extend 8 bytes past the data */
+        serialize_uint8_t exact[64];            /* the payload as it arrives, no slack */
+        serialize_uint8_t copy[64 + 8];
+        serialize_read_stream_t rd, rw;
+        serialize_uint32_t vd3 = 0, vw3 = 0, vd9 = 0, vw9 = 0;
+        serialize_int32_t id = 0, iw = 0;
+        serialize_uint64_t ud = 0, uw = 0;
+        int n, i;
+
+        /* 3 + 10 + 64 + 9 = 86 bits, 11 bytes */
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        CHECK( serialize_write_bits( &w, 5, 3 ) );
+        CHECK( serialize_write_int( &w, 42, 0, 1000 ) );
+        CHECK( serialize_write_uint64( &w, 0x0123456789ABCDEFULL ) );
+        CHECK( serialize_write_bits( &w, 0x155u, 9 ) );
+        serialize_write_flush( &w );
+        CHECK( !serialize_write_error( &w ) );
+        n = serialize_write_bytes_processed( &w );
+        CHECK( n % 8 != 0 );
+
+        memset( direct, 0, sizeof( direct ) );
+        memcpy( direct, buffer, (size_t) n );
+        memcpy( exact, buffer, (size_t) n );
+
+        /* poison the destination first: the wrapper owns every byte the
+           reader can touch, so what survives here is what it wrote */
+        memset( copy, 0xFF, sizeof( copy ) );
+
+        serialize_read_stream_init( &rd, direct, n );
+        serialize_read_stream_init_padded( &rw, copy, (int) sizeof( copy ), exact, n );
+
+        CHECK( serialize_read_bits( &rd, &vd3, 3 ) );       CHECK( serialize_read_bits( &rw, &vw3, 3 ) );
+        CHECK( serialize_read_int( &rd, &id, 0, 1000 ) );   CHECK( serialize_read_int( &rw, &iw, 0, 1000 ) );
+        CHECK( serialize_read_uint64( &rd, &ud ) );         CHECK( serialize_read_uint64( &rw, &uw ) );
+        CHECK( serialize_read_bits( &rd, &vd9, 9 ) );       CHECK( serialize_read_bits( &rw, &vw9, 9 ) );
+
+        CHECK( vd3 == 5 );                      CHECK( vw3 == vd3 );
+        CHECK( id == 42 );                      CHECK( iw == id );
+        CHECK( ud == 0x0123456789ABCDEFULL );   CHECK( uw == ud );
+        CHECK( vd9 == 0x155u );                 CHECK( vw9 == vd9 );
+        CHECK( !serialize_read_error( &rd ) );
+        CHECK( !serialize_read_error( &rw ) );
+        CHECK( serialize_read_bits_processed( &rw ) == serialize_read_bits_processed( &rd ) );
+
+        /* the copy is the payload, and the slack past it is zero */
+        CHECK( memcmp( copy, exact, (size_t) n ) == 0 );
+        for ( i = 0; i < 8; i++ )
+        {
+            CHECK( copy[n + i] == 0 );
+        }
+
+        /* refusal parity: a payload one byte short must fail the same way
+           through the wrapper as it does through the direct path */
+        {
+            serialize_read_stream_t td, tw;
+            serialize_uint32_t v = 0;
+            serialize_int32_t iv = 0;
+            serialize_uint64_t uv = 0;
+
+            memset( direct, 0, sizeof( direct ) );
+            memcpy( direct, buffer, (size_t) ( n - 1 ) );
+            memset( copy, 0xFF, sizeof( copy ) );
+
+            serialize_read_stream_init( &td, direct, n - 1 );
+            serialize_read_stream_init_padded( &tw, copy, (int) sizeof( copy ), exact, n - 1 );
+
+            CHECK( serialize_read_bits( &td, &v, 3 ) );         CHECK( serialize_read_bits( &tw, &v, 3 ) );
+            CHECK( serialize_read_int( &td, &iv, 0, 1000 ) );   CHECK( serialize_read_int( &tw, &iv, 0, 1000 ) );
+            CHECK( serialize_read_uint64( &td, &uv ) );         CHECK( serialize_read_uint64( &tw, &uv ) );
+            CHECK( !serialize_read_bits( &td, &v, 9 ) );        CHECK( !serialize_read_bits( &tw, &v, 9 ) );
+            CHECK( serialize_read_error( &td ) );
+            CHECK( serialize_read_error( &tw ) );
+            CHECK( serialize_read_bits_processed( &tw ) == serialize_read_bits_processed( &td ) );
+        }
+
+        /* an empty payload is a legal packet: the wrapper still writes the
+           slack, and every read refuses */
+        {
+            serialize_read_stream_t ze;
+            serialize_uint32_t v = 0;
+
+            memset( copy, 0xFF, sizeof( copy ) );
+            serialize_read_stream_init_padded( &ze, copy, (int) sizeof( copy ), exact, 0 );
+            for ( i = 0; i < 8; i++ )
+            {
+                CHECK( copy[i] == 0 );
+            }
+            CHECK( !serialize_read_bits( &ze, &v, 1 ) );
+            CHECK( serialize_read_error( &ze ) );
+        }
+    }
+
     /* ---- NaN through compressed float, in a RELEASE build only.
 
        A non-finite value is non-conforming input (serialize fork #6, the

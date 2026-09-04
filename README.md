@@ -188,6 +188,39 @@ The buffer must not change while the stream is reading it. Handing the reader
 an allocation without the slack is caller error with no runtime check at any
 build setting — like every allocation, it is yours.
 
+### Reading a packet you did not allocate
+
+A payload that arrives in an exactly sized allocation does not meet the
+contract. `serialize_read_stream_init_padded` is the supported way to read
+one. It copies the payload into a destination you supply, zeroes the 8 slack
+bytes past the copy, and initializes the stream over the copy:
+
+```c
+serialize_uint8_t scratch[MAX_PACKET_BYTES + 8];   /* + 8: the slack */
+serialize_read_stream_t stream;
+
+serialize_read_stream_init_padded( &stream, scratch, sizeof( scratch ),
+                                   packet, packet_bytes );
+
+serialize_read_int( &stream, &health, 0, 1000 );
+serialize_read_bool( &stream, &at_rest );
+serialize_read_float( &stream, &position_x );
+
+if ( serialize_read_error( &stream ) )
+{
+    /* refuse the packet */
+}
+```
+
+The library allocates nothing, so the destination is yours. One buffer of
+your largest packet size plus 8 serves every packet. A destination smaller
+than `bytes + 8` is caller error, asserted in a debug build and checked by
+nothing in a release build, like every other size contract here.
+
+The cost is one `memcpy` of the payload. Reading in place through
+`serialize_read_stream_init` stays the fast path, and is what you want
+whenever the receive buffer is yours to size.
+
 ## The full surface
 
 Everything the wire standard defines is here, so a schema using any feature of

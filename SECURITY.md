@@ -37,12 +37,16 @@ Especially of interest, in the read path reachable from a hostile buffer:
   allocation without first being bounds-checked against what remains in the buffer. In C
   the caller owns every buffer, so the relevant form here is a length or count from the
   wire driving an index or a copy without being checked against what remains.
-- **Any read that touches memory outside the buffer it was given.** This port assembles
-  its 8-byte read window byte by byte near the end of the buffer rather than
-  over-reading, unlike the C++ library which loads unconditionally and documents the
-  slack as the caller's responsibility. A caller is entitled to hand this reader a
-  buffer of exactly the meaningful length, so a read past the end is a bug here even
-  though the same code would be by-design there.
+- **Any read that touches memory outside the reader's allocation contract.** The reader
+  loads whole 8-byte windows unconditionally, the same read path as the C++ library, so
+  the allocation backing the buffer must extend at least 8 bytes past the end of the
+  data. Near the end of a stream the final window begins inside the last bytes and
+  reaches past them. Those bytes are loaded and never interpreted: poison there changes
+  no decoded value and no refusal. A read that touches memory beyond that slack is a bug
+  in the library. Handing the reader an allocation without the slack is caller error,
+  and a payload received into an exactly sized allocation is read through
+  `serialize_read_stream_init_padded`, which copies it into a caller-supplied
+  destination and zeroes the slack.
 - **A failure that is not sticky.** Once a stream fails, every subsequent operation must
   fail without touching the buffer. A path that resumes writing or reading after an
   error can produce a partially-decoded structure that the caller believes is whole.
