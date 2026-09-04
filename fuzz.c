@@ -237,10 +237,11 @@ static int fuzz_wstring_well_formed( const wchar_t * s )
 }
 
 /* ---------------------------------------------------------------------------
-   pass 1: hostile read
+   passes 1 and 2: hostile read
 
    Arbitrary bytes go in; reads either fail cleanly, which ends the program
-   early because failure is sticky, or produce in-contract values.
+   early because failure is sticky, or produce in-contract values. Both
+   hostile passes run this, over the two allocation shapes.
    --------------------------------------------------------------------------- */
 
 static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t * ops, int num_ops )
@@ -439,7 +440,7 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
 }
 
 /* ---------------------------------------------------------------------------
-   pass 2: differential round trip
+   pass 3: differential round trip
 
    One function, three modes, because C has no stream template: every case
    generates its expected value from the pool FIRST, identically in all three
