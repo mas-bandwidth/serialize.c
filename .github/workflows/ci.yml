@@ -166,7 +166,7 @@ jobs:
           # (STANDARD.md, schema#109), which diff3's two clamp witnesses make
           # load-bearing -- against an older header those rows go red, the
           # cross-language proof serialize#94 found missing.
-          SERIALIZE_TAG: v1.16.0
+          SERIALIZE_TAG: v1.16.2
         run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git ../serialize
       - name: Compare
         run: make diff

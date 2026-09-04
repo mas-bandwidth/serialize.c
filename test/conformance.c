@@ -86,7 +86,7 @@
 #endif
 
 #define MAX_PARAMS 8
-#define MAX_STEPS 8
+#define MAX_STEPS 48                /* the golden message is 28 operations long */
 #define MAX_BYTES 256
 #define MAX_SLACK 8
 #define SLACK_FILL 0xA5
@@ -1026,16 +1026,21 @@ static int param_int( const vector_t * v, const char * name, serialize_int64_t *
     return 1;
 }
 
+static int word_float( const char * text, float * out )
+{
+    char * end = NULL;
+    *out = (float) strtod( text, &end );
+    return end != text && *end == '\0';
+}
+
 static int param_float( const vector_t * v, const char * name, float * out )
 {
     const char * text = param_text( v, name );
-    char * end = NULL;
     if ( text == NULL )
     {
         return 0;
     }
-    *out = (float) strtod( text, &end );
-    return end != text && *end == '\0';
+    return word_float( text, out );
 }
 
 /* ---------------------------------------------------------------------------
@@ -1132,6 +1137,30 @@ static int step_from_words( step_t * step, const char * text )
         step->kind = STEP_FLOAT;
         return 1;
     }
+    if ( strcmp( words[0], "double" ) == 0 && word_count == 1 )
+    {
+        step->kind = STEP_DOUBLE;
+        return 1;
+    }
+    if ( strcmp( words[0], "uint128" ) == 0 && word_count == 1 )
+    {
+        step->kind = STEP_UINT128;
+        return 1;
+    }
+    if ( strcmp( words[0], "int_relative" ) == 0 && word_count == 2 && parse_number( words[1], &a ) )
+    {
+        step->kind = STEP_INT_RELATIVE;
+        step->previous = (serialize_int32_t) a.lo;
+        return 1;
+    }
+    if ( strcmp( words[0], "compressed_float" ) == 0 && word_count == 4 )
+    {
+        if ( !word_float( words[1], &step->fmin ) ) return 0;
+        if ( !word_float( words[2], &step->fmax ) ) return 0;
+        if ( !word_float( words[3], &step->fres ) ) return 0;
+        step->kind = STEP_COMPRESSED_FLOAT;
+        return 1;
+    }
     if ( strcmp( words[0], "object" ) == 0 && word_count == 2 && parse_number( words[1], &a ) )
     {
         step->kind = STEP_OBJECT;
@@ -1156,9 +1185,11 @@ static int step_from_words( step_t * step, const char * text )
         step->width = (serialize_int64_t) a.lo;
         return step->width > 0 && step->width <= MAX_BYTES;
     }
-    if ( strcmp( words[0], "int" ) == 0 && word_count == 3 && parse_number( words[1], &a ) && parse_number( words[2], &b ) )
+    if ( ( strcmp( words[0], "int" ) == 0 || strcmp( words[0], "int64" ) == 0 || strcmp( words[0], "int128" ) == 0 )
+         && word_count == 3 && parse_number( words[1], &a ) && parse_number( words[2], &b ) )
     {
-        step->kind = STEP_INT;
+        step->kind = strcmp( words[0], "int" ) == 0 ? STEP_INT
+                   : ( strcmp( words[0], "int64" ) == 0 ? STEP_INT64 : STEP_INT128 );
         step->min = a;
         step->max = b;
         return 1;
