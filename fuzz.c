@@ -409,10 +409,17 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
 
             case 13:
             {
-                const serialize_int32_t previous = param * 1000 - 8000;
+                /* previous stays in the domain, 0 to 2^31 - 1 (STANDARD.md,
+                   int_relative): it is the CALLER's state, never the fuzzer's
+                   input, and one outside the domain is a contract violation
+                   this harness would be committing itself. What the fuzzer
+                   drives is the stream, and the reader's judgement of the
+                   reconstructed value is what is under test. */
+                const serialize_int32_t previous = param * 1000;
                 serialize_int32_t current = 0;
                 if ( !serialize_read_int_relative( stream, previous, &current ) ) return;
                 fuzz_check( current > previous );
+                fuzz_check( current >= 0 );             /* the domain, on an ACCEPTED read */
             }
             break;
 
@@ -782,7 +789,7 @@ static void fuzz_round_trip( fuzz_mode_t mode,
 
             case 13:
             {
-                const serialize_int32_t previous = param * 1000 - 8000;
+                const serialize_int32_t previous = param * 1000;                                                                 /* in the domain: it is the caller's state */
                 const serialize_int32_t expected = previous + 1 + (serialize_int32_t) ( fuzz_pool_uint32( pool ) % 1000000 );    /* strictly greater than previous */
                 serialize_int32_t value = 0;
                 if ( mode == FUZZ_WRITE )        { fuzz_check( serialize_write_int_relative( w, previous, expected ) ); }

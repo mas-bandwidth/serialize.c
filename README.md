@@ -8,10 +8,15 @@ If this library helps you, please support it: **[Become a supporter](https://www
 A bitpacking serialization library for **C**. Wire compatible with the
 [C++](https://github.com/mas-bandwidth/serialize),
 [C#](https://github.com/mas-bandwidth/serialize.cs),
-[Go](https://github.com/mas-bandwidth/serialize.go) and
+[Dart](https://github.com/mas-bandwidth/serialize.dart),
+[Elixir](https://github.com/mas-bandwidth/serialize.elixir),
+[Go](https://github.com/mas-bandwidth/serialize.go),
+[Java](https://github.com/mas-bandwidth/serialize.java),
+[JavaScript](https://github.com/mas-bandwidth/serialize.js) and
 [Rust](https://github.com/mas-bandwidth/serialize.rs) ports — the same values
-produce the same bytes in all five, so a stream written by one reads in any
-other.
+produce the same bytes in all nine, so a stream written by one reads in any
+other. The wire is specified by [STANDARD.md](STANDARD.md), vendored here
+verbatim; this release implements **format version 1.1**.
 
 ```c
 #include "serialize.h"
@@ -76,6 +81,26 @@ declared range, a malformed alignment pad, or a read past the end of the
 buffer all fail the read. This library is used on packet paths facing the
 open internet, and a read is where untrusted data arrives.
 
+**A refused read leaves your value unwritten.** When a read of a scalar
+fails, the destination you passed holds exactly what it held before the
+call — nothing partial, nothing zero-filled, nothing the stream never
+carried. Two things that rule does not reach, deliberately: a read into a
+buffer you own — `serialize_read_bytes`, `serialize_read_string`,
+`serialize_read_wstring` — leaves that buffer's **contents unspecified**
+after a refusal, because a copy path is not restructured for it; and a
+sequence of reads over a struct or an array may leave earlier members
+written, because each primitive read carries the rule alone.
+
+**Failure is terminal, and the stream enforces it, not your discipline.**
+Nothing after a failing operation has a defined position, so nothing after it
+is interpretable. The first failed read poisons the stream, every later read
+fails without consuming bits or writing a destination, and the failure
+persists until you point the stream at a new buffer with
+`serialize_read_stream_init` (or `serialize_read_stream_init_padded`) or
+discard it. This is the standard's **latch**, implemented as a poisoned bit
+limit: every read already tests the limit, so terminality costs the read path
+nothing.
+
 **Writes are trusted and always return 1 in a release build.** Under `NDEBUG`
 the write path performs no validation at all — no per-field checks and no
 capacity check — exactly matching the C++ library
@@ -125,19 +150,36 @@ the way a single-header library works.
 The Makefile here is for developing the library itself:
 
 ```
-make test                  # round trip, rejection, measure-stream and
-                           # writer-contract (assert) tests
+make test                  # round trip, rejection, measure-stream,
+                           # writer-contract (assert) and conformance-corpus
+                           # tests
 make golden                # the pinned wire vectors, core and wide
 make wstest                # STANDARD.md's worked wstring example
 make diff                  # byte-compare against the C++ library
 make test-all-standards    # c89, c99, c11, c17
 ```
 
+### The conformance corpus
+
+`conformance/` is a **verbatim vendored copy** of the shared corpus in
+[mas-bandwidth/serialize](https://github.com/mas-bandwidth/serialize), the way
+`STANDARD.md` is, and CI holds both copies to upstream. It is the family's one
+conformance instrument: every implementation runs the same vectors, one file
+per operation, each stating the bytes, the decoded value or a refusal, and the
+bits a conforming reader consumes. `make test` runs every vector in it through
+this library's reader — accepted vectors must yield the stated value and
+consume the stated bits, refused vectors must be refused with the destination
+left unwritten. `test/conformance.c` **scans** the directory rather than
+listing its files, so a vector file the corpus gains runs as soon as it is
+vendored, and an operation with no runner is a failure rather than a silent
+skip. Nothing here regenerates its own expectations: a suite that checks a
+port against itself proves only that the port agrees with itself.
+
 CI additionally runs the golden wire test on a **big-endian** machine
 (s390x under qemu). That job earns its place: a round trip test cannot catch
 an endianness bug, because a packer writing the scratch word in the wrong byte
 order would be read back in the same wrong order and every round trip would
-pass while the bytes stayed incompatible with the other four languages. Only a
+pass while the bytes stayed incompatible with the other eight languages. Only a
 pinned golden on a big-endian machine proves the byte order.
 
 The golden pins **two** sequences and the big-endian job runs both. The second
@@ -227,14 +269,26 @@ Everything the wire standard defines is here, so a schema using any feature of
 the language can target C:
 
 - bits, bool, align, and the fixed-width helpers
-- ranged `int`, `int64` and `int128`
+- ranged `int`, `int64` and `int128`, where `min <= max` is the legal
+  relation at every width: a **degenerate range** where `min == max` is a
+  field, not a misuse, and costs zero bits — the writer emits nothing, the
+  reader takes the value from `min` and consumes nothing, and a measure adds
+  nothing. (`compressed_float` is not a ranged operation and does require
+  `min < max`: a zero span has no quantization to define.)
 - `uint128`, always 128 bits
 - **fixed point** (`serialize_write_fixed32` / `64` / `128`) — the Q-format
   path, exact by construction, which is what makes lockstep simulation and
   deterministic replay possible
 - float, double, compressed float
 - bytes, string, wide string
-- `int_relative`, all six tiers
+- `int_relative`, all six tiers, over the domain `0` to `2^31 - 1`. Both
+  `previous` and `current` live in it. `previous` is your own state and never
+  arrives off the wire, so one outside the domain is caller error, asserted;
+  `current` is reconstructed in a width that cannot wrap and then refused
+  unless it lands in the domain and above `previous` — in **every** tier,
+  including the absolute one, whose 32 raw bits are read unsigned. There is no
+  wrapping sequence number here and no truncation to a signed type: a stream
+  that would reconstruct past the top of the domain is refused, not wrapped.
 - the measure stream, with **one operation per write operation** — including
   `int_relative` and `wstring`, whose widths depend on the value and so cannot
   be worked around with `serialize_measure_bits` by a caller unwilling to

@@ -209,6 +209,24 @@ jobs:
           echo "upstream: mas-bandwidth/serialize@$(git ls-remote https://github.com/mas-bandwidth/serialize.git refs/heads/main | cut -f1)"
           diff -u /tmp/upstream-STANDARD.md STANDARD.md
 
+  # conformance/ here is a VERBATIM VENDORED COPY of the shared corpus in
+  # mas-bandwidth/serialize, for the same reason STANDARD.md is: the corpus is
+  # the family's one conformance instrument, and a duplicated instrument that
+  # drifts proves only that this port agrees with itself. The whole DIRECTORY
+  # is compared, so a vector file added upstream fails this job until it is
+  # vendored -- and test/conformance.c scans the directory rather than naming
+  # its files, so vendoring it is all that is needed to run it.
+  conformance-corpus:
+    name: conformance corpus matches upstream
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare against mas-bandwidth/serialize
+        run: |
+          git clone --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git /tmp/upstream
+          echo "upstream: mas-bandwidth/serialize@$(git -C /tmp/upstream rev-parse HEAD)"
+          diff -ru /tmp/upstream/conformance conformance
+
   version:
     name: version consistency
     runs-on: ubuntu-24.04
