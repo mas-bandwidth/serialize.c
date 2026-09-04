@@ -46,7 +46,9 @@ Especially of interest, in the read path reachable from a hostile buffer:
   in the library. Handing the reader an allocation without the slack is caller error,
   and a payload received into an exactly sized allocation is read through
   `serialize_read_stream_init_padded`, which copies it into a caller-supplied
-  destination and zeroes the slack.
+  destination and zeroes the slack — and which refuses, in every build, a destination
+  too small to hold both, copying nothing and handing back a failed stream rather than
+  writing past the end of it.
 - **A failure that is not sticky.** Once a stream fails, every subsequent operation must
   fail without touching the buffer. A path that resumes writing or reading after an
   error can produce a partially-decoded structure that the caller believes is whole.

@@ -43,12 +43,70 @@ ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) 
 $(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden + wstest minus NOT_ON_MSVC (issue 37))
 endif
 
-.PHONY: all test golden wstest test-all-standards diff fuzz clean
+.PHONY: all test release-check golden wstest test-all-standards diff fuzz clean
 
 all: test
 
-test: $(TEST_SUITES:%=build/%)
+test: release-check $(TEST_SUITES:%=build/%)
 	@for suite in $(TEST_SUITES); do echo "./build/$$suite"; ./build/$$suite || exit 1; done
+
+# THE RELEASE CONFIGURATION. Everything else in this file builds with the
+# asserts LIVE, and two things can only be said with them gone.
+#
+# One: the HEADER has to compile clean for a consumer who builds it under
+# NDEBUG with warnings as errors. With the asserts compiled out, a parameter
+# used only inside one becomes an unused parameter, and -Wunused-parameter
+# (in -Wextra, and named here so it cannot be lost) plus -Werror makes that a
+# hard refusal of the header. Not hypothetical: it is how the 1.9.1
+# destination_bytes defect was found, downstream, by
+# mas-bandwidth/schema's C inline gate on macOS clang --
+#
+#   serialize.h:1149:118: error: unused parameter 'destination_bytes'
+#   [-Werror,-Wunused-parameter]
+#
+# -- because every build in THIS repository kept the asserts and so kept the
+# parameter used. serialize.c is the translation unit for the check: it
+# includes serialize.h and declares nothing of its own, so every diagnostic
+# belongs to the header. Compile only, no link.
+#
+# Two: roundtrip carries cases that require the asserts gone -- the too-small
+# padded destination, which a checked build aborts on before reaching the
+# refusal (test/assertdeath.c owns that half), and the NaN clamp. Without
+# this target they are compiled out of every build in the tree.
+#
+# NEGATIVE CONTROL. A warning gate nobody has seen go red is a gate that may
+# be switched off. So this plants exactly the defect it exists to catch --
+# one deliberately unused parameter -- in a SCRATCH copy of the header under
+# build/, and requires that copy to compile CLEAN without -Werror and to FAIL
+# with it. The clean half is what says the scratch copy is otherwise well
+# formed, so the red is the plant and not a mangled file. The plant is
+# appended past the include guard's #endif and lives only in build/.
+#
+# `test` depends on this, so it rides every Makefile-driven CI leg -- all four
+# standards on both unix runners, the s390x cross build, the sanitizers job --
+# with no list of its own to forget. Not on the MSVC leg: there is no make
+# there, and these flags are not cl-shaped.
+RELEASE_WARN_CFLAGS = -std=$(CSTD) -Wall -Wextra -Wunused-parameter -O2 -ffp-contract=off -DNDEBUG
+
+release-check: build/release-roundtrip
+	@mkdir -p build/negctl
+	$(CC) $(RELEASE_WARN_CFLAGS) -Werror -I. -c serialize.c -o build/release-header.o
+	@cp serialize.h serialize.c build/negctl/
+	@printf '\n/* negative control, planted by `make release-check`. Never in the tree. */\nint serialize_planted_unused( int planted );\nint serialize_planted_unused( int planted ) { return 0; }\n' >> build/negctl/serialize.h
+	@if ! $(CC) $(RELEASE_WARN_CFLAGS) -c build/negctl/serialize.c -o build/negctl/plain.o 2> build/negctl/plain.log; then \
+		echo "negative control BROKEN: the planted header does not compile even without -Werror"; \
+		cat build/negctl/plain.log; exit 1; \
+	fi
+	@if $(CC) $(RELEASE_WARN_CFLAGS) -Werror -c build/negctl/serialize.c -o build/negctl/werror.o 2> /dev/null; then \
+		echo "negative control FAILED: a planted unused parameter compiled clean -- this gate is asleep"; exit 1; \
+	fi
+	@echo "negative control: planted unused parameter is RED, as it must be"
+	./build/release-roundtrip
+
+# roundtrip with the asserts compiled out. Same suite, the other build mode.
+build/release-roundtrip: test/roundtrip.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -DNDEBUG -I. test/roundtrip.c serialize.c -o $@ $(LDLIBS)
 
 # The pinned wire vectors -- core and wide. Separate from `test` because these
 # are the ones that have to run on a big-endian machine: a round trip cannot
