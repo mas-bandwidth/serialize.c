@@ -446,15 +446,15 @@ static int run_file( const char * path )
         char * hash;
         char * key;
         char * value;
+        int blank;
         int i;
 
         line_number++;
 
-        hash = strchr( line, '#' );
-        if ( hash != NULL )
-        {
-            *hash = '\0';
-        }
+        /* Trimmed BEFORE the comment is stripped, because only a genuinely
+           blank line separates records: a comment-only line inside a record
+           would otherwise split it in two, and the halves would fail as
+           records missing an operation. */
         for ( i = (int) strlen( line ); i > 0; i-- )
         {
             char c = line[i - 1];
@@ -467,8 +467,27 @@ static int run_file( const char * path )
                 break;
             }
         }
+        blank = line[0] == '\0';
 
-        if ( line[0] == '\0' )
+        hash = strchr( line, '#' );
+        if ( hash != NULL )
+        {
+            *hash = '\0';
+            for ( i = (int) strlen( line ); i > 0; i-- )
+            {
+                char c = line[i - 1];
+                if ( c == ' ' || c == '\t' )
+                {
+                    line[i - 1] = '\0';
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+
+        if ( blank )
         {
             if ( have_record )
             {
@@ -477,6 +496,11 @@ static int run_file( const char * path )
                 have_record = 0;
             }
             continue;
+        }
+
+        if ( line[0] == '\0' )
+        {
+            continue;                                   /* a comment-only line */
         }
 
         key = line;
