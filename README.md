@@ -35,6 +35,26 @@ serialize_write_flush( &stream );
 int bytes = serialize_write_bytes_processed( &stream );
 ```
 
+## Getting it
+
+serialize.c ships as source today. The implementation is ready and there is no
+package on any index: no Homebrew formula, no vcpkg port, no Conan recipe, under
+this name or any other. The C++ library next door is in `homebrew/core`, this one
+is not. Publishing it is a separate round.
+
+That costs less here than it would elsewhere, because the library is a single
+header with no build system to adopt:
+
+```sh
+git clone https://github.com/mas-bandwidth/serialize.c.git
+```
+
+then copy `serialize.h` into your source tree, or point your include path at the
+clone. It needs `-lm` and nothing else. Pin a release tag rather than tracking
+`main`: a release states a format version, and two endpoints interoperate only
+when they carry the same one. The library version is `SERIALIZE_VERSION` after
+including the header.
+
 ## What is different about this port
 
 The C++ library expresses reading and writing **once**, as a single function
