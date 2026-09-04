@@ -61,9 +61,15 @@
     Every operation returns int for a uniform surface, and the two halves mean
     different things by it — the same division the C++ library makes.
 
-    READS can fail: 1 on success, 0 on failure. Failure is sticky — once a
-    read stream fails, subsequent reads fail without touching the buffer, so
-    you can check once at the end of a message rather than after every field.
+    READS can fail: 1 on success, 0 on failure. Failure is TERMINAL — nothing
+    after a failing operation has a defined position, so nothing after it is
+    interpretable, and it is the STREAM that enforces that rather than the
+    caller's discipline. The first failed read poisons the stream, every later
+    read fails without consuming bits or writing a destination, and the
+    failure persists until the stream is pointed at a new buffer by
+    serialize_read_stream_init (or serialize_read_stream_init_padded) or is
+    discarded. So you can check once at the end of a message rather than after
+    every field.
     Failure does not stop the cursor: a refused read still advances bits_read
     by the bits it asked for (see serialize_read_bits for why), so
     bits_processed on a FAILED stream is meaningless — it counts reads
@@ -72,6 +78,17 @@
     Reads fail on out-of-range values rather than clamping them. This library
     is used on packet paths that face the open internet, and a read is the
     place where untrusted data arrives.
+
+    A REFUSED READ WRITES NOTHING TO A SCALAR DESTINATION. When a read of a
+    scalar fails, the caller's value is exactly what it was before the call:
+    every operation here checks before it assigns, so a caller that trusts
+    the destination over the return code never proceeds on a value the stream
+    did not carry. Two things the rule does not reach, deliberately. A read
+    into a CALLER-OWNED BUFFER — serialize_read_bytes, serialize_read_string,
+    serialize_read_wstring — leaves that buffer's contents UNSPECIFIED after a
+    refusal; a copy path is not restructured for it. And a sequence of reads
+    over a struct or an array may leave earlier members written, because each
+    primitive read carries the rule alone.
 
     WRITES are trusted and always return 1 in a release build: under NDEBUG
     the write path performs no validation at all — no per-field checks and no
@@ -104,9 +121,9 @@
    --------------------------------------------------------------------------- */
 
 #define SERIALIZE_VERSION_MAJOR 1
-#define SERIALIZE_VERSION_MINOR 8
+#define SERIALIZE_VERSION_MINOR 9
 #define SERIALIZE_VERSION_PATCH 0
-#define SERIALIZE_VERSION "1.8.0"
+#define SERIALIZE_VERSION "1.9.0"
 
 /* ---------------------------------------------------------------------------
    configuration
@@ -603,7 +620,16 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_uint64( serialize_read_stream_t * SER
    STRICTLY increasing, and no wrap semantics exist (STANDARD.md, the ruling
    verbatim: "no wrapping sequence numbers"): a caller with a wrapping counter
    unwraps it before serializing, and the reader fails a current that does not
-   exceed previous. */
+   exceed previous.
+
+   THE DOMAIN IS 0 to 2^31 - 1, and both ends live in it. previous is the
+   caller's own state and never arrives off the wire, so one outside the
+   domain is caller error, asserted in a checked build and defined by nothing.
+   current is the network's: the reader reconstructs it in a width that cannot
+   wrap and then refuses it unless it lands in the domain and above previous,
+   in EVERY tier — the absolute tier's 32 raw bits included, which are read
+   UNSIGNED so a group with the top bit set is a value above the domain rather
+   than a negative number. A refused read leaves *current untouched. */
 SERIALIZE_INLINE int serialize_write_int_relative( serialize_write_stream_t * stream, serialize_int32_t previous, serialize_int32_t current );
 SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stream, serialize_int32_t previous, serialize_int32_t * current );
 
@@ -2006,9 +2032,13 @@ SERIALIZE_INLINE int serialize_write_int_relative( serialize_write_stream_t * st
 {
     serialize_uint32_t difference;
 
-    /* STRICTLY increasing is the writer's contract, debug-asserted exactly
-       where the C++ writer asserts it (issue #52); the reader enforces it
-       for real, because that is where untrusted data arrives */
+    /* The domain is 0 to 2^31 - 1 and both ends live in it (STANDARD.md,
+       int_relative): previous non-negative, and current above it, which puts
+       current in the domain too because serialize_int32_t stops at its top.
+       Caller contracts, asserted in a checked build exactly where the C++
+       writer asserts the ordering (issue #52); the reader enforces both for
+       real, because that is where untrusted data arrives. */
+    serialize_assert( previous >= 0 );
     serialize_assert( current > previous );
 
     /* subtract in the unsigned domain: current - previous overflows signed
@@ -2063,70 +2093,105 @@ SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stre
 {
     int flag = 0;
     serialize_int32_t difference = 0;
+    serialize_uint32_t reconstructed = 0;
+
+    /* The domain is 0 to 2^31 - 1 and BOTH ends of the operation live in it
+       (STANDARD.md, int_relative). previous is the caller's own state and
+       never arrives off the wire, so a previous outside the domain is caller
+       error — asserted here and checked by nothing in a release build, like
+       every other caller-owned read parameter (see ERRORS). current is the
+       network's, and is checked for real below. */
+    serialize_assert( previous >= 0 );
 
     if ( stream->error )
     {
         return 0;
     }
 
-    if ( !serialize_read_bool( stream, &flag ) ) return 0;
-    if ( flag )
+    /*
+        Every tier reconstructs into ONE unsigned local and leaves the checking
+        to the shared tail. The width cannot wrap: previous is at most
+        2^31 - 1 and the widest tier's difference is 69914, so the sum is
+        always below 2^32 and the reconstruction is exact — which is what lets
+        the tail compare it against the domain rather than against whatever a
+        wrapped signed sum happened to produce.
+    */
+    do
     {
-        *current = (serialize_int32_t) ( (serialize_uint32_t) previous + 1 );
-        return 1;
-    }
-
-    if ( !serialize_read_bool( stream, &flag ) ) return 0;
-    if ( flag )
-    {
-        if ( !serialize_read_int( stream, &difference, 2, 6 ) ) return 0;
-        *current = (serialize_int32_t) ( (serialize_uint32_t) previous + (serialize_uint32_t) difference );
-        return 1;
-    }
-
-    if ( !serialize_read_bool( stream, &flag ) ) return 0;
-    if ( flag )
-    {
-        if ( !serialize_read_int( stream, &difference, 7, 23 ) ) return 0;
-        *current = (serialize_int32_t) ( (serialize_uint32_t) previous + (serialize_uint32_t) difference );
-        return 1;
-    }
-
-    if ( !serialize_read_bool( stream, &flag ) ) return 0;
-    if ( flag )
-    {
-        if ( !serialize_read_int( stream, &difference, 24, 280 ) ) return 0;
-        *current = (serialize_int32_t) ( (serialize_uint32_t) previous + (serialize_uint32_t) difference );
-        return 1;
-    }
-
-    if ( !serialize_read_bool( stream, &flag ) ) return 0;
-    if ( flag )
-    {
-        if ( !serialize_read_int( stream, &difference, 281, 4377 ) ) return 0;
-        *current = (serialize_int32_t) ( (serialize_uint32_t) previous + (serialize_uint32_t) difference );
-        return 1;
-    }
-
-    if ( !serialize_read_bool( stream, &flag ) ) return 0;
-    if ( flag )
-    {
-        if ( !serialize_read_int( stream, &difference, 4378, 69914 ) ) return 0;
-        *current = (serialize_int32_t) ( (serialize_uint32_t) previous + (serialize_uint32_t) difference );
-        return 1;
-    }
-
-    {
-        serialize_uint32_t raw = 0;
-        if ( !serialize_read_bits( stream, &raw, 32 ) ) return 0;
-        *current = (serialize_int32_t) raw;
-        /* the absolute form carries no ordering guarantee of its own, so the
-           reader enforces it */
-        if ( *current <= previous )
+        if ( !serialize_read_bool( stream, &flag ) ) return 0;
+        if ( flag )
         {
-            return serialize_read_fail( stream );
+            reconstructed = (serialize_uint32_t) previous + 1;
+            break;
         }
+
+        if ( !serialize_read_bool( stream, &flag ) ) return 0;
+        if ( flag )
+        {
+            if ( !serialize_read_int( stream, &difference, 2, 6 ) ) return 0;
+            reconstructed = (serialize_uint32_t) previous + (serialize_uint32_t) difference;
+            break;
+        }
+
+        if ( !serialize_read_bool( stream, &flag ) ) return 0;
+        if ( flag )
+        {
+            if ( !serialize_read_int( stream, &difference, 7, 23 ) ) return 0;
+            reconstructed = (serialize_uint32_t) previous + (serialize_uint32_t) difference;
+            break;
+        }
+
+        if ( !serialize_read_bool( stream, &flag ) ) return 0;
+        if ( flag )
+        {
+            if ( !serialize_read_int( stream, &difference, 24, 280 ) ) return 0;
+            reconstructed = (serialize_uint32_t) previous + (serialize_uint32_t) difference;
+            break;
+        }
+
+        if ( !serialize_read_bool( stream, &flag ) ) return 0;
+        if ( flag )
+        {
+            if ( !serialize_read_int( stream, &difference, 281, 4377 ) ) return 0;
+            reconstructed = (serialize_uint32_t) previous + (serialize_uint32_t) difference;
+            break;
+        }
+
+        if ( !serialize_read_bool( stream, &flag ) ) return 0;
+        if ( flag )
+        {
+            if ( !serialize_read_int( stream, &difference, 4378, 69914 ) ) return 0;
+            reconstructed = (serialize_uint32_t) previous + (serialize_uint32_t) difference;
+            break;
+        }
+
+        /*
+            The absolute tier transmits CURRENT, not the difference, and its 32
+            raw bits are UNSIGNED (STANDARD.md, int_relative). Read into the
+            unsigned local, so a group with the top bit set is a value above
+            the domain that the tail refuses — reading it into the signed
+            destination first would make it a negative number instead, and the
+            two readings disagree about the same bytes.
+        */
+        if ( !serialize_read_bits( stream, &reconstructed, 32 ) ) return 0;
     }
+    while ( 0 );
+
+    /*
+        One check for every tier: in the domain, and strictly greater than
+        previous. The absolute tier carries no ordering guarantee of its own
+        and the bounded tiers can still land past the top of the domain, so
+        both halves bind everywhere.
+
+        Checked BEFORE the destination is written: a refused read leaves the
+        caller's value exactly as it was (STANDARD.md, Reader Obligations).
+    */
+    if ( reconstructed > 0x7FFFFFFFu || reconstructed <= (serialize_uint32_t) previous )
+    {
+        return serialize_read_fail( stream );
+    }
+
+    *current = (serialize_int32_t) reconstructed;
 
     return 1;
 }
@@ -3108,10 +3173,11 @@ SERIALIZE_INLINE int serialize_measure_int_relative( serialize_measure_stream_t 
 {
     serialize_uint32_t difference;
 
-    /* STRICTLY increasing is the caller's contract on measure exactly as it
-       is on write, debug-asserted (issue #52). The C++ measure path rides
-       the same assert — MeasureStream is a writing stream — and its release
-       build checks nothing. */
+    /* The domain and the strict increase are the caller's contract on measure
+       exactly as they are on write, asserted in a checked build (issue #52).
+       The C++ measure path rides the same assert — MeasureStream is a writing
+       stream — and its release build checks nothing. */
+    serialize_assert( previous >= 0 );
     serialize_assert( current > previous );
 
     difference = (serialize_uint32_t) current - (serialize_uint32_t) previous;

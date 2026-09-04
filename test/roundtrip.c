@@ -42,6 +42,31 @@ static int failed = 0;
         CHECK( serialize_measure_bits_processed( &m ) == serialize_write_bits_processed( &w ) + (surplus) ); \
     } while ( 0 )
 
+/*
+    A failed read stream is TERMINAL (STANDARD.md, Reader Obligations): the
+    stream carries the failure, every later read fails, and a refused read
+    leaves the caller's destination unwritten. This asks a failed stream for
+    two reads that would be perfectly valid on a fresh stream -- one ranged
+    int, one int_relative -- and requires both to fail with their destinations
+    untouched. The library implements the latch by poisoning the bit limit, so
+    what is really under test is that the poison outlives every kind of
+    failure and that nothing writes through on the way out.
+*/
+static int latched( serialize_read_stream_t * r )
+{
+    serialize_int32_t guard = 0x5A5A5A5;
+    serialize_int32_t relative = 0x3C3C3C3;
+    int ok = 1;
+
+    if ( !serialize_read_error( r ) ) ok = 0;
+    if ( serialize_read_int( r, &guard, 0, 100 ) ) ok = 0;
+    if ( guard != 0x5A5A5A5 ) ok = 0;
+    if ( serialize_read_int_relative( r, 100, &relative ) ) ok = 0;
+    if ( relative != 0x3C3C3C3 ) ok = 0;
+
+    return ok;
+}
+
 int main( void )
 {
     static serialize_uint8_t buffer[2048 + 8];      /* + 8: read buffer allocations extend 8 bytes past the data */
@@ -343,6 +368,80 @@ int main( void )
            debug build like every other writer contract, so there is no
            return value to observe here. test/assertdeath.c is where that
            contract is proven to fire. */
+    }
+
+    /* ---- terminal failure, one cause at a time, each followed by two reads
+            that would succeed on a fresh stream ----
+
+            The kinds are the standard's own list: past the end before
+            anything was consumed and after a field was, a value outside its
+            declared range, malformed align padding, a malformed string
+            payload, and an int_relative outside the domain. Every one must
+            leave a stream on which a VALID read fails and writes nothing --
+            the two halves of the rule, terminality and non-mutation, checked
+            together because a latch that lets a destination through is the
+            failure a caller actually feels. */
+    {
+        char str_out[64];
+        serialize_int32_t v = 0;
+        serialize_uint32_t raw = 0;
+
+        /* past the end, before a single bit was consumed */
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_write_bits( &w, 1, 8 );
+        serialize_write_flush( &w );
+        serialize_read_stream_init( &r, buffer, 1 );
+        CHECK( !serialize_read_bits( &r, &raw, 16 ) );
+        CHECK( latched( &r ) );
+
+        /* past the end, after a field was consumed */
+        serialize_read_stream_init( &r, buffer, 1 );
+        CHECK( serialize_read_bits( &r, &raw, 8 ) );
+        CHECK( !serialize_read_bits( &r, &raw, 8 ) );
+        CHECK( latched( &r ) );
+
+        /* range headroom: 127 does not fit [0,100], which 7 bits can carry */
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_write_bits( &w, 127, 7 );
+        serialize_write_bits( &w, 0xAB, 8 );
+        serialize_write_flush( &w );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
+        CHECK( latched( &r ) );
+
+        /* alignment: padding that is not zero */
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_write_bits( &w, 1, 1 );
+        serialize_write_bits( &w, 0x7F, 7 );
+        serialize_write_bits( &w, 0xCD, 8 );
+        serialize_write_flush( &w );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( serialize_read_bits( &r, &raw, 1 ) );
+        CHECK( !serialize_read_align( &r ) );
+        CHECK( latched( &r ) );
+
+        /* a malformed string payload: a lone 0x80 is not UTF-8 */
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_write_int( &w, 1, 0, 63 );
+        { static const unsigned char bad[1] = { 0x80 };
+          serialize_write_bytes( &w, bad, 1 ); }
+        serialize_write_flush( &w );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        CHECK( !serialize_read_string( &r, str_out, 64 ) );
+        CHECK( latched( &r ) );
+
+        /* int_relative outside the domain: the one-bit tier one step past the
+           top, which reconstructs to 2^31 and is refused rather than wrapped */
+        {
+            serialize_int32_t rel = 0x1B1B1B1;
+            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+            serialize_write_bool( &w, 1 );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            CHECK( !serialize_read_int_relative( &r, 2147483647, &rel ) );
+            CHECK( rel == 0x1B1B1B1 );                  /* refused, so unwritten */
+            CHECK( latched( &r ) );
+        }
     }
 
     /* ---- the measure stream agrees with the writer, ONE OPERATION AT A TIME.

@@ -30,14 +30,14 @@ SERIALIZE_CPP ?= ../serialize
 # between the two variables into a red `make` on every Makefile-driven leg.
 # Adding a suite therefore reaches every CI leg by construction, or fails
 # loudly; it never skips silently.
-TEST_SUITES = roundtrip precomputed precomputed-fma assertdeath
+TEST_SUITES = roundtrip conformance precomputed precomputed-fma assertdeath
 
 # Not on MSVC, with reasons: assertdeath forks (POSIX); precomputed-fma is
 # precomputed rebuilt at -ffp-contract=on, and cl has no contraction flag
 # to vary.
 NOT_ON_MSVC = precomputed-fma assertdeath
 
-MSVC_SUITES = roundtrip precomputed golden wstest
+MSVC_SUITES = roundtrip conformance precomputed golden wstest
 
 ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) golden wstest)))
 $(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden + wstest minus NOT_ON_MSVC (issue 37))
@@ -73,6 +73,16 @@ build/wstest: test/wstest.c serialize.c serialize.h
 build/roundtrip: test/roundtrip.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/roundtrip.c serialize.c -o $@ $(LDLIBS)
+
+# The shared conformance corpus, run through this library's reader. conformance/
+# is a verbatim vendored copy of the corpus in mas-bandwidth/serialize, held to
+# it by CI's sync job, and this binary scans that directory rather than naming
+# its files: a vector file the corpus gains runs on the next build. It takes
+# the directory as an optional argument and defaults to conformance/, which is
+# what lets CI's Windows leg run it with no arguments from the repository root.
+build/conformance: test/conformance.c test/verbose.h serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -I. test/conformance.c serialize.c -o $@ $(LDLIBS)
 
 # The mas-bandwidth/schema#82 differential: since the split, the compressed
 # float entry points derive their constants with

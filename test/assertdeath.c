@@ -90,6 +90,17 @@ static void violate_int_relative_order( void )
     serialize_write_int_relative( &w, 100, 100 );       /* STRICTLY increasing, violated */
 }
 
+/* the domain is 0 to 2^31 - 1 and previous lives in it (STANDARD.md,
+   int_relative) — the write, measure and read halves all assert it */
+
+static void violate_int_relative_previous_domain( void )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_int_relative( &w, -1, 1 );          /* previous outside the domain */
+}
+
 static void violate_string_length( void )
 {
     serialize_uint8_t buffer[64];
@@ -134,6 +145,13 @@ static void violate_measure_int_relative_order( void )
     serialize_measure_int_relative( &m, 100, 100 );     /* STRICTLY increasing, violated */
 }
 
+static void violate_measure_int_relative_previous_domain( void )
+{
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_int_relative( &m, -1, 1 );        /* previous outside the domain */
+}
+
 static void violate_measure_int128_bounds( void )
 {
     serialize_measure_stream_t m;
@@ -158,6 +176,16 @@ static void violate_read_int128_bounds( void )
     serialize_read_int128( &r, &out,
                            serialize_int128_from_int64( 1 ),
                            serialize_int128_from_int64( -1 ) );     /* min > max */
+}
+
+static void violate_read_int_relative_previous_domain( void )
+{
+    serialize_uint8_t buffer[8 + 8];                    /* + 8: read buffer allocations extend 8 bytes past the data */
+    serialize_read_stream_t r;
+    serialize_int32_t out = 0;
+    memset( buffer, 0, sizeof( buffer ) );
+    serialize_read_stream_init( &r, buffer, 8 );
+    serialize_read_int_relative( &r, -1, &out );        /* previous is the caller's, not the network's */
 }
 
 static void violate_read_null_buffer( void )
@@ -299,13 +327,16 @@ int main( void )
     must_abort( violate_capacity,                        "capacity" );
     must_abort( violate_int_range,                       "int_range" );
     must_abort( violate_int_relative_order,              "int_relative_order" );
+    must_abort( violate_int_relative_previous_domain,    "int_relative_previous_domain" );
     must_abort( violate_string_length,                   "string_length" );
     must_abort( violate_bits_width,                      "bits_width" );
     must_abort( violate_measure_string_length,           "measure_string_length" );
     must_abort( violate_measure_wstring_length,          "measure_wstring_length" );
     must_abort( violate_measure_int_relative_order,      "measure_int_relative_order" );
+    must_abort( violate_measure_int_relative_previous_domain, "measure_int_relative_previous_domain" );
     must_abort( violate_measure_int128_bounds,           "measure_int128_bounds" );
     must_abort( violate_read_int128_bounds,              "read_int128_bounds" );
+    must_abort( violate_read_int_relative_previous_domain, "read_int_relative_previous_domain" );
     must_abort( violate_read_null_buffer,                "read_null_buffer" );
     must_abort( violate_read_padded_destination,         "read_padded_destination" );
     must_abort( violate_write_after_fail,                "write_after_fail" );
