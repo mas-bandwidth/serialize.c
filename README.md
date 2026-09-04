@@ -179,15 +179,19 @@ make test-all-standards    # c89, c99, c11, c17
 [mas-bandwidth/serialize](https://github.com/mas-bandwidth/serialize), the way
 `STANDARD.md` is, and CI holds both copies to upstream. It is the family's one
 conformance instrument: every implementation runs the same vectors, one file
-per operation, each stating the bytes, the decoded value or a refusal, and the
-bits a conforming reader consumes. `make test` runs every vector in it through
-this library's reader — accepted vectors must yield the stated value and
-consume the stated bits, refused vectors must be refused with the destination
-left unwritten. `test/conformance.c` **scans** the directory rather than
-listing its files, so a vector file the corpus gains runs as soon as it is
-vendored, and an operation with no runner is a failure rather than a silent
-skip. Nothing here regenerates its own expectations: a suite that checks a
-port against itself proves only that the port agrees with itself.
+per covered operation, each stating the bytes, the decoded value or a refusal,
+and the bits a conforming reader consumes. `make test` runs every vector in it
+through this library's **reader, writer and measure** — accepted vectors must
+yield the stated value and consume the stated bits, refused vectors must be
+refused with the scalar destination left unwritten and the stream left
+terminal, a vector marked `writer = canonical` must re-emit byte for byte, and
+a sequence carrying `measure_at_least` pins a floor the measure must reach.
+`test/conformance.c` **scans** the directory rather than listing its files, so
+a vector file the corpus gains runs as soon as it is vendored; an empty
+directory fails the run, and an operation, a parameter or a fixed point
+declaration with no runner is a failure rather than a silent skip. Nothing here
+regenerates its own expectations: a suite that checks a port against itself
+proves only that the port agrees with itself.
 
 CI additionally runs the golden wire test on a **big-endian** machine
 (s390x under qemu). That job earns its place: a round trip test cannot catch
@@ -293,7 +297,11 @@ whenever the receive buffer is yours to size.
 Everything the wire standard defines is here, so a schema using any feature of
 the language can target C:
 
-- bits, bool, align, and the fixed-width helpers
+- bits, over the whole width the standard gives the operation: `[1,32]`
+  through `serialize_write_bits` and `[1,64]` through
+  `serialize_write_bits64`, which splits a wide value into the low 32 bits
+  first and the remaining high bits second
+- bool, align, and the fixed-width helpers
 - ranged `int`, `int64` and `int128`, where `min <= max` is the legal
   relation at every width: a **degenerate range** where `min == max` is a
   field, not a misuse, and costs zero bits — the writer emits nothing, the

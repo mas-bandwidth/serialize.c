@@ -105,8 +105,10 @@
     the ruling: "C should match C++ and have no checks on write at all
     (except assert). ... C and C++ should be equivalent."). Everything that
     can go wrong on write is caller error — bounds the wrong way round, a
-    value outside its declared range, a bit count outside [1,32], a buffer
-    too small for the message — and caller error is serialize_assert, which
+    value outside its declared range, a bit count outside the entry point's
+    width ([1,32] for serialize_write_bits and [1,64] for
+    serialize_write_bits64), a buffer too small for the message — and caller
+    error is serialize_assert, which
     fires in a debug build and compiles to nothing under NDEBUG. Size the
     buffer with a measure stream if you are not certain the message fits:
     writing past the end of your buffer in a release build is undefined
@@ -131,8 +133,8 @@
 
 #define SERIALIZE_VERSION_MAJOR 1
 #define SERIALIZE_VERSION_MINOR 9
-#define SERIALIZE_VERSION_PATCH 1
-#define SERIALIZE_VERSION "1.9.1"
+#define SERIALIZE_VERSION_PATCH 2
+#define SERIALIZE_VERSION "1.9.2"
 
 /* ---------------------------------------------------------------------------
    configuration
@@ -585,6 +587,15 @@ SERIALIZE_INLINE int serialize_measure_bytes_processed( const serialize_measure_
 SERIALIZE_ALWAYS_INLINE int serialize_write_bits( serialize_write_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t value, int bits );
 SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits );
 
+/* The same operation over the whole width STANDARD.md gives it, [1,64]: for
+   bits <= 32 a single group, and for bits > 32 the LOW 32 BITS FIRST as a
+   32-bit group then the remaining bits - 32 high bits. serialize_uint64 is
+   this at width 64. The bound value < 2^bits holds at every width and is
+   asserted on the caller's 64-bit value, before the split narrows it to the
+   group width. */
+SERIALIZE_ALWAYS_INLINE int serialize_write_bits64( serialize_write_stream_t * stream, serialize_uint64_t value, int bits );
+SERIALIZE_ALWAYS_INLINE int serialize_read_bits64( serialize_read_stream_t * stream, serialize_uint64_t * value, int bits );
+
 SERIALIZE_ALWAYS_INLINE int serialize_write_bool( serialize_write_stream_t * stream, int value );
 SERIALIZE_ALWAYS_INLINE int serialize_read_bool( serialize_read_stream_t * SERIALIZE_RESTRICT stream, int * SERIALIZE_RESTRICT value );
 
@@ -842,6 +853,7 @@ SERIALIZE_INLINE int serialize_read_wstring( serialize_read_stream_t * stream, w
    --------------------------------------------------------------------------- */
 
 SERIALIZE_INLINE int serialize_measure_bits( serialize_measure_stream_t * stream, int bits );
+SERIALIZE_INLINE int serialize_measure_bits64( serialize_measure_stream_t * stream, int bits );
 SERIALIZE_INLINE int serialize_measure_bool( serialize_measure_stream_t * stream );
 SERIALIZE_INLINE int serialize_measure_align( serialize_measure_stream_t * stream );
 
@@ -1264,6 +1276,73 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIA
     return 1;
 }
 
+/*
+    bits over the whole width STANDARD.md gives the operation, [1,64].
+
+    The split is the format's, not a convenience: the low 32 bits go first as
+    a full group and the remaining bits - 32 follow as the high group, which is
+    exactly what serialize_write_uint64 does at width 64 and what the C++
+    serialize_bits macro does at every width above 32.
+*/
+SERIALIZE_ALWAYS_INLINE int serialize_write_bits64( serialize_write_stream_t * stream, serialize_uint64_t value, int bits )
+{
+    serialize_assert( bits > 0 );
+    serialize_assert( bits <= 64 );
+
+    /* The bound holds at EVERY width in [1,64] and not only at 32 or fewer
+       (STANDARD.md, bits). Tested here, on the caller's 64-bit value, because
+       the same test inside serialize_write_bits is handed a value the narrowing
+       to the group width already made legal: a value of 2^32 + 5 at width 3
+       arrives there as 5. */
+    serialize_assert( bits == 64 || value <= ( ( ( (serialize_uint64_t) 1 ) << bits ) - 1 ) );
+
+    if ( bits <= 32 )
+    {
+        return serialize_write_bits( stream, (serialize_uint32_t) value, bits );
+    }
+
+    if ( !serialize_write_bits( stream, (serialize_uint32_t) ( value & 0xFFFFFFFFu ), 32 ) )
+    {
+        return 0;
+    }
+
+    return serialize_write_bits( stream, (serialize_uint32_t) ( value >> 32 ), bits - 32 );
+}
+
+SERIALIZE_ALWAYS_INLINE int serialize_read_bits64( serialize_read_stream_t * stream, serialize_uint64_t * value, int bits )
+{
+    serialize_uint32_t lo = 0;
+    serialize_uint32_t hi = 0;
+
+    serialize_assert( bits > 0 );
+    serialize_assert( bits <= 64 );
+
+    if ( bits <= 32 )
+    {
+        if ( !serialize_read_bits( stream, &lo, bits ) )
+        {
+            return 0;
+        }
+        *value = (serialize_uint64_t) lo;
+        return 1;
+    }
+
+    if ( !serialize_read_bits( stream, &lo, 32 ) )
+    {
+        return 0;
+    }
+    if ( !serialize_read_bits( stream, &hi, bits - 32 ) )
+    {
+        return 0;
+    }
+
+    /* assigned only once both groups are in, so a refused read leaves the
+       caller's value exactly as it was */
+    *value = (serialize_uint64_t) lo | ( ( (serialize_uint64_t) hi ) << 32 );
+
+    return 1;
+}
+
 /* Meaningless on a FAILED stream — the cursor counts reads attempted, not
    data decoded. See ERRORS at the top of this file, and the prototypes for
    why these return serialize_int64_t. */
@@ -1680,6 +1759,16 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERI
 
 SERIALIZE_INLINE int serialize_measure_bits( serialize_measure_stream_t * stream, int bits )
 {
+    stream->bits_written += bits;
+    return 1;
+}
+
+/* The width is the width whichever side of 32 it falls, because the split into
+   two groups costs nothing extra. See serialize_write_bits64. */
+SERIALIZE_INLINE int serialize_measure_bits64( serialize_measure_stream_t * stream, int bits )
+{
+    serialize_assert( bits > 0 );
+    serialize_assert( bits <= 64 );
     stream->bits_written += bits;
     return 1;
 }
@@ -2327,6 +2416,27 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
 }
 
 /*
+    Does a payload of `length` units fit a buffer of `buffer_size` units?
+
+    The one home of the buffer-fit rule the four string entry points assert:
+    serialize_write_string, serialize_measure_string, serialize_write_wstring
+    and serialize_measure_wstring. It takes the length as size_t, which is the
+    width strlen and the wide unit counter produce, and it is called BEFORE the
+    caller's length is narrowed to the int the length field carries. An
+    assertion placed after that narrowing is handed a value the narrowing
+    already made legal: a string of 2^32 + 5 bytes arrives as 5, which fits any
+    buffer, and the assertion that exists to diagnose it cannot see it.
+
+    buffer_size is the width of the length field, serialize_int( length, 0,
+    buffer_size - 1 ), so a buffer_size of zero or less is caller error too:
+    the field's bounds would run the wrong way round.
+*/
+SERIALIZE_INLINE int serialize_length_fits_buffer( size_t length, int buffer_size )
+{
+    return buffer_size > 0 && length < (size_t) buffer_size;
+}
+
+/*
     The string payload is well-formed UTF-8 (STANDARD.md, adopted 2026-08-15).
     On the write side that is the writer's obligation, debug-asserted per the
     writes-trusted doctrine. On the READ side it is a mandatory refusal in
@@ -2391,13 +2501,17 @@ SERIALIZE_INLINE int serialize_string_is_valid_utf8( const char * string, int le
 
 SERIALIZE_INLINE int serialize_write_string( serialize_write_stream_t * stream, const char * string, int buffer_size )
 {
+    size_t string_length;
     int length;
 
-    length = (int) strlen( string );
+    string_length = strlen( string );
 
     /* fitting the declared buffer is the writer's contract, asserted exactly
-       where the C++ serialize_string_internal asserts it (issue #52) */
-    serialize_assert( length < buffer_size );
+       where the C++ serialize_string_internal asserts it (issue #52), and on
+       the untruncated length. See serialize_length_fits_buffer. */
+    serialize_assert( serialize_length_fits_buffer( string_length, buffer_size ) );
+
+    length = (int) string_length;
 
     /* the writer's contract, debug only. See serialize_string_is_valid_utf8. */
     serialize_assert( serialize_string_is_valid_utf8( string, length ) );
@@ -2717,11 +2831,31 @@ SERIALIZE_INLINE int serialize_write_uint128( serialize_write_stream_t * stream,
 
 SERIALIZE_INLINE int serialize_read_uint128( serialize_read_stream_t * stream, serialize_uint128_t * value )
 {
-    if ( !serialize_read_uint64( stream, &value->lo ) )
+    serialize_uint64_t lo = 0;
+    serialize_uint64_t hi = 0;
+
+    if ( stream->error )
     {
         return 0;
     }
-    return serialize_read_uint64( stream, &value->hi );
+
+    if ( !serialize_read_uint64( stream, &lo ) )
+    {
+        return 0;
+    }
+    if ( !serialize_read_uint64( stream, &hi ) )
+    {
+        return 0;
+    }
+
+    /* through locals and assigned once, so a stream that carries the low half
+       and then runs out leaves the caller's value exactly as it was
+       (STANDARD.md, Reader Obligations: a refused primitive read must leave
+       its destination unwritten) */
+    value->lo = lo;
+    value->hi = hi;
+
+    return 1;
 }
 
 SERIALIZE_INLINE int serialize_write_int128( serialize_write_stream_t * stream, serialize_int128_t value, serialize_int128_t min, serialize_int128_t max )
@@ -2964,11 +3098,15 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_fixed128( serialize_read_stream_t * s
     recombining the pair on read. This counts the units a string transmits —
     which on a 4-byte platform is more than its character count when astral
     text is present, and is the count the length field carries.
+
+    The count is a size_t, the width the string itself can reach, so the
+    buffer-fit assertion its callers make sees the real count rather than one
+    an int counter already wrapped. See serialize_length_fits_buffer.
 */
-SERIALIZE_INLINE int serialize_wstring_unit_count( const wchar_t * string )
+SERIALIZE_INLINE size_t serialize_wstring_unit_count( const wchar_t * string )
 {
-    int units = 0;
-    int i;
+    size_t units = 0;
+    size_t i;
     for ( i = 0; string[i] != 0; i++ )
     {
         serialize_uint32_t c = (serialize_uint32_t) string[i];
@@ -3026,17 +3164,21 @@ SERIALIZE_INLINE int serialize_wstring_is_valid_utf16( const wchar_t * string )
 
 SERIALIZE_INLINE int serialize_write_wstring( serialize_write_stream_t * stream, const wchar_t * string, int buffer_size )
 {
+    size_t unit_count;
     int units;
     int i;
 
     /* the writer's contract, debug only. See serialize_wstring_is_valid_utf16. */
     serialize_assert( serialize_wstring_is_valid_utf16( string ) );
 
-    units = serialize_wstring_unit_count( string );
+    unit_count = serialize_wstring_unit_count( string );
 
     /* fitting the declared buffer is the writer's contract, debug-asserted
-       (issue #52), exactly as the narrow string path asserts it */
-    serialize_assert( units < buffer_size );
+       (issue #52), exactly as the narrow string path asserts it, and on the
+       untruncated count. See serialize_length_fits_buffer. */
+    serialize_assert( serialize_length_fits_buffer( unit_count, buffer_size ) );
+
+    units = (int) unit_count;
 
     if ( !serialize_write_int( stream, units, 0, buffer_size - 1 ) )
     {
@@ -3268,12 +3410,16 @@ SERIALIZE_INLINE int serialize_measure_int_relative( serialize_measure_stream_t 
 
 SERIALIZE_INLINE int serialize_measure_string( serialize_measure_stream_t * stream, const char * string, int buffer_size )
 {
-    int length = (int) strlen( string );
+    size_t string_length = strlen( string );
+    int length;
 
     /* fitting the declared buffer is the caller's contract on measure exactly
        as it is on write, debug-asserted (issue #52) and never checked in a
-       release build — the C++ measure path rides the same assert */
-    serialize_assert( length < buffer_size );
+       release build — the C++ measure path rides the same assert. On the
+       untruncated length: see serialize_length_fits_buffer. */
+    serialize_assert( serialize_length_fits_buffer( string_length, buffer_size ) );
+
+    length = (int) string_length;
 
     serialize_measure_int( stream, 0, buffer_size - 1 );
     serialize_measure_bytes( stream, length );
@@ -3287,11 +3433,15 @@ SERIALIZE_INLINE int serialize_measure_string( serialize_measure_stream_t * stre
    two groups it transmits. */
 SERIALIZE_INLINE int serialize_measure_wstring( serialize_measure_stream_t * stream, const wchar_t * string, int buffer_size )
 {
-    int units = serialize_wstring_unit_count( string );
+    size_t unit_count = serialize_wstring_unit_count( string );
+    int units;
 
     /* the caller's contract, debug-asserted exactly as the narrow path
-       asserts it (issue #52) */
-    serialize_assert( units < buffer_size );
+       asserts it (issue #52), and on the untruncated count. See
+       serialize_length_fits_buffer. */
+    serialize_assert( serialize_length_fits_buffer( unit_count, buffer_size ) );
+
+    units = (int) unit_count;
 
     stream->bits_written += serialize_bits_required( 0, (serialize_uint32_t) ( buffer_size - 1 ) );
     stream->bits_written += units * 32;
