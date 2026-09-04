@@ -1113,6 +1113,61 @@ int main( void )
             CHECK( !serialize_read_bits( &ze, &v, 1 ) );
             CHECK( serialize_read_error( &ze ) );
         }
+
+        /* a destination too small for the payload and its slack, in a
+           RELEASE build only.
+
+           The size is the caller's contract, but it is the one caller size
+           the library is handed rather than left to trust, so the wrapper
+           refuses it in every build: it copies nothing and hands back a
+           FAILED stream. In a DEBUG build the assert fires first and the
+           process dies -- test/assertdeath.c's read_padded_destination case
+           is that half -- so this can only run under NDEBUG, which is what
+           `make release-check` builds. */
+#ifdef NDEBUG
+        {
+            serialize_read_stream_t sm;
+            serialize_uint8_t undersized[16];
+            serialize_uint32_t v = 0xABCDu;
+            int j;
+
+            /* room for the payload, none for the slack */
+            memset( undersized, 0xFF, sizeof( undersized ) );
+            serialize_read_stream_init_padded( &sm, undersized, (int) sizeof( undersized ), exact, (int) sizeof( undersized ) );
+
+            /* failed before the first read, and nothing was copied */
+            CHECK( serialize_read_error( &sm ) );
+            for ( j = 0; j < (int) sizeof( undersized ); j++ )
+            {
+                CHECK( undersized[j] == 0xFF );
+            }
+
+            /* the first read fails and writes nothing to the destination */
+            CHECK( !serialize_read_bits( &sm, &v, 8 ) );
+            CHECK( v == 0xABCDu );
+
+            /* and the failure is the ordinary latch: it stays failed */
+            CHECK( !serialize_read_bits( &sm, &v, 8 ) );
+            CHECK( v == 0xABCDu );
+            CHECK( serialize_read_error( &sm ) );
+
+            /* one byte short of the slack is short: bytes + 8 is the contract */
+            memset( undersized, 0xFF, sizeof( undersized ) );
+            serialize_read_stream_init_padded( &sm, undersized, (int) sizeof( undersized ), exact, (int) sizeof( undersized ) - 7 );
+            CHECK( serialize_read_error( &sm ) );
+            CHECK( undersized[0] == 0xFF );
+
+            /* exactly bytes + 8 is accepted: the boundary is not off by one */
+            memset( undersized, 0xFF, sizeof( undersized ) );
+            serialize_read_stream_init_padded( &sm, undersized, (int) sizeof( undersized ), exact, (int) sizeof( undersized ) - 8 );
+            CHECK( !serialize_read_error( &sm ) );
+            CHECK( memcmp( undersized, exact, sizeof( undersized ) - 8 ) == 0 );
+            for ( j = 0; j < 8; j++ )
+            {
+                CHECK( undersized[ sizeof( undersized ) - 8 + j ] == 0 );
+            }
+        }
+#endif /* NDEBUG */
     }
 
     /* ---- NaN through compressed float, in a RELEASE build only.

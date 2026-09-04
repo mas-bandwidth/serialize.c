@@ -79,6 +79,15 @@
     is used on packet paths that face the open internet, and a read is the
     place where untrusted data arrives.
 
+    A stream can also START failed. serialize_read_stream_init_padded refuses
+    a destination that cannot hold bytes + 8 — in every build, not only a
+    checked one — by copying nothing and latching the stream, so a caller who
+    got the size wrong decodes nothing instead of over-reading. It is the one
+    caller size in this library that is a runtime refusal rather than an
+    assert alone, because it is the one the library is actually given: see
+    the function's own comment. Everything else about the caller is asserted
+    and nothing more, as below.
+
     A REFUSED READ WRITES NOTHING TO A SCALAR DESTINATION. When a read of a
     scalar fails, the caller's value is exactly what it was before the call:
     every operation here checks before it assigns, so a caller that trusts
@@ -122,8 +131,8 @@
 
 #define SERIALIZE_VERSION_MAJOR 1
 #define SERIALIZE_VERSION_MINOR 9
-#define SERIALIZE_VERSION_PATCH 0
-#define SERIALIZE_VERSION "1.9.0"
+#define SERIALIZE_VERSION_PATCH 1
+#define SERIALIZE_VERSION "1.9.1"
 
 /* ---------------------------------------------------------------------------
    configuration
@@ -525,11 +534,21 @@ SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stre
 
    destination must hold at least bytes + 8. The library allocates nothing,
    so the destination is yours: an array of your largest packet size plus 8
-   is the usual choice, and one destination serves every packet. A
-   destination that is too small is caller error, asserted in a debug build
-   and checked by nothing in a release build, like every other size contract
-   here. Passing destination_bytes is what gives that assert something to
-   test against.
+   is the usual choice, and one destination serves every packet.
+
+   A destination that is too small is caller error, and unlike every other
+   size contract here it is REFUSED IN EVERY BUILD rather than asserted and
+   trusted. Nothing is copied, and the stream is left in its FAILED state —
+   the same latch a refused read leaves, so every read on it fails, nothing
+   is written to any destination, and the processed counters are meaningless
+   (see ERRORS at the top of this file). A checked build asserts as well, so
+   the mistake is loud where a caller can still fix it; a release build turns
+   it into a refusal instead of a copy past the end of the destination. The
+   same check covers a negative bytes.
+
+   This is the one caller size the library can act on: destination_bytes is a
+   parameter, where every other allocation arrives as a bare pointer with
+   nothing to test it against.
 
    The slack bytes are zeroed for hygiene only. They are loaded and never
    interpreted, so their contents change no decoded value and no refusal,
@@ -1151,12 +1170,31 @@ SERIALIZE_INLINE void serialize_read_stream_init_padded( serialize_read_stream_t
     serialize_uint64_t slack = 0;
 
     serialize_assert( destination );
-    serialize_assert( bytes >= 0 );
 
-    /* spelled as a subtraction rather than destination_bytes >= bytes + 8 so
-       a huge bytes cannot overflow the addition before the assert sees it */
+    /* the sizes, asserted so a checked build is loud about the caller error
+       — and then checked FOR REAL below, in every build. Spelled as a
+       subtraction rather than destination_bytes >= bytes + 8 so a huge bytes
+       cannot overflow the addition before the test sees it. */
+    serialize_assert( bytes >= 0 );
     serialize_assert( destination_bytes >= 8 );
     serialize_assert( destination_bytes - 8 >= bytes );
+
+    if ( bytes < 0 || destination_bytes < 8 || destination_bytes - 8 < bytes )
+    {
+        /* A destination that cannot hold the payload and its slack copies
+           NOTHING and gets a FAILED stream — the same latch a refused read
+           leaves, so every read on it fails and the processed counters are
+           meaningless (see ERRORS at the top of this file). This is the one
+           caller size the library is actually handed: every other allocation
+           arrives as a bare pointer with nothing to test it against, but
+           destination_bytes is a parameter, and the alternative to acting on
+           it is copying past the end of the caller's destination. So it is a
+           refusal in a release build rather than an assert and a trusted
+           over-read. */
+        serialize_read_stream_init( stream, destination, 0 );
+        serialize_read_fail( stream );
+        return;
+    }
 
     if ( bytes > 0 )
     {

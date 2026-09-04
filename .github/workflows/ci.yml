@@ -39,6 +39,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # `make test` also runs release-check: the header compiled under NDEBUG
+      # with -Wall -Wextra -Werror, plus roundtrip run with the asserts gone.
+      # That is the build a CONSUMER makes and this repository otherwise never
+      # did -- serialize.c 1.9.0 shipped a header that refused to compile that
+      # way, and mas-bandwidth/schema's inline gate found it rather than CI.
+      # The target carries its own negative control; see the Makefile.
       - name: Test
         if: runner.os != 'Windows'
         run: make test CSTD=${{ matrix.std }}

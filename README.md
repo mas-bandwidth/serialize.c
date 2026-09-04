@@ -101,6 +101,14 @@ discard it. This is the standard's **latch**, implemented as a poisoned bit
 limit: every read already tests the limit, so terminality costs the read path
 nothing.
 
+**A stream can start failed.** `serialize_read_stream_init_padded` refuses a
+destination that cannot hold `bytes + 8` — in every build, not just a debug
+one — by copying nothing and latching the stream, so a caller who got the
+size wrong decodes nothing instead of over-reading. It is the one caller size
+here that is a runtime refusal rather than an assert alone, because it is the
+one the library is actually given: see [Reading a packet you did not
+allocate](#reading-a-packet-you-did-not-allocate).
+
 **Writes are trusted and always return 1 in a release build.** Under `NDEBUG`
 the write path performs no validation at all — no per-field checks and no
 capacity check — exactly matching the C++ library
@@ -129,6 +137,12 @@ align padding, and malformed string/wstring content are refused, the same
 refusals the C++ reader keeps in its release build. The model is exact
 parity with C++, operation by operation: zero release-build validation of
 the caller, full release-build refusal of the wire.
+
+The one exception is `serialize_read_stream_init_padded`, and it is not a
+parity break: the C++ library has no such function, because it is this
+port's answer to a payload that arrives without slack. It takes the
+destination's size as a parameter, so it is the only place the library is
+told how big a caller's allocation is — and where it is told, it checks.
 
 If you need to mark a stream failed yourself, call `serialize_read_fail` or
 `serialize_write_fail`; do not set the `error` field by hand, because failure
@@ -226,9 +240,9 @@ legal, is how a conforming implementation reads. Machinery that avoids the
 slack obligation at the cost of per-operation work in the hot path is a
 slower correct option, and is refused.
 
-The buffer must not change while the stream is reading it. Handing the reader
-an allocation without the slack is caller error with no runtime check at any
-build setting — like every allocation, it is yours.
+The buffer must not change while the stream is reading it. Handing
+`serialize_read_stream_init` an allocation without the slack is caller error
+with no runtime check at any build setting — like every allocation, it is yours.
 
 ### Reading a packet you did not allocate
 
@@ -255,9 +269,20 @@ if ( serialize_read_error( &stream ) )
 ```
 
 The library allocates nothing, so the destination is yours. One buffer of
-your largest packet size plus 8 serves every packet. A destination smaller
-than `bytes + 8` is caller error, asserted in a debug build and checked by
-nothing in a release build, like every other size contract here.
+your largest packet size plus 8 serves every packet.
+
+A destination smaller than `bytes + 8` is caller error, and unlike every
+other size contract here it is **refused in every build** rather than
+asserted and trusted. Nothing is copied, and the stream comes back in its
+**failed state** — the same latch a refused read leaves — so
+`serialize_read_error` is set from the start, the first read fails and writes
+nothing, and the processed counters are meaningless. A debug build asserts as
+well, so the mistake is loud where you can still fix it; a release build turns
+it into a refusal instead of a copy past the end of your destination.
+
+This is the one caller size the library can act on: `destination_bytes` is a
+parameter, where every other allocation arrives as a bare pointer with
+nothing to test it against.
 
 The cost is one `memcpy` of the payload. Reading in place through
 `serialize_read_stream_init` stays the fast path, and is what you want
@@ -336,7 +361,9 @@ outside its declared range on write, a bit count outside `[1,32]`, a write
 past the end of the buffer. What stays in a release build is everything that
 judges the network — range checks on read, malformed align padding, reads
 past the end, malformed string and wstring content — and nothing on write,
-measure, or the caller-owned parameters of a read at all.
+measure, or the caller-owned parameters of a read at all, with the one
+deliberate exception the Errors section names: the padded wrapper's
+destination size, which is refused rather than trusted.
 
 ## Zig and Odin
 
