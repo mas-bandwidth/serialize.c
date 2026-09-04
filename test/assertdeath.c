@@ -166,6 +166,17 @@ static void violate_read_null_buffer( void )
     serialize_read_stream_init( &r, NULL, 8 );          /* the C++ BitReader asserts data; init asserts the same */
 }
 
+static void violate_read_padded_destination( void )
+{
+    serialize_uint8_t payload[16];
+    serialize_uint8_t destination[16];                  /* room for the payload, none for the slack */
+    serialize_read_stream_t r;
+    memset( payload, 0, sizeof( payload ) );
+    /* the destination must hold bytes + 8, and the size parameter is what
+       lets this one be checked at all */
+    serialize_read_stream_init_padded( &r, destination, (int) sizeof( destination ), payload, (int) sizeof( payload ) );
+}
+
 static void violate_write_after_fail( void )
 {
     serialize_uint8_t buffer[8];
@@ -296,6 +307,7 @@ int main( void )
     must_abort( violate_measure_int128_bounds,           "measure_int128_bounds" );
     must_abort( violate_read_int128_bounds,              "read_int128_bounds" );
     must_abort( violate_read_null_buffer,                "read_null_buffer" );
+    must_abort( violate_read_padded_destination,         "read_padded_destination" );
     must_abort( violate_write_after_fail,                "write_after_fail" );
     must_abort( violate_compressed_float_nan_value,      "compressed_float_nan_value" );
     must_abort( violate_compressed_float_inf_value,      "compressed_float_inf_value" );

@@ -1,25 +1,39 @@
 /*
     libFuzzer harness for serialize.c, ported from the C++ library's fuzz.cpp.
 
-    Every input runs two passes:
+    Every input runs three passes:
 
     1. Hostile read (fuzz_read). The read stream is the trust boundary of this
        library: it must survive arbitrary hostile bytes, failing reads by
        returning 0, never by corrupting memory or tripping an assert. Built
        with asserts live plus asan/ubsan so all three failure modes are caught.
-       The read buffer is heap allocated at exactly payload length + the 8
-       bytes of slack the allocation contract requires (see the read stream
-       struct in serialize.h), so asan fences the contract's own edge: a read
-       past data + 8 traps on every run.
+       The read buffer is heap allocated at exactly payload length + 8. The
+       slack is there because the reader loads whole 8-byte windows
+       unconditionally, so near the end of a stream the final window begins
+       inside the last bytes and reaches past them; the allocation contract
+       (see the read stream struct in serialize.h) covers that load, and the
+       bytes it reaches are loaded but never interpreted. Allocating exactly
+       the contract and no more puts an asan fence on the contract's own
+       edge: a read past data + 8 traps on every run.
 
-    2. Differential round trip (fuzz_round_trip). Values generated from the
+    2. The same hostile bytes through the padded-copy wrapper
+       (serialize_read_stream_init_padded), from a source allocation with no
+       slack at all. That wrapper is what a caller holding an exactly sized
+       payload uses, so the source is heap allocated at exactly payload
+       length and asan fences the byte right after it: a wrapper that read
+       its source the way the reader reads a buffer would trap here. The
+       destination is left uninitialized on purpose, so any byte the reader
+       can touch that the wrapper failed to write is a ubsan/asan finding
+       rather than a silent zero.
+
+    3. Differential round trip (fuzz_round_trip). Values generated from the
        input are written with a write stream, measured with a measure stream
        (which must never measure fewer bits than were written), then read back
        and compared. Any write/read asymmetry traps.
 
     The first bytes of the fuzz input are an op program selecting which
     serialize_* calls run and with what parameters; the rest are the hostile
-    bitstream for pass 1 and the value pool for pass 2. The op table matches
+    bitstream for passes 1 and 2 and the value pool for pass 3. The op table matches
     fuzz.cpp case for case so the two harnesses explore the same interleavings.
     One adaptation: C has no native 128-bit arithmetic, so where the C++
     harness draws uniform 128-bit values, this one drives the wide lanes with
@@ -33,7 +47,7 @@
 #include "serialize.h"
 
 #include <stdint.h>
-#include <stdlib.h>     /* malloc/free: the pass 1 read buffer carries the allocation contract exactly */
+#include <stdlib.h>     /* malloc/free: the pass 1 and pass 2 buffers carry the allocation contract exactly */
 #include <string.h>
 #include <math.h>
 #include <wchar.h>
@@ -223,10 +237,11 @@ static int fuzz_wstring_well_formed( const wchar_t * s )
 }
 
 /* ---------------------------------------------------------------------------
-   pass 1: hostile read
+   passes 1 and 2: hostile read
 
    Arbitrary bytes go in; reads either fail cleanly, which ends the program
-   early because failure is sticky, or produce in-contract values.
+   early because failure is sticky, or produce in-contract values. Both
+   hostile passes run this, over the two allocation shapes.
    --------------------------------------------------------------------------- */
 
 static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t * ops, int num_ops )
@@ -425,7 +440,7 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
 }
 
 /* ---------------------------------------------------------------------------
-   pass 2: differential round trip
+   pass 3: differential round trip
 
    One function, three modes, because C has no stream template: every case
    generates its expected value from the pool FIRST, identically in all three
@@ -842,10 +857,12 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
     payload_bytes = size - FUZZ_NUM_OPS;
 
     /* pass 1: hostile read of arbitrary bytes. Heap allocated at exactly
-       payload_bytes + 8 -- the allocation must extend at least 8 bytes past
-       the data, because the reader loads 64-bit windows (the C++ harness
-       does the same) -- so asan fences the contract's own edge and any read
-       past the slack traps */
+       payload_bytes + 8: the reader loads whole 8-byte windows
+       unconditionally, so the final window of a stream reaches past the data
+       and the allocation must extend at least 8 bytes past it (the C++
+       harness allocates the same slack for the same reason). Allocating the
+       contract exactly puts an asan fence on its edge, so any read past the
+       slack traps */
     {
         serialize_uint8_t * read_buffer = (serialize_uint8_t *) malloc( payload_bytes + 8 );
         serialize_read_stream_t stream;
@@ -860,7 +877,31 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
         free( read_buffer );
     }
 
-    /* pass 2: differential round trip of values generated from the same bytes.
+    /* pass 2: the same hostile bytes, read through the padded-copy wrapper
+       from a source allocation with no slack. The source is heap allocated
+       at exactly payload_bytes, so asan fences the byte right after the
+       payload: a wrapper that read its source the way the reader reads a
+       buffer traps here. The destination is deliberately not zeroed first,
+       so a byte the reader can touch that the wrapper failed to write shows
+       up as a finding rather than a silent zero */
+    {
+        serialize_uint8_t * exact = (serialize_uint8_t *) malloc( payload_bytes );
+        serialize_uint8_t * padded = (serialize_uint8_t *) malloc( payload_bytes + 8 );
+        serialize_read_stream_t stream;
+        if ( exact == NULL || padded == NULL )
+        {
+            free( exact );
+            free( padded );
+            return 0;
+        }
+        memcpy( exact, payload, payload_bytes );
+        serialize_read_stream_init_padded( &stream, padded, (int) ( payload_bytes + 8 ), exact, (int) payload_bytes );
+        fuzz_read( &stream, ops, FUZZ_NUM_OPS );
+        free( exact );
+        free( padded );
+    }
+
+    /* pass 3: differential round trip of values generated from the same bytes.
        worst case is ~260 bytes per op (a 241 byte serialize_bytes plus
        alignment), so 32 ops fit comfortably in 16KB */
     {

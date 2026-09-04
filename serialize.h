@@ -407,6 +407,10 @@ typedef struct serialize_write_stream_t
     loaded with memcpy, which packet payloads require because they typically
     start at an unaligned offset once the transport header is stripped.
 
+    A payload that arrived in an exactly sized allocation does not meet this
+    contract. Read it through serialize_read_stream_init_padded, which copies
+    it into a destination you supply and zeroes the slack.
+
     The buffer must not change while the stream is reading it.
 */
 typedef struct serialize_read_stream_t
@@ -492,6 +496,32 @@ SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream );
 SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream );
 
 SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stream, const void * buffer, int bytes );
+
+/* Reads a payload whose allocation carries no slack.
+
+   serialize_read_stream_init requires the allocation behind the buffer to
+   extend at least 8 bytes past the data (see the read stream struct). A
+   packet received into an exactly sized allocation does not satisfy that
+   contract, and this is the supported way to read one. It copies the
+   payload into a destination you supply, zeroes the 8 slack bytes past the
+   copy, and initializes the stream over the copy.
+
+   destination must hold at least bytes + 8. The library allocates nothing,
+   so the destination is yours: an array of your largest packet size plus 8
+   is the usual choice, and one destination serves every packet. A
+   destination that is too small is caller error, asserted in a debug build
+   and checked by nothing in a release build, like every other size contract
+   here. Passing destination_bytes is what gives that assert something to
+   test against.
+
+   The slack bytes are zeroed for hygiene only. They are loaded and never
+   interpreted, so their contents change no decoded value and no refusal,
+   which test/roundtrip.c proves.
+
+   The cost is one memcpy of the payload. Reading in place through
+   serialize_read_stream_init remains the fast path, and is what to use
+   whenever the receive buffer is yours to size. */
+SERIALIZE_INLINE void serialize_read_stream_init_padded( serialize_read_stream_t * stream, void * destination, int destination_bytes, const void * data, int bytes );
 
 /* serialize_int64_t, not int, and the C++ reader's accessors return int64_t
    for the same reason: the cursor these report is 64-bit — see the read
@@ -1076,7 +1106,9 @@ SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stre
     /* caller error, asserted exactly where the C++ BitReader asserts it.
        The allocation contract — at least 8 bytes past the end of the data,
        see the read stream struct — is the caller's, like every allocation,
-       and is checked by nothing here: there is nothing to test it against. */
+       and is checked by nothing here: there is nothing to test it against.
+       serialize_read_stream_init_padded takes the destination size and so
+       does assert it. */
     serialize_assert( buffer );
 
     stream->data = (const serialize_uint8_t *) buffer;
@@ -1084,6 +1116,34 @@ SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stre
     stream->bits_read = 0;
     stream->error = 0;
     stream->bits_limit = (serialize_int64_t) bytes * 8;
+}
+
+/* The padded copy for an exactly sized payload: see the declaration above
+   for when to reach for it. */
+SERIALIZE_INLINE void serialize_read_stream_init_padded( serialize_read_stream_t * stream, void * destination, int destination_bytes, const void * data, int bytes )
+{
+    serialize_uint64_t slack = 0;
+
+    serialize_assert( destination );
+    serialize_assert( bytes >= 0 );
+
+    /* spelled as a subtraction rather than destination_bytes >= bytes + 8 so
+       a huge bytes cannot overflow the addition before the assert sees it */
+    serialize_assert( destination_bytes >= 8 );
+    serialize_assert( destination_bytes - 8 >= bytes );
+
+    if ( bytes > 0 )
+    {
+        serialize_assert( data );
+        SERIALIZE_BULK_COPY( destination, data, (size_t) bytes );
+    }
+
+    /* exactly the 8 bytes the reader's final window can reach. They are
+       loaded and never interpreted, so zeroing them is hygiene rather than
+       correctness, and one word store is the whole cost. */
+    SERIALIZE_WORD_COPY( (serialize_uint8_t *) destination + bytes, &slack );
+
+    serialize_read_stream_init( stream, destination, bytes );
 }
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits )
