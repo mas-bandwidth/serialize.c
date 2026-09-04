@@ -929,6 +929,47 @@ int main( void )
         CHECK( strcmp( str_out, cafe ) == 0 );
     }
 
+    /* ---- the buffer-fit rule sees the caller's UNTRUNCATED length ----
+
+            serialize_length_fits_buffer is the one home of the rule the four
+            string entry points assert -- serialize_write_string,
+            serialize_measure_string, serialize_write_wstring and
+            serialize_measure_wstring -- and it takes the length as size_t, the
+            width strlen and the wide unit counter produce, so it runs BEFORE
+            the length is narrowed to the int the length field carries. A check
+            placed after that narrowing is handed a value the narrowing already
+            made legal: a string of 2^32 + 5 bytes arrives as 5, which fits any
+            buffer, and the check that exists to diagnose it cannot see it.
+
+            The length is constructed rather than measured, because a string
+            that produces it would have to be four gigabytes long. Each of the
+            three below has low 32 bits that fit the buffer and a real value
+            four gigabytes past it, so the narrowing form accepts all three,
+            and each is stated beside the neighbouring lengths that must still
+            be judged correctly. Only where size_t is wider than the int: on a
+            32-bit size_t there is nothing to truncate. ---- */
+    {
+        const int wide_size_t = sizeof( size_t ) >= 8 ? 1 : 0;   /* a local, so /W4 does not flag the constant conditional */
+        const size_t four_gigabytes = ( (size_t) 1 << 16 ) << 16;
+        const int buffer_size = 16;
+
+        CHECK( serialize_length_fits_buffer( 0, buffer_size ) );
+        CHECK( serialize_length_fits_buffer( 15, buffer_size ) );
+        CHECK( !serialize_length_fits_buffer( 16, buffer_size ) );
+        CHECK( !serialize_length_fits_buffer( 17, buffer_size ) );
+
+        /* a buffer with no room for even the terminator: the length field's
+           bounds would run the wrong way round */
+        CHECK( !serialize_length_fits_buffer( 0, 0 ) );
+
+        if ( wide_size_t )
+        {
+            CHECK( !serialize_length_fits_buffer( four_gigabytes + 0, buffer_size ) );
+            CHECK( !serialize_length_fits_buffer( four_gigabytes + 5, buffer_size ) );
+            CHECK( !serialize_length_fits_buffer( four_gigabytes + 15, buffer_size ) );
+        }
+    }
+
     /* ---- past-end poison: the other half of the allocation contract ----
 
             The reader loads 64-bit windows at byte granularity and requires

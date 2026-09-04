@@ -132,12 +132,13 @@ build/roundtrip: test/roundtrip.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/roundtrip.c serialize.c -o $@ $(LDLIBS)
 
-# The shared conformance corpus, run through this library's reader. conformance/
-# is a verbatim vendored copy of the corpus in mas-bandwidth/serialize, held to
-# it by CI's sync job, and this binary scans that directory rather than naming
-# its files: a vector file the corpus gains runs on the next build. It takes
-# the directory as an optional argument and defaults to conformance/, which is
-# what lets CI's Windows leg run it with no arguments from the repository root.
+# The shared conformance corpus, run through this library's reader, writer and
+# measure. conformance/ is a verbatim vendored copy of the corpus in
+# mas-bandwidth/serialize, held to it by CI's sync job, and this binary scans
+# that directory rather than naming its files: a vector file the corpus gains
+# runs on the next build, and an empty directory fails the run. It takes the
+# directory as an optional argument and defaults to conformance/, which is what
+# lets CI's Windows leg run it with no arguments from the repository root.
 build/conformance: test/conformance.c test/verbose.h serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/conformance.c serialize.c -o $@ $(LDLIBS)
