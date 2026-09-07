@@ -3,7 +3,7 @@
 [![CI](https://github.com/mas-bandwidth/serialize.c/actions/workflows/ci.yml/badge.svg)](https://github.com/mas-bandwidth/serialize.c/actions/workflows/ci.yml)
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
 
-If this library helps you, please support it: **[Become a supporter](https://www.patreon.com/MasBandwidth/membership)**
+![serialize.c logo with a packed row of colored blocks](images/serialize.png)
 
 A bitpacking serialization library for **C**. Wire compatible with the
 [C++](https://github.com/mas-bandwidth/serialize),
@@ -34,6 +34,8 @@ serialize_write_flush( &stream );
 
 int bytes = serialize_write_bytes_processed( &stream );
 ```
+
+If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it
 
