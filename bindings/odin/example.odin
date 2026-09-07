@@ -14,7 +14,7 @@ Write_Stream :: struct #align (8) {
 	_opaque: [48]u8,
 }
 Read_Stream :: struct #align (8) {
-	_opaque: [40]u8,
+	_opaque: [32]u8,
 }
 
 foreign serialize {

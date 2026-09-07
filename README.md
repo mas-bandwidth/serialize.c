@@ -117,9 +117,10 @@ is interpretable. The first failed read poisons the stream, every later read
 fails without consuming bits or writing a destination, and the failure
 persists until you point the stream at a new buffer with
 `serialize_read_stream_init` (or `serialize_read_stream_init_padded`) or
-discard it. This is the standard's **latch**, implemented as a poisoned bit
-limit: every read already tests the limit, so terminality costs the read path
-nothing.
+discard it. This is the standard's **latch**, implemented as a read cursor
+poisoned one bit past the end of the buffer — the C++ `ReadStream`'s latch,
+exactly: every read already tests the cursor against the buffer end, so
+terminality costs the read path nothing.
 
 **A stream can start failed.** `serialize_read_stream_init_padded` refuses a
 destination that cannot hold `bytes + 8` — in every build, not just a debug
@@ -166,8 +167,9 @@ told how big a caller's allocation is — and where it is told, it checks.
 
 If you need to mark a stream failed yourself, call `serialize_read_fail` or
 `serialize_write_fail`; do not set the `error` field by hand, because failure
-is carried by a poisoned bit limit as well as by that flag. On a read stream
-that failure is sticky as above. On a write stream the flag is reported by
+is carried by a poisoned position as well as by that flag — the read cursor
+on a read stream, the bit limit on a write stream. On a read stream that
+failure is sticky as above. On a write stream the flag is reported by
 `serialize_write_error`, and continuing to write after failing is caller
 error, caught by the debug assert.
 

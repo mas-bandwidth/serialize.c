@@ -43,12 +43,15 @@
     readable bits remain, and a further read the vector does not name must fail
     and write nothing to its own destination. This port's cursor is the third
     thing the reference runner checks and it does not port: bits_read here
-    advances UNCONDITIONALLY, before the limit test, so that the read path
+    advances UNCONDITIONALLY, before the buffer-end test, so that the read path
     carries no serial cursor dependency (see serialize_read_bits), and on a
-    FAILED stream it counts reads ATTEMPTED rather than data decoded -- which
-    the header states in ERRORS. What makes failure terminal here is the
-    poisoned bits_limit, and its effect is exactly the two things checked
-    below: the later read refuses, and it decodes nothing.
+    FAILED stream it is POISONED to num_bits + 1 rather than reporting data
+    decoded -- which the header states in ERRORS. That poisoned cursor is
+    what makes failure terminal here, and it does so by being RE-CLAMPED on
+    every refusal, not by only ever growing: a past-end refusal advances the
+    cursor beyond num_bits + 1 and the latch pulls it back to num_bits + 1.
+    Its effect is exactly the two things checked below: the later read
+    refuses, and it decodes nothing.
 
     THE BUFFER CONTRACT. This library's reader loads 64-bit windows at byte
     granularity and requires at least 8 bytes of allocation past the data. Every

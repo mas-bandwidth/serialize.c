@@ -48,9 +48,10 @@ static int failed = 0;
     leaves the caller's destination unwritten. This asks a failed stream for
     two reads that would be perfectly valid on a fresh stream -- one ranged
     int, one int_relative -- and requires both to fail with their destinations
-    untouched. The library implements the latch by poisoning the bit limit, so
-    what is really under test is that the poison outlives every kind of
-    failure and that nothing writes through on the way out.
+    untouched. The library implements the latch by poisoning the read cursor
+    past the end of the buffer, so what is really under test is that the
+    poison outlives every kind of failure and that nothing writes through on
+    the way out.
 */
 static int latched( serialize_read_stream_t * r )
 {
@@ -63,6 +64,67 @@ static int latched( serialize_read_stream_t * r )
     if ( guard != 0x5A5A5A5 ) ok = 0;
     if ( serialize_read_int_relative( r, 100, &relative ) ) ok = 0;
     if ( relative != 0x3C3C3C3 ) ok = 0;
+
+    return ok;
+}
+
+/*
+    The DEGENERATE reads, which latched() above cannot reach. Every read in
+    this family costs ZERO bits when min == max -- the value is the range --
+    so each returns before the buffer-end test that the poisoned cursor
+    speaks through, and the only thing that can refuse it is the error flag.
+    STANDARD.md requires a read to consult the failure state before it does
+    anything, zero-bit reads included, so on a failed stream all six must
+    refuse and leave the destination exactly as it was. read_fixed32,
+    read_fixed64 and read_fixed128 funnel through serialize_read_fixed_core,
+    whose bits == 0 branch is the one place in the library that used to write
+    the destination and return 1 without consulting anything.
+*/
+static int degenerate_latched( serialize_read_stream_t * r )
+{
+    serialize_int32_t i32 = 0x2D2D2D2;
+    serialize_int64_t i64 = 0x4E4E4E4E4E4ELL;
+    serialize_int128_t i128;
+    serialize_int128_t five = serialize_int128_from_int64( 5 );
+    int ok = 1;
+
+    i128.lo = 0x6F6F6F6F; i128.hi = 0x7A7A7A7A;
+
+    if ( !serialize_read_error( r ) ) ok = 0;
+
+    if ( serialize_read_int( r, &i32, 7, 7 ) ) ok = 0;
+    if ( i32 != 0x2D2D2D2 ) ok = 0;
+
+    if ( serialize_read_int64( r, &i64, 9, 9 ) ) ok = 0;
+    if ( i64 != 0x4E4E4E4E4E4ELL ) ok = 0;
+
+    if ( serialize_read_int128( r, &i128, five, five ) ) ok = 0;
+    if ( i128.lo != 0x6F6F6F6F || i128.hi != 0x7A7A7A7A ) ok = 0;
+
+    if ( serialize_read_fixed32( r, &i32, 16, 8, 3, 3 ) ) ok = 0;
+    if ( i32 != 0x2D2D2D2 ) ok = 0;
+
+    if ( serialize_read_fixed64( r, &i64, 32, 8, 3, 3 ) ) ok = 0;
+    if ( i64 != 0x4E4E4E4E4E4ELL ) ok = 0;
+
+    if ( serialize_read_fixed128( r, &i128, 64, 8, 3, 3 ) ) ok = 0;
+    if ( i128.lo != 0x6F6F6F6F || i128.hi != 0x7A7A7A7A ) ok = 0;
+
+    /* the core itself, not through a wrapper. The three above guard on
+       stream->error before they call it, so they would refuse whatever the
+       core did; this asks the core directly, which is the only way to see
+       its own guard. */
+    {
+        serialize_uint128_t core_raw, bound;
+        core_raw.lo = 0xDEAD; core_raw.hi = 0xBEEF;
+        bound = serialize_raw_bound( 3, 8 );
+        if ( serialize_read_fixed_core( r, &core_raw, bound, bound ) ) ok = 0;
+        if ( core_raw.lo != 0xDEAD || core_raw.hi != 0xBEEF ) ok = 0;
+    }
+
+    /* and the stream is still failed, and its cursor still poisoned */
+    if ( !serialize_read_error( r ) ) ok = 0;
+    if ( serialize_read_bits_remaining( r ) != -1 ) ok = 0;
 
     return ok;
 }
@@ -317,12 +379,12 @@ int main( void )
 
     /* ---- failure is sticky whatever caused it ----
 
-            The bit limit is what every operation tests against, and failing a
-            stream poisons it -- which is what makes one comparison do the work
-            of two. A failure path that set the error flag and left the limit
-            alone would leave a stream that reports failure and keeps reading,
-            so each KIND of failure is checked here, not just running out of
-            buffer. */
+            The buffer end is what every operation tests the cursor against,
+            and failing a stream poisons the cursor past it -- which is what
+            makes one comparison do the work of two. A failure path that set
+            the error flag and left the cursor alone would leave a stream that
+            reports failure and keeps reading, so each KIND of failure is
+            checked here, not just running out of buffer. */
     {
         serialize_int32_t v = 0;
         serialize_uint32_t raw = 0;
@@ -442,6 +504,62 @@ int main( void )
             CHECK( rel == 0x1B1B1B1 );                  /* refused, so unwritten */
             CHECK( latched( &r ) );
         }
+    }
+
+    /* ---- the ZERO-BIT reads on a failed stream, and the cursor's re-clamp ----
+
+            Two things latched() does not reach. First the degenerate ranged
+            and fixed reads, which cost no bits and so never reach the
+            buffer-end test: they must refuse on the flag alone, from every
+            kind of failure. Second the shape of the latch itself. Failure is
+            terminal here because serialize_read_fail RE-CLAMPS the cursor to
+            num_bits + 1 on EVERY refusal, not because the cursor only ever
+            grows -- a refused read advances it past num_bits + 1 first and
+            the latch pulls it back DOWN. So bits_remaining is exactly -1
+            after a failure and after any number of later refusals, which is
+            what this pins. ---- */
+    {
+        serialize_uint32_t raw = 0;
+        serialize_int64_t poison;
+        int i;
+
+        /* explicit latch on a fresh stream */
+        serialize_read_stream_init( &r, buffer, 4 );
+        CHECK( !serialize_read_fail( &r ) );
+        CHECK( degenerate_latched( &r ) );
+
+        /* latched by running past the end */
+        serialize_read_stream_init( &r, buffer, 4 );
+        CHECK( serialize_read_bits( &r, &raw, 32 ) );
+        CHECK( !serialize_read_bits( &r, &raw, 32 ) );
+        CHECK( degenerate_latched( &r ) );
+
+        /* latched by an out-of-range value decided INSIDE the buffer */
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_write_bits( &w, 127, 7 );
+        serialize_write_flush( &w );
+        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        {
+            serialize_int32_t v = 0;
+            CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
+        }
+        CHECK( degenerate_latched( &r ) );
+
+        /* the cursor re-clamps: a past-end refusal overshoots num_bits + 1
+           and the latch brings it back, over and over, so the poison is a
+           FIXED POINT rather than a value that climbs */
+        serialize_read_stream_init( &r, buffer, 4 );
+        CHECK( !serialize_read_fail( &r ) );
+        poison = serialize_read_bits_processed( &r );
+        CHECK( serialize_read_bits_remaining( &r ) == -1 );
+        for ( i = 0; i < 1000; i++ )
+        {
+            CHECK( !serialize_read_bits( &r, &raw, 32 ) );
+            CHECK( serialize_read_bits_processed( &r ) == poison );
+            CHECK( serialize_read_bits_remaining( &r ) == -1 );
+        }
+        CHECK( serialize_read_bits_processed( &r ) == poison );
+        CHECK( degenerate_latched( &r ) );
     }
 
     /* ---- the measure stream agrees with the writer, ONE OPERATION AT A TIME.
