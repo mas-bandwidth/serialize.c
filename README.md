@@ -32,7 +32,7 @@ serialize_write_float( &stream, position_x );
 
 serialize_write_flush( &stream );
 
-int bytes = serialize_write_bytes_processed( &stream );
+serialize_int64_t bytes = serialize_write_bytes_processed( &stream );
 ```
 
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**

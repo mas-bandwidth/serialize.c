@@ -1587,8 +1587,8 @@ static void run_measure( const vector_t * v, step_t * steps, int step_count )
     if ( (serialize_int64_t) serialize_measure_bits_processed( &m ) < v->measure_at_least )
     {
         char message[MAX_LINE];
-        sprintf( message, "measured %d bits, the corpus requires at least %ld",
-                 serialize_measure_bits_processed( &m ), (long) v->measure_at_least );
+        sprintf( message, "measured %lld bits, the corpus requires at least %ld",
+                 (long long) serialize_measure_bits_processed( &m ), (long) v->measure_at_least );
         fail( v, message );
     }
 }
