@@ -135,6 +135,15 @@ int main( void )
     serialize_write_stream_t w;
     serialize_read_stream_t r;
 
+    /* issue #67: write/measure bit counters are 64-bit. 256 MiB * 8 overflows
+       a 32-bit int (2147483648). Do not write — the pointer is only a dummy. */
+    {
+        serialize_write_stream_t cap;
+        serialize_write_stream_init( &cap, buffer, 268435456 );
+        CHECK( serialize_write_bits_available( &cap ) == (serialize_int64_t) 268435456 * 8 );
+        CHECK( serialize_write_bits_processed( &cap ) == 0 );
+    }
+
     /* ---- round trip every operation ---- */
     {
         serialize_uint32_t b3 = 0; int t = 0, f = 1;

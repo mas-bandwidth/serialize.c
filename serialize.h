@@ -397,8 +397,8 @@ extern "C" {
 typedef struct serialize_write_stream_t
 {
     serialize_uint8_t * data;
-    int num_bits;
-    int bits_written;
+    serialize_int64_t num_bits;
+    serialize_int64_t bits_written;
     int word_index;
     serialize_uint64_t scratch;
     int scratch_bits;
@@ -408,7 +408,10 @@ typedef struct serialize_write_stream_t
     /*
         num_bits again, and -1 once serialize_write_fail has been called.
 
-        The release write path never reads it: capacity is the writer's
+        Bit counts are 64-bit (STANDARD.md), matching the C++ BitWriter and
+        the C read path. `int bytes * 8` overflows at 256 MiB on LP64.
+
+        The release write path never reads bits_limit: capacity is the writer's
         contract, asserted in debug only (issue #52 — see ERRORS). The debug
         assert tests against THIS field rather than num_bits so that writing
         to a stream you already failed is caught too — the poisoned limit
@@ -416,7 +419,7 @@ typedef struct serialize_write_stream_t
         build latch, and carries it in the CURSOR rather than in a second
         field; see serialize_read_stream_t.
     */
-    int bits_limit;
+    serialize_int64_t bits_limit;
 } serialize_write_stream_t;
 
 /*
@@ -503,7 +506,7 @@ typedef struct serialize_read_stream_t
 */
 typedef struct serialize_measure_stream_t
 {
-    int bits_written;
+    serialize_int64_t bits_written;
 } serialize_measure_stream_t;
 
 /* ---------------------------------------------------------------------------
@@ -515,9 +518,9 @@ SERIALIZE_INLINE void serialize_write_stream_init( serialize_write_stream_t * st
 /* Flushes the partial scratch word. Call once, after the final write. */
 SERIALIZE_INLINE void serialize_write_flush( serialize_write_stream_t * stream );
 
-SERIALIZE_INLINE int serialize_write_bits_processed( const serialize_write_stream_t * stream );
-SERIALIZE_INLINE int serialize_write_bytes_processed( const serialize_write_stream_t * stream );
-SERIALIZE_INLINE int serialize_write_bits_available( const serialize_write_stream_t * stream );
+SERIALIZE_INLINE serialize_int64_t serialize_write_bits_processed( const serialize_write_stream_t * stream );
+SERIALIZE_INLINE serialize_int64_t serialize_write_bytes_processed( const serialize_write_stream_t * stream );
+SERIALIZE_INLINE serialize_int64_t serialize_write_bits_available( const serialize_write_stream_t * stream );
 SERIALIZE_INLINE int serialize_write_error( const serialize_write_stream_t * stream );
 
 /* Fails a stream, and always returns 0 so a caller can `return` it directly.
@@ -586,8 +589,8 @@ SERIALIZE_INLINE serialize_int64_t serialize_read_bits_remaining( const serializ
 SERIALIZE_INLINE int serialize_read_error( const serialize_read_stream_t * stream );
 
 SERIALIZE_INLINE void serialize_measure_stream_init( serialize_measure_stream_t * stream );
-SERIALIZE_INLINE int serialize_measure_bits_processed( const serialize_measure_stream_t * stream );
-SERIALIZE_INLINE int serialize_measure_bytes_processed( const serialize_measure_stream_t * stream );
+SERIALIZE_INLINE serialize_int64_t serialize_measure_bits_processed( const serialize_measure_stream_t * stream );
+SERIALIZE_INLINE serialize_int64_t serialize_measure_bytes_processed( const serialize_measure_stream_t * stream );
 
 /* ---------------------------------------------------------------------------
    bit-level primitives
@@ -1056,14 +1059,17 @@ SERIALIZE_INLINE int serialize_bits_required64( serialize_uint64_t min, serializ
 
 SERIALIZE_INLINE void serialize_write_stream_init( serialize_write_stream_t * stream, void * buffer, int bytes )
 {
+    serialize_assert( buffer );
     stream->data = (serialize_uint8_t *) buffer;
-    stream->num_bits = bytes * 8;
+    /* Cast before multiplying: int * 8 overflows at 256 MiB (issue #67).
+       The C read path already does this; C++ BitWriter stores int64_t. */
+    stream->num_bits = (serialize_int64_t) bytes * 8;
     stream->bits_written = 0;
     stream->word_index = 0;
     stream->scratch = 0;
     stream->scratch_bits = 0;
     stream->error = 0;
-    stream->bits_limit = bytes * 8;
+    stream->bits_limit = (serialize_int64_t) bytes * 8;
 }
 
 SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream )
@@ -1176,17 +1182,17 @@ SERIALIZE_INLINE void serialize_write_flush( serialize_write_stream_t * stream )
     }
 }
 
-SERIALIZE_INLINE int serialize_write_bits_processed( const serialize_write_stream_t * stream )
+SERIALIZE_INLINE serialize_int64_t serialize_write_bits_processed( const serialize_write_stream_t * stream )
 {
     return stream->bits_written;
 }
 
-SERIALIZE_INLINE int serialize_write_bytes_processed( const serialize_write_stream_t * stream )
+SERIALIZE_INLINE serialize_int64_t serialize_write_bytes_processed( const serialize_write_stream_t * stream )
 {
     return ( stream->bits_written + 7 ) / 8;
 }
 
-SERIALIZE_INLINE int serialize_write_bits_available( const serialize_write_stream_t * stream )
+SERIALIZE_INLINE serialize_int64_t serialize_write_bits_available( const serialize_write_stream_t * stream )
 {
     return stream->num_bits - stream->bits_written;
 }
@@ -1432,12 +1438,12 @@ SERIALIZE_INLINE void serialize_measure_stream_init( serialize_measure_stream_t 
     stream->bits_written = 0;
 }
 
-SERIALIZE_INLINE int serialize_measure_bits_processed( const serialize_measure_stream_t * stream )
+SERIALIZE_INLINE serialize_int64_t serialize_measure_bits_processed( const serialize_measure_stream_t * stream )
 {
     return stream->bits_written;
 }
 
-SERIALIZE_INLINE int serialize_measure_bytes_processed( const serialize_measure_stream_t * stream )
+SERIALIZE_INLINE serialize_int64_t serialize_measure_bytes_processed( const serialize_measure_stream_t * stream )
 {
     return ( stream->bits_written + 7 ) / 8;
 }
