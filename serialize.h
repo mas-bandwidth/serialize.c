@@ -408,8 +408,8 @@ typedef struct serialize_write_stream_t
     /*
         num_bits again, and -1 once serialize_write_fail has been called.
 
-        Bit counts are 64-bit (STANDARD.md), matching the C++ BitWriter and
-        the C read path. `int bytes * 8` overflows at 256 MiB on LP64.
+        Bit counts are 64-bit, as the C++ BitWriter and BitReader hold them
+        (serialize README, Limitations) and as the C read path already did. `int bytes * 8` overflows at 256 MiB on LP64.
 
         The release write path never reads bits_limit: capacity is the writer's
         contract, asserted in debug only (issue #52 — see ERRORS). The debug
@@ -1912,7 +1912,7 @@ SERIALIZE_INLINE int serialize_measure_double( serialize_measure_stream_t * stre
 SERIALIZE_INLINE int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes )
 {
     serialize_measure_align( stream );
-    stream->bits_written += bytes * 8;
+    stream->bits_written += (serialize_int64_t) bytes * 8;
     return 1;
 }
 
@@ -2450,7 +2450,7 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
     /* the body: the whole payload, straight in at the byte cursor */
     SERIALIZE_BULK_COPY( stream->data + (size_t) ( stream->bits_written >> 3 ), data, (size_t) bytes );
 
-    stream->bits_written += bytes * 8;
+    stream->bits_written += (serialize_int64_t) bytes * 8;
     stream->word_index = stream->bits_written / 64;
 
     /*

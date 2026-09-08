@@ -144,6 +144,15 @@ int main( void )
         CHECK( serialize_write_bits_processed( &cap ) == 0 );
     }
 
+    /* and the measure side, which needs no buffer: 256 MiB through
+       serialize_measure_bytes plus the align worst case of 7 bits. */
+    {
+        serialize_measure_stream_t m;
+        serialize_measure_stream_init( &m );
+        CHECK( serialize_measure_bytes( &m, 268435456 ) );
+        CHECK( serialize_measure_bits_processed( &m ) == (serialize_int64_t) 268435456 * 8 + 7 );
+    }
+
     /* ---- round trip every operation ---- */
     {
         serialize_uint32_t b3 = 0; int t = 0, f = 1;
