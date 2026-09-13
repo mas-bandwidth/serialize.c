@@ -852,6 +852,7 @@ int main( void )
         serialize_int64_t expected_bits;
 
         huge_ws = (wchar_t *) malloc( ( unit_count + 1 ) * sizeof( wchar_t ) );
+        CHECK( huge_ws != NULL );
         if ( huge_ws != NULL )
         {
             for ( idx = 0; idx < unit_count; idx++ )
