@@ -2,6 +2,7 @@
    Wire compatibility is proven separately by diff_c.c against the C++
    library; this is about the read half being correct and safe. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "../serialize.h"
 
@@ -834,6 +835,40 @@ int main( void )
         else
         {
             CHECK( ws_out[0] == ws_in[0] && ws_out[1] == ws_in[1] && ws_out[2] == ws_in[2] && ws_out[3] == 0 );
+        }
+    }
+
+    /* ---- security#32: serialize_measure_wstring bit count widening ----
+       At >= 2^26 units, multiplying units * 32 in signed 32-bit int overflows
+       and returns a negative bit count (caught by UBSan). Widening units
+       to serialize_int64_t before multiplication prevents overflow and
+       matches the 64-bit bits_written counter. */
+    {
+        const size_t unit_count = (size_t) 1 << 26;  /* 67,108,864 units: 67108864 * 32 = 2^31 */
+        const int buffer_size = (int) unit_count + 1;
+        wchar_t * huge_ws;
+        serialize_measure_stream_t m;
+        size_t idx;
+        serialize_int64_t expected_bits;
+
+        huge_ws = (wchar_t *) malloc( ( unit_count + 1 ) * sizeof( wchar_t ) );
+        CHECK( huge_ws != NULL );
+        if ( huge_ws != NULL )
+        {
+            for ( idx = 0; idx < unit_count; idx++ )
+            {
+                huge_ws[idx] = (wchar_t) 'a';
+            }
+            huge_ws[unit_count] = 0;
+
+            serialize_measure_stream_init( &m );
+            CHECK( serialize_measure_wstring( &m, huge_ws, buffer_size ) );
+            expected_bits = (serialize_int64_t) serialize_bits_required( 0, (serialize_uint32_t) ( buffer_size - 1 ) )
+                          + ( (serialize_int64_t) unit_count * 32 );
+            CHECK( serialize_measure_bits_processed( &m ) == expected_bits );
+            CHECK( serialize_measure_bits_processed( &m ) > 0 );
+
+            free( huge_ws );
         }
     }
 

@@ -3521,7 +3521,7 @@ SERIALIZE_INLINE int serialize_measure_wstring( serialize_measure_stream_t * str
     units = (int) unit_count;
 
     stream->bits_written += serialize_bits_required( 0, (serialize_uint32_t) ( buffer_size - 1 ) );
-    stream->bits_written += units * 32;
+    stream->bits_written += (serialize_int64_t) units * 32;
 
     return 1;
 }
