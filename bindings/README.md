@@ -40,6 +40,6 @@ this consumer — into the object the `foreign import` links:
 
 ```
 cd bindings/odin
-cc -O2 -c shim.c -o shim.o
+cc -O2 -ffp-contract=off -c shim.c -o shim.o
 ../../dist/odin-macos-arm64-nightly+2026-08-06/odin run .
 ```

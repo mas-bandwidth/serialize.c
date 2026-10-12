@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) void {
     // working unchanged -- and this line is the pattern to copy for any C
     // library that does carry code.
     exe.root_module.addIncludePath(b.path("../.."));
-    exe.root_module.addCSourceFile(.{ .file = b.path("../../serialize.c") });
+    exe.root_module.addCSourceFile(.{ .file = b.path("../../serialize.c"), .flags = &.{"-ffp-contract=off"} });
 
     b.installArtifact(exe);
 

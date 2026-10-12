@@ -250,7 +250,7 @@ build/diff3_c: test/diff3_c.c serialize.c serialize.h
 
 build/diff3_cpp: test/diff3_cpp.cpp $(SERIALIZE_CPP)/serialize.h
 	@mkdir -p build
-	c++ -std=c++17 -O2 -I$(SERIALIZE_CPP) test/diff3_cpp.cpp -o $@
+	c++ -std=c++17 -O2 -ffp-contract=off -I$(SERIALIZE_CPP) test/diff3_cpp.cpp -o $@
 
 build/diff2_c: test/diff2_c.c serialize.c serialize.h
 	@mkdir -p build
@@ -258,7 +258,7 @@ build/diff2_c: test/diff2_c.c serialize.c serialize.h
 
 build/diff2_cpp: test/diff2_cpp.cpp test/vectors.h $(SERIALIZE_CPP)/serialize.h
 	@mkdir -p build
-	c++ -std=c++17 -O2 -I$(SERIALIZE_CPP) test/diff2_cpp.cpp -o $@
+	c++ -std=c++17 -O2 -ffp-contract=off -I$(SERIALIZE_CPP) test/diff2_cpp.cpp -o $@
 
 build/diff_c: test/diff_c.c serialize.c serialize.h
 	@mkdir -p build
@@ -266,7 +266,7 @@ build/diff_c: test/diff_c.c serialize.c serialize.h
 
 build/diff_cpp: test/diff_cpp.cpp test/vectors.h $(SERIALIZE_CPP)/serialize.h
 	@mkdir -p build
-	c++ -std=c++17 -O2 -I$(SERIALIZE_CPP) test/diff_cpp.cpp -o $@
+	c++ -std=c++17 -O2 -ffp-contract=off -I$(SERIALIZE_CPP) test/diff_cpp.cpp -o $@
 
 # The libFuzzer harness, mirroring the C++ library's fuzz.cpp: two hostile read
 # passes over the untrusted boundary and a differential round trip pass. Clang

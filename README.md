@@ -197,6 +197,13 @@ make diff                  # byte-compare against the C++ library
 make test-all-standards    # c89, c99, c11, c17
 ```
 
+Every build in this repository passes `-ffp-contract=off` (MSVC passes
+`/fp:precise`), so the compressed-float wire's distinct roundings cannot be
+fused into one FMA; `test/precomputed.c` (and its `precomputed-fma` twin at
+`-ffp-contract=on`, which proves the suite catches contraction) verify it, and
+`tools/check_fp_contract.sh` lists every compiler invocation and fails any
+that lacks the flag.
+
 ### The conformance corpus
 
 `conformance/` is a **verbatim vendored copy** of the shared corpus in
