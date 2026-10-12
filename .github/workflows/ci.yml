@@ -55,6 +55,13 @@ jobs:
         if: runner.os != 'Windows'
         run: make wstest CSTD=${{ matrix.std }}
 
+      # Every C/C++ build in the tree must pass -ffp-contract=off (MSVC:
+      # /fp:precise or /fp:strict); the check lists each compiler invocation
+      # in the Makefile and the workflows and fails naming any that do not.
+      - name: FP contraction flag check
+        if: matrix.os == 'ubuntu-24.04'
+        run: bash tools/check_fp_contract.sh
+
       # No make on the Windows runner and no /std flag in the msvc row: the
       # suites are the same ones the Makefile runs, compiled with cl -- and
       # the LIST is the Makefile's too (issue #37): MSVC_SUITES there is the
@@ -71,8 +78,9 @@ jobs:
       # precomputed is the mas-bandwidth/schema#82 differential, and this is
       # the one leg in the matrix that never receives -ffp-contract=off:
       # cl has no such flag, so the compressed float's two roundings are held
-      # here by whatever /fp:precise does and by nothing else. That makes it
-      # the only place the library's own default-contraction behaviour is
+      # here by the explicit /fp:precise we pass and by nothing else. That
+      # makes it the only place the library's own default-contraction
+      # behaviour is
       # executed rather than reasoned about, which is exactly where a
       # differential over the quantization arithmetic belongs.
       - name: Run the Makefile's MSVC suite list (cl)
@@ -85,7 +93,7 @@ jobs:
           if not defined SUITES ( echo MSVC_SUITES not found in Makefile & exit /b 1 )
           echo suites:%SUITES%
           for %%t in (%SUITES%) do (
-            cl /nologo /W4 /O2 %STDFLAG% /I. test\%%t.c serialize.c /Fe:%%t.exe || exit /b 1
+            cl /nologo /W4 /O2 /fp:precise %STDFLAG% /I. test\%%t.c serialize.c /Fe:%%t.exe || exit /b 1
             .\%%t.exe || exit /b 1
           )
 
