@@ -16,7 +16,7 @@ A bitpacking serialization library for **C**. Wire compatible with the
 [Rust](https://github.com/mas-bandwidth/serialize.rs) ports — the same values
 produce the same bytes in all nine, so a stream written by one reads in any
 other. The wire is specified by [STANDARD.md](STANDARD.md), vendored here
-verbatim; this release implements **format version 1.1**.
+verbatim; this release implements **format version 2.0**.
 
 ```c
 #include "serialize.h"
@@ -29,11 +29,36 @@ serialize_write_stream_init( &stream, buffer, sizeof( buffer ) );
 serialize_write_int( &stream, health, 0, 1000 );   /* 10 bits, not 32 */
 serialize_write_bool( &stream, at_rest );          /* 1 bit */
 serialize_write_float( &stream, position_x );
+serialize_write_end( &stream );                    /* emits nothing */
 
 serialize_write_flush( &stream );
 
 serialize_int64_t bytes = serialize_write_bytes_processed( &stream );
 ```
+
+### Format 2.0
+
+The principle 2.0 adopts (Glenn Fiedler, 2026-10-22): **the wire carries only
+integers and bytes, and every value has exactly one encoding.** Every finite
+value 1.1 could carry keeps its exact bytes. What changed, and what it breaks:
+
+- **`wstring` is removed** — `serialize_write_wstring`, `serialize_read_wstring`
+  and `serialize_measure_wstring` are gone. Text is `string`, UTF-8; a program
+  holding wide text converts at its own boundary.
+- **`float` and `double` carry finite values only.** A reader refuses NaN
+  (any payload, either sign) and both infinities as `non_finite_float`, on the
+  raw bits, with the destination unwritten; a writer asserts it is handed a
+  finite value. `-0` and the subnormals are finite and keep their exact bits.
+- **`compressed_float` refuses a non-finite decode**, and a declaration whose
+  top decodes to an infinity asserts on write.
+- **`int_relative` is canonical**: the absolute tier carrying a difference a
+  bounded tier would have taken is refused as `non_canonical`.
+- **`end` is new**: `serialize_read_end` refuses a whole byte after the object
+  as `trailing_data` and a set bit in the final byte's padding as
+  `nonzero_padding`. A packet reader **must** read it after the last field.
+- **Every refusal has a reason**, from the closed list STANDARD.md defines:
+  `serialize_read_refusal` reports the first one, `serialize_refusal_name`
+  spells it, and `serialize_read_fail` now takes one.
 
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
@@ -99,19 +124,48 @@ different things by it.
 0 on failure, and once a read stream fails, subsequent reads fail without
 touching the buffer — so you check once at the end of a message rather than
 after every field. **Reads reject, they do not clamp.** A value outside its
-declared range, a malformed alignment pad, or a read past the end of the
-buffer all fail the read. This library is used on packet paths facing the
-open internet, and a read is where untrusted data arrives.
+declared range, a malformed alignment pad, a non-finite float, malformed
+text, a non-canonical encoding, or a read past the end of the buffer all fail
+the read. This library is used on packet paths facing the open internet, and
+a read is where untrusted data arrives.
+
+**Every refusal names its reason**, from the closed list in STANDARD.md, and
+the stream keeps the **first** one — the later refusals of a failed stream are
+echoes:
+
+| `serialize_refusal_t` | name | the rule that refuses |
+|---|---|---|
+| `SERIALIZE_REFUSAL_PAST_END` | `past_end` | a read needs more bits than the stream holds |
+| `SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE` | `value_out_of_range` | a decoded value outside its declared range or domain |
+| `SERIALIZE_REFUSAL_NONZERO_PADDING` | `nonzero_padding` | a set bit in an align's padding, or in the final byte's unused bits at the end |
+| `SERIALIZE_REFUSAL_TRAILING_DATA` | `trailing_data` | a whole byte or more after the end of the object |
+| `SERIALIZE_REFUSAL_NON_FINITE_FLOAT` | `non_finite_float` | a float or double that is NaN or an infinity, or a non-finite compressed decode |
+| `SERIALIZE_REFUSAL_INVALID_UTF8` | `invalid_utf8` | a string payload that is not well-formed UTF-8 |
+| `SERIALIZE_REFUSAL_EMBEDDED_NUL` | `embedded_nul` | a zero byte among a string's transmitted bytes |
+| `SERIALIZE_REFUSAL_NON_CANONICAL` | `non_canonical` | the `int_relative` absolute tier carrying a bounded difference |
+
+```c
+if ( !serialize_read_end( &stream ) )
+{
+    printf( "refused: %s\n", serialize_refusal_name( serialize_read_refusal( &stream ) ) );
+}
+```
+
+**A packet ends with an end.** STANDARD.md requires a packet reader to read
+the end after the last field of the packet's top-level object, over exactly
+the bytes the writer reported: `serialize_read_end` refuses a whole byte left
+over and a set bit in the final byte's padding, so one value is one byte
+sequence. The writer's and the measure's ends emit and cost nothing.
 
 **A refused read leaves your value unwritten.** When a read of a scalar
 fails, the destination you passed holds exactly what it held before the
 call — nothing partial, nothing zero-filled, nothing the stream never
 carried. Two things that rule does not reach, deliberately: a read into a
-buffer you own — `serialize_read_bytes`, `serialize_read_string`,
-`serialize_read_wstring` — leaves that buffer's **contents unspecified**
-after a refusal, because a copy path is not restructured for it; and a
-sequence of reads over a struct or an array may leave earlier members
-written, because each primitive read carries the rule alone.
+buffer you own — `serialize_read_bytes`, `serialize_read_string` — leaves
+that buffer's **contents unspecified** after a refusal, because a copy path
+is not restructured for it; and a sequence of reads over a struct or an array
+may leave earlier members written, because each primitive read carries the
+rule alone.
 
 **Failure is terminal, and the stream enforces it, not your discipline.**
 Nothing after a failing operation has a defined position, so nothing after it
@@ -127,7 +181,8 @@ terminality costs the read path nothing.
 **A stream can start failed.** `serialize_read_stream_init_padded` refuses a
 destination that cannot hold `bytes + 8` — in every build, not just a debug
 one — by copying nothing and latching the stream, so a caller who got the
-size wrong decodes nothing instead of over-reading. It is the one caller size
+size wrong decodes nothing instead of over-reading; its reason is `past_end`,
+as the C++ `InitializePadded` reports it. It is the one caller size
 here that is a runtime refusal rather than an assert alone, because it is the
 one the library is actually given: see [Reading a packet you did not
 allocate](#reading-a-packet-you-did-not-allocate).
@@ -139,8 +194,9 @@ capacity check — exactly matching the C++ library
 ruling: "C should match C++ and have no checks on write at all (except
 assert). ... C and C++ should be equivalent."). Everything that can go wrong
 on write is caller error: bounds the wrong way round, a value outside its
-declared range, a bit count outside `[1,32]`, a non-finite compressed float,
-a buffer too small for the message. Those are `serialize_assert`, which fires
+declared range, a bit count outside `[1,32]`, a non-finite float, double or
+compressed float, a compressed float declaration whose top decodes to an
+infinity, a buffer too small for the message. Those are `serialize_assert`, which fires
 in a debug build — `test/assertdeath.c` proves each one does — and compiles
 out under `NDEBUG`. Size the buffer with a measure stream if you are not
 certain the message fits: writing past the end of your buffer in a release
@@ -156,8 +212,9 @@ too: inverted bounds on a ranged read are caller error, asserted in debug
 and never checked in release, exactly as the C++ `ReadStream` asserts them.
 What a reader checks for real — in every build mode — is the **data**: a
 value outside its declared range, a read past the end of the buffer, nonzero
-align padding, and malformed string/wstring content are refused, the same
-refusals the C++ reader keeps in its release build. The model is exact
+padding, trailing data, a non-finite float, a non-canonical tier and
+malformed string content are refused, the same refusals the C++ reader keeps
+in its release build. The model is exact
 parity with C++, operation by operation: zero release-build validation of
 the caller, full release-build refusal of the wire.
 
@@ -167,8 +224,9 @@ port's answer to a payload that arrives without slack. It takes the
 destination's size as a parameter, so it is the only place the library is
 told how big a caller's allocation is — and where it is told, it checks.
 
-If you need to mark a stream failed yourself, call `serialize_read_fail` or
-`serialize_write_fail`; do not set the `error` field by hand, because failure
+If you need to mark a stream failed yourself, call `serialize_read_fail` (with
+the reason, from the closed list) or `serialize_write_fail`; do not set the
+`error` field by hand, because failure
 is carried by a poisoned position as well as by that flag — the read cursor
 on a read stream, the bit limit on a write stream. On a read stream that
 failure is sticky as above. On a write stream the flag is reported by
@@ -190,9 +248,9 @@ The Makefile here is for developing the library itself:
 ```
 make test                  # round trip, rejection, measure-stream,
                            # writer-contract (assert) and conformance-corpus
-                           # tests
+                           # tests, and the negative controls
+make controls              # the negative controls alone
 make golden                # the pinned wire vectors, core and wide
-make wstest                # STANDARD.md's worked wstring example
 make diff                  # byte-compare against the C++ library
 make test-all-standards    # c89, c99, c11, c17
 ```
@@ -214,15 +272,28 @@ per covered operation, each stating the bytes, the decoded value or a refusal,
 and the bits a conforming reader consumes. `make test` runs every vector in it
 through this library's **reader, writer and measure** — accepted vectors must
 yield the stated value and consume the stated bits, refused vectors must be
-refused with the scalar destination left unwritten and the stream left
-terminal, a vector marked `writer = canonical` must re-emit byte for byte, and
-a sequence carrying `measure_at_least` pins a floor the measure must reach.
+refused **for the stated reason** with the scalar destination left unwritten
+and the stream left terminal, a vector marked `writer = canonical` must
+re-emit byte for byte, a `writer_input` must produce the record's bytes, and a
+sequence carrying `measure_at_least` pins a floor the measure must reach.
+Vector names are unique across the corpus.
 `test/conformance.c` **scans** the directory rather than listing its files, so
 a vector file the corpus gains runs as soon as it is vendored; an empty
 directory fails the run, and an operation, a parameter or a fixed point
 declaration with no runner is a failure rather than a silent skip. Nothing here
 regenerates its own expectations: a suite that checks a port against itself
 proves only that the port agrees with itself.
+
+**The negative controls** prove the instrument responds. `conformance-controls/`
+is vendored verbatim beside the corpus. `make controls` (part of `make test`)
+runs the runner over `unknown-operation.txt`, which it must reject, and then,
+for each of the fifteen refusal rules, builds a reader with that one rule
+deleted (`tools/sabotage.c` patches a scratch copy of the header) and requires
+it to fail **exactly** the vectors `conformance-controls/<rule>.expected`
+names — the reference's own lists — and no others. A needle that stops
+matching is a hard failure: a control that has quietly stopped sabotaging
+anything is worse than no control at all. `tools/revendor.sh <tag>` brings
+STANDARD.md, the corpus and the controls back into step with a reference tag.
 
 CI additionally runs the golden wire test on a **big-endian** machine
 (s390x under qemu). That job earns its place: a round trip test cannot catch
@@ -231,8 +302,9 @@ order would be read back in the same wrong order and every round trip would
 pass while the bytes stayed incompatible with the other eight languages. Only a
 pinned golden on a big-endian machine proves the byte order.
 
-The golden pins **two** sequences and the big-endian job runs both. The second
-covers `uint128`, ranged `int128`, `fixed32`/`64`/`128` and `wstring` — the
+The golden pins **two** sequences and the big-endian job runs both, each
+ending with an end. The second covers `uint128`, ranged `int128` and
+`fixed32`/`64`/`128` — the
 hand-rolled two-lane 64-bit emulation, which is both the likeliest place for a
 byte order bug and the part a round trip proves least about. Two of its cases
 span more than 64 bits deliberately, so the offset reaches the high lane;
@@ -268,8 +340,9 @@ spell it `[N + 8]`. The data pointer itself needs no alignment — windows are
 loaded with `memcpy`, because packet payloads typically start at an unaligned
 offset once the transport header is stripped.
 
-This is the family's accepted best practice, and law (STANDARD.md,
-"Implementation Law" — the buffer contract): reading whole words through the
+This is the family's accepted best practice
+([IMPLEMENTING.md](https://github.com/mas-bandwidth/serialize/blob/main/IMPLEMENTING.md),
+the buffer contract): reading whole words through the
 end of the buffer, with the allocation extended so the final word load is
 legal, is how a conforming implementation reads. Machinery that avoids the
 slack obligation at the cost of per-operation work in the hot path is a
@@ -296,10 +369,11 @@ serialize_read_stream_init_padded( &stream, scratch, sizeof( scratch ),
 serialize_read_int( &stream, &health, 0, 1000 );
 serialize_read_bool( &stream, &at_rest );
 serialize_read_float( &stream, &position_x );
+serialize_read_end( &stream );                     /* the packet ends here */
 
 if ( serialize_read_error( &stream ) )
 {
-    /* refuse the packet */
+    /* refuse the packet: serialize_read_refusal says why */
 }
 ```
 
@@ -343,9 +417,10 @@ the language can target C:
 - **fixed point** (`serialize_write_fixed32` / `64` / `128`) — the Q-format
   path, exact by construction, which is what makes lockstep simulation and
   deterministic replay possible
-- float, double, compressed float
-- bytes, string, wide string
-- `int_relative`, all six tiers, over the domain `0` to `2^31 - 1`. Both
+- float, double and compressed float, finite values only
+- bytes and string (UTF-8; format 2.0 removed the wide string)
+- `end`, which a packet reader reads after the last field
+- `int_relative`, all seven tiers, over the domain `0` to `2^31 - 1`. Both
   `previous` and `current` live in it. `previous` is your own state and never
   arrives off the wire, so one outside the domain is caller error, asserted;
   `current` is reconstructed in a width that cannot wrap and then refused
@@ -353,8 +428,10 @@ the language can target C:
   including the absolute one, whose 32 raw bits are read unsigned. There is no
   wrapping sequence number here and no truncation to a signed type: a stream
   that would reconstruct past the top of the domain is refused, not wrapped.
+  The absolute tier is canonical: carrying a difference of 69914 or less, one
+  a bounded tier would have taken, it is refused as `non_canonical`.
 - the measure stream, with **one operation per write operation** — including
-  `int_relative` and `wstring`, whose widths depend on the value and so cannot
+  `int_relative` and `string`, whose widths depend on the value and so cannot
   be worked around with `serialize_measure_bits` by a caller unwilling to
   reimplement the tier ladder. The count is a **conservative upper bound**,
   never an under-count: align (and everything that aligns) charges its worst
@@ -398,8 +475,9 @@ Caller error is `serialize_assert` and compiles out under `NDEBUG`, matching
 the C++ library operation for operation: bounds the wrong way round, a value
 outside its declared range on write, a bit count outside `[1,32]`, a write
 past the end of the buffer. What stays in a release build is everything that
-judges the network — range checks on read, malformed align padding, reads
-past the end, malformed string and wstring content — and nothing on write,
+judges the network — range checks on read, nonzero padding, trailing data,
+reads past the end, non-finite floats, non-canonical tiers, malformed string
+content — and nothing on write,
 measure, or the caller-owned parameters of a read at all, with the one
 deliberate exception the Errors section names: the padded wrapper's
 destination size, which is refused rather than trusted.
@@ -409,8 +487,8 @@ destination size, which is refused rather than trusted.
 There is no native Zig or Odin port, deliberately: both languages import C as
 a first-class act, and a header-only C89 library is exactly the C they import
 best. [bindings/](bindings) holds working, tested examples of each — Zig
-through `@cImport`, Odin through a `foreign` block — round trip and truncated
-read refusal both.
+through `@cImport`, Odin through a `foreign` block — round trip with its end,
+and truncated read refusal.
 
 ## Contributing
 

@@ -161,7 +161,9 @@ SERIALIZE_INLINE int frozen_read_compressed_float( serialize_read_stream_t * str
 
     if ( integer_value > max_integer_value )
     {
-        return serialize_read_fail( stream );
+        /* format 2.0 gave every refusal a reason; the call's spelling is the
+           only change to the frozen body */
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
 
     normalized = (float) integer_value / (float) max_integer_value;

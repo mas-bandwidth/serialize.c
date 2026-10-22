@@ -50,7 +50,6 @@
 #include <stdlib.h>     /* malloc/free: the pass 1 and pass 2 buffers carry the allocation contract exactly */
 #include <string.h>
 #include <math.h>
-#include <wchar.h>
 
 #define fuzz_check( condition ) do { if ( !(condition) ) { __builtin_trap(); } } while (0)
 
@@ -147,8 +146,7 @@ static serialize_int128_t fuzz_int128_q16( serialize_int64_t whole, serialize_ui
 
    Ruling #8 (2026-08-15): a SUCCESSFUL hostile string read must yield only
    content a conforming writer could have produced -- well-formed UTF-8 with
-   no interior NUL, well-formed UTF-16 with no unpaired surrogate. These
-   re-validate what the reader accepted, independently of the reader's own
+   no interior NUL. This re-validates what the reader accepted, independently of the reader's own
    checks, so a validation bug that lets malformed content through trips the
    harness rather than propagating.
    --------------------------------------------------------------------------- */
@@ -197,45 +195,6 @@ static int fuzz_utf8_valid( const char * s, size_t n )
     return 1;
 }
 
-static int fuzz_wstring_well_formed( const wchar_t * s )
-{
-    const int wide_wchar = sizeof( wchar_t ) >= 4 ? 1 : 0;
-    size_t n = wcslen( s );
-    size_t i = 0;
-    while ( i < n )
-    {
-        serialize_uint32_t c = (serialize_uint32_t) s[i];
-        if ( wide_wchar )
-        {
-            /* a 4-byte wchar_t holds CODE POINTS: pairs were recombined at
-               the read boundary, so no surrogate value may survive */
-            if ( c > 0x10FFFFu ) return 0;
-            if ( c >= 0xD800u && c <= 0xDFFFu ) return 0;
-            i += 1;
-        }
-        else
-        {
-            /* a 2-byte wchar_t holds CODE UNITS: pairs must be present and
-               correctly ordered */
-            if ( c >= 0xD800u && c <= 0xDBFFu )
-            {
-                serialize_uint32_t next = ( i + 1 < n ) ? (serialize_uint32_t) s[i+1] : 0;
-                if ( next < 0xDC00u || next > 0xDFFFu ) return 0;
-                i += 2;
-            }
-            else if ( c >= 0xDC00u && c <= 0xDFFFu )
-            {
-                return 0;
-            }
-            else
-            {
-                i += 1;
-            }
-        }
-    }
-    return 1;
-}
-
 /* ---------------------------------------------------------------------------
    passes 1 and 2: hostile read
 
@@ -248,7 +207,6 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
 {
     serialize_uint8_t bytes[256];
     char string[256];
-    wchar_t wstring[64];
     int i;
 
     for ( i = 0; i < num_ops; i++ )
@@ -341,22 +299,33 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
 
             case 5:
             {
+                /* finite values only: whatever the bytes, an accepted float
+                   is never NaN or infinite */
                 float value = 0.0f;
+                serialize_uint32_t value_bits = 0;
                 if ( !serialize_read_float( stream, &value ) ) return;
+                memcpy( &value_bits, &value, 4 );
+                fuzz_check( serialize_float_bits_are_finite( value_bits ) );
             }
             break;
 
             case 6:
             {
                 double value = 0.0;
+                serialize_uint64_t value_bits = 0;
                 if ( !serialize_read_double( stream, &value ) ) return;
+                memcpy( &value_bits, &value, 8 );
+                fuzz_check( serialize_double_bits_are_finite( value_bits ) );
             }
             break;
 
             case 7:
             {
                 float value = 0.0f;
+                serialize_uint32_t value_bits = 0;
                 if ( !serialize_read_compressed_float( stream, &value, -10.0f, +10.0f, 0.01f ) ) return;
+                memcpy( &value_bits, &value, 4 );
+                fuzz_check( serialize_float_bits_are_finite( value_bits ) );
                 fuzz_check( value >= -10.001f && value <= +10.001f );
             }
             break;
@@ -393,13 +362,17 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
 
             case 11:
             {
-                if ( !serialize_read_wstring( stream, wstring, (int) ( sizeof( wstring ) / sizeof( wchar_t ) ) ) ) return;
-                fuzz_check( wcslen( wstring ) < sizeof( wstring ) / sizeof( wchar_t ) );
-                /* ruling #8: an ACCEPTED wstring is well-formed UTF-16 --
-                   no unpaired surrogate, nothing above U+10FFFF */
-                fuzz_check( fuzz_wstring_well_formed( wstring ) );
+                /* the end of the object: an accepted end leaves nothing in
+                   the stream, so the next read is past the end, and the
+                   program is over either way */
+                serialize_uint32_t after = 0;
+                if ( !serialize_read_end( stream ) ) return;
+                fuzz_check( serialize_read_bits_processed( stream ) % 8 == 0 );
+                fuzz_check( serialize_read_bits_remaining( stream ) == 0 );
+                fuzz_check( !serialize_read_bits( stream, &after, 1 ) );
+                fuzz_check( serialize_read_refusal( stream ) == SERIALIZE_REFUSAL_PAST_END );
+                return;
             }
-            break;
 
             case 12:
             {
@@ -607,9 +580,14 @@ static void fuzz_round_trip( fuzz_mode_t mode,
 
             case 5:
             {
-                /* arbitrary bit patterns, including nan and inf: floats must
-                   round trip bit exact */
-                const serialize_uint32_t expected_bits = fuzz_pool_uint32( pool );
+                /* arbitrary FINITE bit patterns, -0 and subnormals included:
+                   floats round trip bit exact. NaN and infinity are
+                   non-conforming on write (format 2.0) and assert in this
+                   harness, so a non-finite pattern has its exponent cleared,
+                   which keeps its sign and mantissa entropy as a subnormal.
+                   Hostile non-finite bytes reach the read path in pass 1. */
+                const serialize_uint32_t raw_bits = fuzz_pool_uint32( pool );
+                const serialize_uint32_t expected_bits = serialize_float_bits_are_finite( raw_bits ) ? raw_bits : ( raw_bits & 0x807FFFFFu );
                 float value = 0.0f;
                 serialize_uint32_t value_bits = 0;
                 memcpy( &value, &expected_bits, 4 );
@@ -627,7 +605,9 @@ static void fuzz_round_trip( fuzz_mode_t mode,
 
             case 6:
             {
-                const serialize_uint64_t expected_bits = fuzz_pool_uint64( pool );
+                const serialize_uint64_t raw_bits = fuzz_pool_uint64( pool );
+                const serialize_uint64_t mantissa_and_sign = ( (serialize_uint64_t) 1 << 63 ) | ( ( (serialize_uint64_t) 1 << 52 ) - 1 );
+                const serialize_uint64_t expected_bits = serialize_double_bits_are_finite( raw_bits ) ? raw_bits : ( raw_bits & mantissa_and_sign );
                 double value = 0.0;
                 serialize_uint64_t value_bits = 0;
                 memcpy( &value, &expected_bits, 8 );
@@ -653,8 +633,9 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                    keeps every pattern finite while preserving hugely
                    out-of-range values. Those must still clamp into [min,max]
                    on write, and finite in range values must round trip
-                   within the resolution. (Raw float, case 5, still carries
-                   NaN and Inf bit-exact: that contract is unchanged.) */
+                   within the resolution. (Raw float, case 5, forces its
+                   input finite the same way: format 2.0 carries finite
+                   values only.) */
                 serialize_uint32_t expected_bits = fuzz_pool_uint32( pool );
                 float expected = 0.0f;
                 float value = 0.0f;
@@ -753,28 +734,53 @@ static void fuzz_round_trip( fuzz_mode_t mode,
 
             case 11:
             {
-                wchar_t expected[8];
-                wchar_t value[8];
-                const int length = fuzz_pool_byte( pool ) % ( sizeof( expected ) / sizeof( wchar_t ) - 1 );
+                /* a string of real text: random Unicode scalar values,
+                   encoded as UTF-8 here, so every length of sequence and
+                   every plane reaches the writer and must come back byte for
+                   byte. NUL and the surrogate block are not scalar text and
+                   are replaced. The C++ fuzz.cpp's case 11, case for case. */
+                char expected[40];          /* seven four byte characters at most, and the terminator */
+                char value[40];
+                int length = 0;
+                const int characters = fuzz_pool_byte( pool ) % 8;
                 int j;
-                for ( j = 0; j < length; j++ )
+                for ( j = 0; j < characters; j++ )
                 {
-                    serialize_uint32_t unit = fuzz_pool_uint32( pool ) % 0xFFFF + 1;        /* [1,0xFFFF]: valid for 2 and 4 byte wchar_t */
-                    if ( unit >= 0xD800 && unit <= 0xDFFF )
+                    serialize_uint32_t code = fuzz_pool_uint32( pool ) % 0x110000u;
+                    if ( code == 0 || ( code >= 0xD800u && code <= 0xDFFFu ) )
                     {
-                        unit -= 0x0800;     /* out of the surrogate block: the payload is well-formed
-                                               UTF-16 by the writer's contract, debug-asserted, and
-                                               asserts are live in this harness */
+                        code = 0x7881u;
                     }
-                    expected[j] = (wchar_t) unit;
+                    if ( code < 0x80u )
+                    {
+                        expected[length++] = (char) code;
+                    }
+                    else if ( code < 0x800u )
+                    {
+                        expected[length++] = (char) ( 0xC0u | ( code >> 6 ) );
+                        expected[length++] = (char) ( 0x80u | ( code & 0x3Fu ) );
+                    }
+                    else if ( code < 0x10000u )
+                    {
+                        expected[length++] = (char) ( 0xE0u | ( code >> 12 ) );
+                        expected[length++] = (char) ( 0x80u | ( ( code >> 6 ) & 0x3Fu ) );
+                        expected[length++] = (char) ( 0x80u | ( code & 0x3Fu ) );
+                    }
+                    else
+                    {
+                        expected[length++] = (char) ( 0xF0u | ( code >> 18 ) );
+                        expected[length++] = (char) ( 0x80u | ( ( code >> 12 ) & 0x3Fu ) );
+                        expected[length++] = (char) ( 0x80u | ( ( code >> 6 ) & 0x3Fu ) );
+                        expected[length++] = (char) ( 0x80u | ( code & 0x3Fu ) );
+                    }
                 }
-                expected[length] = L'\0';
-                if ( mode == FUZZ_WRITE )        { fuzz_check( serialize_write_wstring( w, expected, (int) ( sizeof( expected ) / sizeof( wchar_t ) ) ) ); }
-                else if ( mode == FUZZ_MEASURE ) { fuzz_check( serialize_measure_wstring( m, expected, (int) ( sizeof( expected ) / sizeof( wchar_t ) ) ) ); }
+                expected[length] = '\0';
+                if ( mode == FUZZ_WRITE )        { fuzz_check( serialize_write_string( w, expected, (int) sizeof( expected ) ) ); }
+                else if ( mode == FUZZ_MEASURE ) { fuzz_check( serialize_measure_string( m, expected, (int) sizeof( expected ) ) ); }
                 else
                 {
-                    fuzz_check( serialize_read_wstring( r, value, (int) ( sizeof( value ) / sizeof( wchar_t ) ) ) );
-                    fuzz_check( wcscmp( value, expected ) == 0 );
+                    fuzz_check( serialize_read_string( r, value, (int) sizeof( value ) ) );
+                    fuzz_check( strcmp( value, expected ) == 0 );
                 }
             }
             break;
@@ -939,6 +945,16 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
         fuzz_pool_init( &pool, payload, payload_bytes );
         fuzz_round_trip( FUZZ_READ, NULL, NULL, &read_stream, ops, FUZZ_NUM_OPS, &pool );
         fuzz_check( !serialize_read_error( &read_stream ) );            /* reading back our own data must always succeed */
+        fuzz_check( serialize_read_end( &read_stream ) );               /* and it ends exactly where the writer stopped */
+
+        /* one byte more than the writer reported is trailing data, refused
+           at the end: the zeroed write buffer holds a zero byte there */
+        serialize_read_stream_init( &read_stream, write_buffer, (int) serialize_write_bytes_processed( &write_stream ) + 1 );
+        fuzz_pool_init( &pool, payload, payload_bytes );
+        fuzz_round_trip( FUZZ_READ, NULL, NULL, &read_stream, ops, FUZZ_NUM_OPS, &pool );
+        fuzz_check( !serialize_read_error( &read_stream ) );
+        fuzz_check( !serialize_read_end( &read_stream ) );
+        fuzz_check( serialize_read_refusal( &read_stream ) == SERIALIZE_REFUSAL_TRAILING_DATA );
     }
 
     return 0;

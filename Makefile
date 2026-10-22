@@ -32,8 +32,8 @@ LDLIBS  ?= -lm
 SERIALIZE_CPP ?= ../serialize
 
 # THE SUITE LIST (issue 37). One enumeration, derived everywhere: `make test`
-# runs TEST_SUITES; golden and wstest keep their own targets because they are
-# the pinned-wire suites a big-endian machine must run; CI's big-endian leg
+# runs TEST_SUITES; golden keeps its own target because it is the pinned-wire
+# suite a big-endian machine must run; CI's big-endian leg
 # drives this same Makefile through the s390x cross compiler and qemu, so it
 # inherits all of it with no list of its own. The MSVC CI leg has no make
 # (and these recipes are not cl-shaped anyway), so it PARSES the MSVC_SUITES
@@ -49,18 +49,59 @@ TEST_SUITES = roundtrip conformance precomputed precomputed-fma assertdeath
 # to vary.
 NOT_ON_MSVC = precomputed-fma assertdeath
 
-MSVC_SUITES = roundtrip conformance precomputed golden wstest
+MSVC_SUITES = roundtrip conformance precomputed golden
 
-ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) golden wstest)))
-$(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden + wstest minus NOT_ON_MSVC (issue 37))
+ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) golden)))
+$(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden minus NOT_ON_MSVC (issue 37))
 endif
 
-.PHONY: all test release-check golden wstest test-all-standards diff fuzz clean
+.PHONY: all test release-check controls golden test-all-standards diff fuzz clean
 
 all: test
 
-test: release-check $(TEST_SUITES:%=build/%)
+test: release-check controls $(TEST_SUITES:%=build/%)
 	@for suite in $(TEST_SUITES); do echo "./build/$$suite"; ./build/$$suite || exit 1; done
+
+# THE NEGATIVE CONTROLS (STANDARD.md, "The conformance corpus": a gate nobody
+# has seen go red is a claim, not a measurement). Two kinds, both in `test`,
+# so they ride every Makefile-driven CI leg:
+#
+#   unknown-operation   the conformance runner handed a vector file whose
+#                       operation it has no code for must FAIL, never skip.
+#
+#   one per refusal     tools/sabotage.c writes serialize.h with exactly one
+#   rule (CONTROLS)     refusal rule deleted into build/controls/<rule>/, the
+#                       runner is built against that copy, and it must fail
+#                       EXACTLY the vectors conformance-controls/<rule>.expected
+#                       names -- the reference's lists, vendored verbatim, so
+#                       the oracle is the family's and not this port's. More
+#                       or fewer is red: the control measures its rule or it
+#                       measures nothing.
+#
+# The sabotaged readers build UNCHECKED (NDEBUG): a reader with a rule deleted
+# produces values a checked build asserts on, and an abort is not the
+# corpus's verdict. The runner is copied beside the sabotaged header because
+# it includes "../serialize.h" relative to itself; it includes nothing from
+# serialize.c, which is an empty translation unit and is not linked.
+CONTROLS = align-padding ranged-reconstruction ranged-range fixed-degenerate-terminal float-finite double-finite compressed-float-finite end-trailing-data end-padding int-relative-canonical string-embedded-nul string-utf8 string-utf8-surrogate int64-through-double wrong-reason
+
+controls: build/conformance build/sabotage
+	@if ./build/conformance conformance-controls/unknown-operation.txt > build/control-unknown-operation.log 2>&1; then \
+		echo "control unknown-operation FAILED: the runner accepted an operation it has no code for"; exit 1; \
+	fi
+	@echo "control unknown-operation: red, as it must be"
+	@for control in $(CONTROLS); do \
+		mkdir -p build/controls/$$control/test || exit 1; \
+		./build/sabotage $$control serialize.h build/controls/$$control/serialize.h || exit 1; \
+		cp test/conformance.c test/verbose.h build/controls/$$control/test/ || exit 1; \
+		$(CC) $(CFLAGS) -DNDEBUG build/controls/$$control/test/conformance.c -o build/controls/$$control/conformance $(LDLIBS) || exit 1; \
+		printf "control %s: " $$control; \
+		./build/controls/$$control/conformance --expect-failures conformance-controls/$$control.expected conformance || exit 1; \
+	done
+
+build/sabotage: tools/sabotage.c
+	@mkdir -p build
+	$(CC) $(CFLAGS) tools/sabotage.c -o $@
 
 # THE RELEASE CONFIGURATION. Everything else in this file builds with the
 # asserts LIVE, and two things can only be said with them gone.
@@ -126,19 +167,9 @@ build/release-roundtrip: test/roundtrip.c serialize.c serialize.h
 golden: build/golden
 	./build/golden
 
-# STANDARD.md's worked wstring example, pinned as the document prints it. The
-# wide path deliberately does NOT align where the narrow one does, and this is
-# the vector that says so.
-wstest: build/wstest
-	./build/wstest
-
 build/golden: test/golden.c test/vectors.h serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/golden.c serialize.c -o $@ $(LDLIBS)
-
-build/wstest: test/wstest.c serialize.c serialize.h
-	@mkdir -p build
-	$(CC) $(CFLAGS) -I. test/wstest.c serialize.c -o $@ $(LDLIBS)
 
 build/roundtrip: test/roundtrip.c serialize.c serialize.h
 	@mkdir -p build
@@ -241,7 +272,7 @@ diff: build/diff_c build/diff_cpp build/diff2_c build/diff2_cpp build/diff3_c bu
 		echo "  C++: "; cat build/out_cpp.txt; fail=1; \
 	fi; \
 	if diff -q build/out2_c.txt build/out2_cpp.txt > /dev/null; then \
-		echo "wide operations:  IDENTICAL  (128 bit, fixed point, wstring)"; \
+		echo "wide operations:  IDENTICAL  (128 bit, fixed point)"; \
 	else \
 		echo "wide operations:  MISMATCH"; \
 		echo "  C:   "; cat build/out2_c.txt; \
@@ -288,7 +319,7 @@ build/diff_cpp: test/diff_cpp.cpp test/vectors.h $(SERIALIZE_CPP)/serialize.h
 # memory, trips undefined behavior or lands in an assert all trap.
 #
 # test/fuzz-corpus holds pinned seeds sitting on the reader's accept/refuse
-# fence -- malformed UTF-8/UTF-16 string payloads and their valid neighbors
+# fence -- malformed UTF-8 string payloads and their valid neighbors
 # (ruling #8) -- so mutation starts in the neighborhood of the content
 # validation instead of hoping to construct a parseable string op from
 # nothing. Seeds are copied into build/corpus first: libFuzzer writes its
@@ -314,7 +345,7 @@ test-all-standards:
 	@for std in c89 c99 c11 c17; do \
 		printf "%-6s " $$std; \
 		$(MAKE) --no-print-directory clean > /dev/null; \
-		if $(MAKE) --no-print-directory CSTD=$$std test golden wstest > /dev/null 2>&1; then \
+		if $(MAKE) --no-print-directory CSTD=$$std test golden > /dev/null 2>&1; then \
 			echo "OK"; \
 		else \
 			echo "FAILED"; exit 1; \

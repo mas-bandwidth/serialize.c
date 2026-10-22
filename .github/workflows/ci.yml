@@ -51,9 +51,6 @@ jobs:
       - name: Golden wire
         if: runner.os != 'Windows'
         run: make golden CSTD=${{ matrix.std }}
-      - name: STANDARD.md wstring example
-        if: runner.os != 'Windows'
-        run: make wstest CSTD=${{ matrix.std }}
 
       # Every C/C++ build in the tree must pass -ffp-contract=off (MSVC:
       # /fp:precise or /fp:strict); the check lists each compiler invocation
@@ -71,8 +68,8 @@ jobs:
       # Makefile reaches this leg with no edit to this file; what stays out,
       # and why, is NOT_ON_MSVC beside it. vswhere locates Visual Studio
       # (the documented way), vcvars64 puts cl on the PATH. golden matters
-      # here beyond compilation: Windows is where wchar_t is 16 bits, so the
-      # pinned wide vectors prove the UTF-16 wire path on the platform the
+      # here beyond compilation: MSVC has no __int128, so the pinned wide
+      # vectors prove the two-lane 128-bit emulation on the compiler the
       # design accommodates.
       #
       # precomputed is the mas-bandwidth/schema#82 differential, and this is
@@ -123,7 +120,7 @@ jobs:
           sudo apt-get install -y gcc-s390x-linux-gnu qemu-user-static
 
       # The suite list is the Makefile's own (issue #37): this leg runs the
-      # same `make test golden wstest` the ubuntu/macos legs run, only
+      # same `make test golden` the ubuntu/macos legs run, only
       # through the s390x cross compiler, so a suite added to the Makefile
       # runs big-endian by construction -- this file holds no list to forget.
       # -static so the emulated binaries need no s390x sysroot, and
@@ -142,7 +139,7 @@ jobs:
       # with its printed reason until the cross toolchain reaches gcc 14).
       - name: Build and run every suite big-endian
         run: |
-          make test golden wstest CC=s390x-linux-gnu-gcc \
+          make test golden CC=s390x-linux-gnu-gcc \
             CFLAGS='-std=c99 $(WARNINGS) -O2 -ffp-contract=off -static'
 
   # Byte-compares this library against the C++ one over the same sequence.
@@ -168,13 +165,10 @@ jobs:
       - uses: actions/checkout@v7
       - name: Check out the C++ library (pinned release)
         env:
-          # v1.12.0 is the floor: v1.11.0 is the first release carrying
-          # serialize_compressed_float_precomputed, which diff3_cpp.cpp drives,
-          # and v1.12.0 is the first carrying the normative integer clamp
-          # (STANDARD.md, schema#109), which diff3's two clamp witnesses make
-          # load-bearing -- against an older header those rows go red, the
-          # cross-language proof serialize#94 found missing.
-          SERIALIZE_TAG: v1.16.2
+          # v2.0.0 is the floor: format 2.0 removed wstring and added end, and
+          # diff2_cpp.cpp's wide sequence carries an end and no wide string,
+          # so against a 1.x header it neither compiles nor matches the pin.
+          SERIALIZE_TAG: v2.0.0
         run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git ../serialize
       - name: Compare
         run: make diff
@@ -192,7 +186,6 @@ jobs:
         run: |
           make test CFLAGS='-std=c99 $(WARNINGS) -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
           make golden CFLAGS='-std=c99 $(WARNINGS) -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
-          make wstest CFLAGS='-std=c99 $(WARNINGS) -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
 
   # The untrusted read boundary, explored rather than enumerated. The fixed
   # suites prove the paths someone thought of; sixty seconds of libFuzzer per
@@ -224,7 +217,9 @@ jobs:
           diff -u /tmp/upstream-STANDARD.md STANDARD.md
 
   # conformance/ here is a VERBATIM VENDORED COPY of the shared corpus in
-  # mas-bandwidth/serialize, for the same reason STANDARD.md is: the corpus is
+  # mas-bandwidth/serialize, and conformance-controls/ of its negative
+  # controls (the .expected lists `make controls` holds this port to), for
+  # the same reason STANDARD.md is: the corpus is
   # the family's one conformance instrument, and a duplicated instrument that
   # drifts proves only that this port agrees with itself. The whole DIRECTORY
   # is compared, so a vector file added upstream fails this job until it is
@@ -240,6 +235,7 @@ jobs:
           git clone --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git /tmp/upstream
           echo "upstream: mas-bandwidth/serialize@$(git -C /tmp/upstream rev-parse HEAD)"
           diff -ru /tmp/upstream/conformance conformance
+          diff -ru /tmp/upstream/conformance-controls conformance-controls
 
   version:
     name: version consistency

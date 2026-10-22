@@ -28,6 +28,9 @@ pub fn main() !void {
     _ = c.serialize_read_int(&r, &health, 0, 1000);
     _ = c.serialize_read_bool(&r, &at_rest);
     _ = c.serialize_read_float(&r, &x);
+    // a packet reader reads the end after the last field: no byte after the
+    // object, and zero padding in its final byte (STANDARD.md, "end")
+    _ = c.serialize_read_end(&r);
     if (c.serialize_read_error(&r) != 0) return error.ReadFailed;
     if (health != 42 or at_rest != 1 or x != 3.25) return error.Mismatch;
     std.debug.print("round trip: {} bytes, health={} at_rest={} x={}\n", .{ bytes, health, at_rest, x });
