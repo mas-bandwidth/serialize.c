@@ -1446,6 +1446,32 @@ int main( void )
             }
         }
 
+        /* a length claim checked against the remaining bytes BEFORE any copy:
+           this library allocates nothing (the destination is the caller's),
+           and a tiny stream claiming a long payload is refused as past_end
+           with nothing copied -- the string's claimed 200 bytes against the
+           one byte left, and a bytes block of 200 against the same */
+        {
+            static char big[256];
+            static serialize_uint8_t block[256];
+            memset( big, 0x5A, sizeof( big ) );
+            memset( block, 0x5A, sizeof( block ) );
+            serialize_write_stream_init( &w, fbuf, 64 );
+            CHECK( serialize_write_int( &w, 200, 0, 255 ) );
+            CHECK( serialize_write_bits( &w, 0, 8 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) );
+            CHECK( !serialize_read_string( &r, big, 256 ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_PAST_END );
+            CHECK( big[0] == 0x5A && big[199] == 0x5A );
+
+            fbuf[0] = 0x41;
+            serialize_read_stream_init( &r, fbuf, 1 );
+            CHECK( !serialize_read_bytes( &r, block, 200 ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_PAST_END );
+            CHECK( block[0] == 0x5A && block[199] == 0x5A );
+        }
+
         /* the align before the payload length: set padding is
            nonzero_padding even when the payload would also run past the end */
         {
