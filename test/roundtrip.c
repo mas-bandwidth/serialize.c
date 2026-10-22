@@ -161,7 +161,7 @@ int main( void )
         serialize_uint8_t u8 = 0; serialize_uint16_t u16 = 0; serialize_uint32_t u32 = 0;
         serialize_uint64_t u64 = 0; serialize_int64_t i64 = 0;
         float fv = 0.0f, cf = 0.0f; double dv = 0.0;
-        serialize_uint8_t blob[5];
+        serialize_uint8_t blob[5] = { 0, 0, 0, 0, 0 };
         char str[64];
         serialize_int32_t rel = 0;
 
@@ -186,7 +186,7 @@ int main( void )
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
 
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_bits( &r, &b3, 3 ) );      CHECK( b3 == 5 );
         CHECK( serialize_read_bool( &r, &t ) );          CHECK( t == 1 );
         CHECK( serialize_read_bool( &r, &f ) );          CHECK( f == 0 );
@@ -222,7 +222,7 @@ int main( void )
             serialize_write_int_relative( &w, 1000, 1000 + deltas[i] );
             serialize_write_flush( &w );
             CHECK( !serialize_write_error( &w ) );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( serialize_read_int_relative( &r, 1000, &got ) );
             CHECK( got == 1000 + deltas[i] );
         }
@@ -239,7 +239,7 @@ int main( void )
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
         serialize_write_bits( &w, 127, 7 );          /* 127 is outside [0,100] */
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
         CHECK( serialize_read_error( &r ) );
 
@@ -248,7 +248,7 @@ int main( void )
         serialize_write_bits( &w, 1, 1 );
         serialize_write_bits( &w, 0x7F, 7 );         /* padding that is not zero */
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         { serialize_uint32_t one = 0; CHECK( serialize_read_bits( &r, &one, 1 ) ); }
         CHECK( !serialize_read_align( &r ) );
         CHECK( serialize_read_error( &r ) );
@@ -354,7 +354,7 @@ int main( void )
         CHECK( serialize_write_bits_processed( &w ) == 32 );
         serialize_write_flush( &w );
 
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 1.0e9f, 0.0001f ) );
         CHECK( !serialize_read_error( &r ) );
     }
@@ -377,7 +377,7 @@ int main( void )
         CHECK( serialize_write_compressed_float( &w, 8388609.0f, 0.0f, 8388609.0f, 1.0f ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 8388609.0f, 1.0f ) );
         CHECK( !serialize_read_error( &r ) );
         CHECK( out == 8388609.0f );
@@ -390,7 +390,7 @@ int main( void )
         CHECK( serialize_write_compressed_float( &w, 16777215.0f, 0.0f, 16777215.0f, 1.0f ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 16777215.0f, 1.0f ) );
         CHECK( !serialize_read_error( &r ) );
         CHECK( out == 16777215.0f );
@@ -414,7 +414,7 @@ int main( void )
         serialize_write_bits( &w, 127, 7 );                  /* outside [0,100] */
         serialize_write_bits( &w, 0xAB, 8 );                 /* and a valid field behind it */
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
         CHECK( serialize_read_error( &r ) );
         CHECK( !serialize_read_bits( &r, &raw, 8 ) );        /* the field behind it must NOT be readable */
@@ -427,7 +427,7 @@ int main( void )
         serialize_write_bits( &w, 0x7F, 7 );
         serialize_write_bits( &w, 0xCD, 8 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_bits( &r, &raw, 1 ) );
         CHECK( !serialize_read_align( &r ) );
         CHECK( serialize_read_error( &r ) );
@@ -486,7 +486,7 @@ int main( void )
         serialize_write_bits( &w, 127, 7 );
         serialize_write_bits( &w, 0xAB, 8 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
         CHECK( latched( &r ) );
 
@@ -496,7 +496,7 @@ int main( void )
         serialize_write_bits( &w, 0x7F, 7 );
         serialize_write_bits( &w, 0xCD, 8 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_bits( &r, &raw, 1 ) );
         CHECK( !serialize_read_align( &r ) );
         CHECK( latched( &r ) );
@@ -507,7 +507,7 @@ int main( void )
         { static const unsigned char bad[1] = { 0x80 };
           serialize_write_bytes( &w, bad, 1 ); }
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_string( &r, str_out, 64 ) );
         CHECK( latched( &r ) );
 
@@ -518,7 +518,7 @@ int main( void )
             serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
             serialize_write_bool( &w, 1 );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( !serialize_read_int_relative( &r, 2147483647, &rel ) );
             CHECK( rel == 0x1B1B1B1 );                  /* refused, so unwritten */
             CHECK( latched( &r ) );
@@ -557,7 +557,7 @@ int main( void )
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
         serialize_write_bits( &w, 127, 7 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         {
             serialize_int32_t v = 0;
             CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
@@ -711,14 +711,14 @@ int main( void )
     /* ---- 128-bit, fixed point and wide strings ---- */
     {
         serialize_uint128_t u = serialize_uint128_make( 0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL );
-        serialize_uint128_t u_out;
+        serialize_uint128_t u_out = { 0, 0 };
         serialize_int128_t i_in = serialize_int128_from_int64( -1234567890123LL );
         serialize_int128_t i_out;
         serialize_int128_t lo = serialize_int128_from_int64( -2000000000000LL );
         serialize_int128_t hi = serialize_int128_from_int64( 2000000000000LL );
         serialize_int32_t f32 = 0;
         serialize_int64_t f64 = 0;
-        serialize_int128_t f128;
+        serialize_int128_t f128 = { 0, 0 };
         wchar_t ws_in[8], ws_out[8];
 
         ws_in[0] = 0x043C; ws_in[1] = 0x0438; ws_in[2] = 0x0440; ws_in[3] = 0;
@@ -733,7 +733,7 @@ int main( void )
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
 
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_uint128( &r, &u_out ) );
         CHECK( serialize_uint128_equal( u_out, u ) );
         CHECK( serialize_read_int128( &r, &i_out, lo, hi ) );
@@ -756,7 +756,7 @@ int main( void )
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
         serialize_write_fixed32( &w, 12345, 32, 0, 0, 1000000 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_fixed32( &r, &f32, 32, 0, 0, 1000000 ) );
         CHECK( f32 == 12345 );
 
@@ -765,7 +765,7 @@ int main( void )
         serialize_write_bits( &w, 0xFFFFFFFFu, 32 );
         serialize_write_bits( &w, 0xFFFFFFFFu, 32 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_int128( &r, &i_out, lo, hi ) );
         CHECK( serialize_read_error( &r ) );
     }
@@ -814,7 +814,7 @@ int main( void )
         CHECK( serialize_write_wstring( &w, ws_in, 8 ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        n = serialize_write_bytes_processed( &w );
+        n = (int) serialize_write_bytes_processed( &w );
         CHECK( n == serialize_write_bytes_processed( &we ) );
         CHECK( memcmp( buffer, expected_buffer, (size_t) n ) == 0 );
 
@@ -915,7 +915,7 @@ int main( void )
                 CHECK( serialize_write_int( &w, bad_utf8[k].length, 0, 63 ) );
                 CHECK( serialize_write_bytes( &w, bad_utf8[k].byte, bad_utf8[k].length ) );
                 serialize_write_flush( &w );
-                serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+                serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
                 CHECK( !serialize_read_string( &r, str_out, 64 ) );
                 CHECK( serialize_read_error( &r ) );
             }
@@ -940,7 +940,7 @@ int main( void )
             CHECK( serialize_write_int( &w, good_length, 0, 63 ) );
             CHECK( serialize_write_bytes( &w, good_utf8, good_length ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( serialize_read_string( &r, str_out, 64 ) );
             CHECK( !serialize_read_error( &r ) );
             CHECK( (int) strlen( str_out ) == good_length );
@@ -960,7 +960,7 @@ int main( void )
             CHECK( serialize_write_int( &w, 3, 0, 63 ) );
             CHECK( serialize_write_bytes( &w, nul_inside, 3 ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( !serialize_read_string( &r, str_out, 64 ) );
             CHECK( serialize_read_error( &r ) );
 
@@ -968,7 +968,7 @@ int main( void )
             CHECK( serialize_write_int( &w, 3, 0, 63 ) );
             CHECK( serialize_write_bytes( &w, nul_fence, 3 ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( serialize_read_string( &r, str_out, 64 ) );
             CHECK( strcmp( str_out, "A B" ) == 0 );
         }
@@ -998,7 +998,7 @@ int main( void )
                     CHECK( serialize_write_bits( &w, bad_utf16[k].unit[j], 32 ) );
                 }
                 serialize_write_flush( &w );
-                serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+                serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
                 CHECK( !serialize_read_wstring( &r, ws_out, 8 ) );
                 CHECK( serialize_read_error( &r ) );
             }
@@ -1019,7 +1019,7 @@ int main( void )
             CHECK( serialize_write_bits( &w, 0xD83Du, 32 ) );
             CHECK( serialize_write_bits( &w, 0xDE00u, 32 ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
             CHECK( !serialize_read_error( &r ) );
             CHECK( ws_out[0] == (wchar_t) 0xD7FF && ws_out[1] == (wchar_t) 0xE000 && ws_out[2] == (wchar_t) 0xFFFF );
@@ -1044,7 +1044,7 @@ int main( void )
             CHECK( serialize_write_bits( &w, 0x0000u, 32 ) );
             CHECK( serialize_write_bits( &w, 0x0042u, 32 ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( !serialize_read_wstring( &r, ws_out, 8 ) );
             CHECK( serialize_read_error( &r ) );
 
@@ -1054,7 +1054,7 @@ int main( void )
             CHECK( serialize_write_bits( &w, 0x0020u, 32 ) );
             CHECK( serialize_write_bits( &w, 0x0042u, 32 ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
             CHECK( !serialize_read_error( &r ) );
             CHECK( ws_out[0] == (wchar_t) 0x41 && ws_out[1] == (wchar_t) 0x20 && ws_out[2] == (wchar_t) 0x42 && ws_out[3] == 0 );
@@ -1069,7 +1069,7 @@ int main( void )
               CHECK( serialize_write_bytes( &w, bad, 1 ) ); }
             CHECK( serialize_write_int( &w, 7, 0, 100 ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( !serialize_read_string( &r, str_out, 64 ) );
             CHECK( !serialize_read_int( &r, &v, 0, 100 ) );         /* the in-range int behind it is unreachable */
             CHECK( serialize_read_error( &r ) );
@@ -1081,20 +1081,19 @@ int main( void )
             pair through write_wstring (the latter also proven above and in
             the code-unit block) ---- */
     {
-        static const char cafe[] = { (char) 0x63, (char) 0x61, (char) 0x66,
-                                     (char) 0xC3, (char) 0xA9,                                  /* "café" */
-                                     (char) 0x20,
-                                     (char) 0xE2, (char) 0x82, (char) 0xAC,                     /* the euro sign */
-                                     (char) 0x20,
-                                     (char) 0xF0, (char) 0x9F, (char) 0x98, (char) 0x80,        /* U+1F600 */
-                                     (char) 0x00 };
+        static const char cafe[] = "caf"
+                                   "\xC3\xA9"              /* "café" */
+                                   " "
+                                   "\xE2\x82\xAC"          /* the euro sign */
+                                   " "
+                                   "\xF0\x9F\x98\x80";     /* U+1F600 */
         char str_out[64];
 
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
         CHECK( serialize_write_string( &w, cafe, 64 ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_string( &r, str_out, 64 ) );
         CHECK( !serialize_read_error( &r ) );
         CHECK( strcmp( str_out, cafe ) == 0 );
@@ -1165,7 +1164,7 @@ int main( void )
         CHECK( serialize_write_bits( &w, 0x155u, 9 ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        n = serialize_write_bytes_processed( &w );
+        n = (int) serialize_write_bytes_processed( &w );
 
         /* accept path: identical decode with a zeroed tail and a poisoned tail */
         {
@@ -1252,7 +1251,7 @@ int main( void )
         CHECK( serialize_write_bits( &w, 0x155u, 9 ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        n = serialize_write_bytes_processed( &w );
+        n = (int) serialize_write_bytes_processed( &w );
         CHECK( n % 8 != 0 );
 
         memset( direct, 0, sizeof( direct ) );
@@ -1376,7 +1375,7 @@ int main( void )
             CHECK( memcmp( undersized, exact, sizeof( undersized ) - 8 ) == 0 );
             for ( j = 0; j < 8; j++ )
             {
-                CHECK( undersized[ sizeof( undersized ) - 8 + j ] == 0 );
+                CHECK( undersized[ sizeof( undersized ) - 8 + (size_t) j ] == 0 );
             }
         }
 #endif /* NDEBUG */
@@ -1426,7 +1425,7 @@ int main( void )
             CHECK( memcmp( nan_buffer, min_buffer, sizeof( nan_buffer ) ) == 0 );
 
             out = 42.0f;
-            serialize_read_stream_init( &r, nan_buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, nan_buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 10.0f, 0.01f ) );
             CHECK( out == 0.0f );       /* integer 0 reconstructs to min exactly */
         }

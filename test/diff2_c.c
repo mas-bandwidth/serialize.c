@@ -39,7 +39,7 @@ int main( void )
     serialize_write_flush( &w );
     if ( serialize_write_error( &w ) ) { printf( "WRITE ERROR\n" ); return 1; }
 
-    n = serialize_write_bytes_processed( &w );
+    n = (int) serialize_write_bytes_processed( &w );
     printf( "%d bytes\n", n );
     for ( i = 0; i < n; i++ ) printf( "%02x", buffer[i] );
     printf( "\n" );

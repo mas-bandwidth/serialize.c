@@ -1474,7 +1474,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bool( serialize_read_stream_t * SERIA
 
 SERIALIZE_INLINE int serialize_write_align_bits( const serialize_write_stream_t * stream )
 {
-    return ( 8 - ( stream->bits_written % 8 ) ) % 8;
+    return (int) ( ( 8 - ( stream->bits_written % 8 ) ) % 8 );
 }
 
 SERIALIZE_INLINE int serialize_read_align_bits( const serialize_read_stream_t * stream )
@@ -1484,7 +1484,7 @@ SERIALIZE_INLINE int serialize_read_align_bits( const serialize_read_stream_t * 
 
 SERIALIZE_ALWAYS_INLINE int serialize_write_align( serialize_write_stream_t * stream )
 {
-    int remainder = stream->bits_written % 8;
+    int remainder = (int) ( stream->bits_written % 8 );
     if ( remainder != 0 )
     {
         return serialize_write_bits( stream, 0, 8 - remainder );
@@ -2451,7 +2451,7 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
     SERIALIZE_BULK_COPY( stream->data + (size_t) ( stream->bits_written >> 3 ), data, (size_t) bytes );
 
     stream->bits_written += (serialize_int64_t) bytes * 8;
-    stream->word_index = stream->bits_written / 64;
+    stream->word_index = (int) ( stream->bits_written / 64 );
 
     /*
         The tail: reload the trailing partial word into the scratch, so later
@@ -2462,7 +2462,7 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
         bits above the tail are whatever the buffer held and the mask
         discards them.
     */
-    tail_bits = stream->bits_written % 64;
+    tail_bits = (int) ( stream->bits_written % 64 );
     if ( tail_bits != 0 )
     {
         serialize_uint64_t word;

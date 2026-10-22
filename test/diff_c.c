@@ -46,7 +46,7 @@ int main( void )
         return 1;
     }
 
-    n = serialize_write_bytes_processed( &w );
+    n = (int) serialize_write_bytes_processed( &w );
     printf( "%d bytes\n", n );
     for ( i = 0; i < n; i++ )
     {

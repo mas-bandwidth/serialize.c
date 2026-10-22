@@ -101,7 +101,7 @@ static int golden_core( void )
         return 0;
     }
 
-    n = serialize_write_bytes_processed( &w );
+    n = (int) serialize_write_bytes_processed( &w );
 
     if ( !check_bytes( "core", buffer, n, expected_core ) )
     {
@@ -121,7 +121,7 @@ static int golden_core( void )
         serialize_int64_t i64 = 0;
         float fv = 0.0f, cf = 0.0f;
         double dv = 0.0;
-        serialize_uint8_t blob_out[5];
+        serialize_uint8_t blob_out[5] = { 0, 0, 0, 0, 0 };
         char str[64];
         serialize_int32_t rel = 0;
 
@@ -205,7 +205,7 @@ static int golden_wide( void )
         return 0;
     }
 
-    n = serialize_write_bytes_processed( &w );
+    n = (int) serialize_write_bytes_processed( &w );
 
     if ( !check_bytes( "wide", buffer, n, expected_wide ) )
     {
