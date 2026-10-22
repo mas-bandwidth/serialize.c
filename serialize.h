@@ -3340,7 +3340,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_fixed32( serialize_write_stream_t * 
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_fixed32( serialize_read_stream_t * stream, serialize_int32_t * value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
 {
-    serialize_uint128_t raw;
+    serialize_uint128_t raw = { 0, 0 };     /* written on every accepted path; initialized so gcc 13 can see it (-Wmaybe-uninitialized) */
     (void) integer_bits;
     if ( stream->error ) return 0;
     if ( !serialize_read_fixed_core( stream, &raw,
@@ -3365,7 +3365,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_fixed64( serialize_write_stream_t * 
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_fixed64( serialize_read_stream_t * stream, serialize_int64_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
-    serialize_uint128_t raw;
+    serialize_uint128_t raw = { 0, 0 };     /* written on every accepted path; initialized so gcc 13 can see it (-Wmaybe-uninitialized) */
     (void) integer_bits;
     if ( stream->error ) return 0;
     if ( !serialize_read_fixed_core( stream, &raw,
@@ -3388,7 +3388,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_fixed128( serialize_write_stream_t *
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
-    serialize_uint128_t raw;
+    serialize_uint128_t raw = { 0, 0 };     /* written on every accepted path; initialized so gcc 13 can see it (-Wmaybe-uninitialized) */
     (void) integer_bits;
     if ( stream->error ) return 0;
     if ( !serialize_read_fixed_core( stream, &raw,
