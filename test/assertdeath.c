@@ -12,9 +12,10 @@
     child to die by SIGABRT.
 
     What is NOT here, deliberately: the read path's judgement of the NETWORK.
-    Range refusals, buffer-end refusals, malformed align padding and the
-    string/wstring content refusals are real checks in every build mode, and
-    test/roundtrip.c proves those as ordinary failing reads.
+    Range refusals, buffer-end refusals, malformed align padding, the string
+    content refusals, the non-finite float refusals and the end's refusals
+    are real checks in every build mode, and test/roundtrip.c proves those as
+    ordinary failing reads, with their reasons.
 
     POSIX only (fork), which is fine: the Makefile's NOT_ON_MSVC keeps this
     file off CI's Windows leg. Under NDEBUG every assert compiles to
@@ -26,7 +27,9 @@
     through compressed float is non-conforming and should assert out on
     write too"): a non-finite VALUE asserts at intake, and a DECLARATION
     whose span or step count does not compute finite asserts at the site
-    the parameters are computed.
+    the parameters are computed. Format 2.0 adds the declaration whose TOP
+    decodes to an infinity, which asserts on write whatever the value, and
+    the plain float and double writers, which are handed finite values only.
 */
 
 #ifndef _POSIX_C_SOURCE
@@ -129,13 +132,46 @@ static void violate_measure_string_length( void )
     serialize_measure_string( &m, "too long for its buffer", 8 );
 }
 
-static void violate_measure_wstring_length( void )
+/* format 2.0: float and double carry finite values only, and a writer is
+   handed nothing else. Built from bit patterns so no NAN or INFINITY macro
+   is needed at the C89 floor. */
+static void write_float_bits( serialize_uint32_t bits )
 {
-    serialize_measure_stream_t m;
-    wchar_t ws[4];
-    ws[0] = 0x043C; ws[1] = 0x0438; ws[2] = 0x0440; ws[3] = 0;
-    serialize_measure_stream_init( &m );
-    serialize_measure_wstring( &m, ws, 3 );             /* three units cannot fit a buffer of 3 */
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    float value;
+    memcpy( &value, &bits, 4 );
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_float( &w, value );
+}
+
+static void write_double_bits( serialize_uint64_t bits )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    double value;
+    memcpy( &value, &bits, 8 );
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_double( &w, value );
+}
+
+static void violate_write_float_nan( void )        { write_float_bits( 0x7FC00000UL ); }
+static void violate_write_float_signaling_nan( void ) { write_float_bits( 0x7F800001UL ); }
+static void violate_write_float_infinity( void )   { write_float_bits( 0xFF800000UL ); }
+static void violate_write_double_nan( void )       { write_double_bits( ( (serialize_uint64_t) 0x7FF80000UL ) << 32 ); }
+static void violate_write_double_infinity( void )  { write_double_bits( ( (serialize_uint64_t) 0x7FF00000UL ) << 32 ); }
+static void violate_write_double_low_payload( void ) { write_double_bits( ( ( (serialize_uint64_t) 0x7FF00000UL ) << 32 ) | 1 ); }
+
+/* a declaration whose top decodes to an infinity -- [3 * 2^103, FLT_MAX] at
+   resolution 2^104 -- is non-conforming as a whole, so a write through it
+   asserts even for the declaration's own minimum, which decodes finite */
+static void violate_compressed_float_infinite_top( void )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    const float min = 30423614405477505635920876929024.0f;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_compressed_float( &w, min, min, FLT_MAX, 20282409603651670423947251286016.0f );
 }
 
 static void violate_measure_int_relative_order( void )
@@ -331,7 +367,13 @@ int main( void )
     must_abort( violate_string_length,                   "string_length" );
     must_abort( violate_bits_width,                      "bits_width" );
     must_abort( violate_measure_string_length,           "measure_string_length" );
-    must_abort( violate_measure_wstring_length,          "measure_wstring_length" );
+    must_abort( violate_write_float_nan,                 "write_float_nan" );
+    must_abort( violate_write_float_signaling_nan,       "write_float_signaling_nan" );
+    must_abort( violate_write_float_infinity,            "write_float_infinity" );
+    must_abort( violate_write_double_nan,                "write_double_nan" );
+    must_abort( violate_write_double_infinity,           "write_double_infinity" );
+    must_abort( violate_write_double_low_payload,        "write_double_low_payload" );
+    must_abort( violate_compressed_float_infinite_top,   "compressed_float_infinite_top" );
     must_abort( violate_measure_int_relative_order,      "measure_int_relative_order" );
     must_abort( violate_measure_int_relative_previous_domain, "measure_int_relative_previous_domain" );
     must_abort( violate_measure_int128_bounds,           "measure_int128_bounds" );

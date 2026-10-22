@@ -1,4 +1,4 @@
-/* Second differential: the wide operations — 128-bit, fixed point, wstring. */
+/* Second differential: the wide operations — 128-bit and fixed point. */
 #include <stdio.h>
 #include "../serialize.h"
 
@@ -7,9 +7,6 @@ int main( void )
     static serialize_uint8_t buffer[1024];
     serialize_write_stream_t w;
     int i, n;
-    wchar_t ws[8];
-
-    ws[0] = 0x043C; ws[1] = 0x0438; ws[2] = 0x0440; ws[3] = 0;
 
     serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
 
@@ -34,12 +31,12 @@ int main( void )
         serialize_int128_make( 0x0000001000000000ULL, 0x0000000000000000ULL ) );
     serialize_write_fixed128( &w, serialize_int128_from_int64( -12345LL * ( (serialize_int64_t) 1 << 48 ) ), 80, 48, -1000000, 1000000 );
 
-    serialize_write_wstring( &w, ws, 8 );
+    serialize_write_end( &w );
 
     serialize_write_flush( &w );
     if ( serialize_write_error( &w ) ) { printf( "WRITE ERROR\n" ); return 1; }
 
-    n = serialize_write_bytes_processed( &w );
+    n = (int) serialize_write_bytes_processed( &w );
     printf( "%d bytes\n", n );
     for ( i = 0; i < n; i++ ) printf( "%02x", buffer[i] );
     printf( "\n" );

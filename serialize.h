@@ -70,6 +70,11 @@
     serialize_read_stream_init (or serialize_read_stream_init_padded) or is
     discarded. So you can check once at the end of a message rather than after
     every field.
+    Every refusal has a REASON, from the closed list STANDARD.md defines under
+    "Refusal reasons" (serialize_refusal_t), and the stream latches the FIRST
+    one: the later refusals of a failed stream are echoes and report nothing
+    new. Ask with serialize_read_refusal, and spell it with
+    serialize_refusal_name, which gives the family-wide name ("past_end").
     Failure does not stop the cursor: it POISONS it, one bit past the end of
     the buffer, which is what the later reads test against and is exactly
     what the C++ ReadStream does. So bits_processed on a FAILED stream is
@@ -94,8 +99,8 @@
     every operation here checks before it assigns, so a caller that trusts
     the destination over the return code never proceeds on a value the stream
     did not carry. Two things the rule does not reach, deliberately. A read
-    into a CALLER-OWNED BUFFER — serialize_read_bytes, serialize_read_string,
-    serialize_read_wstring — leaves that buffer's contents UNSPECIFIED after a
+    into a CALLER-OWNED BUFFER — serialize_read_bytes, serialize_read_string
+    — leaves that buffer's contents UNSPECIFIED after a
     refusal; a copy path is not restructured for it. And a sequence of reads
     over a struct or an array may leave earlier members written, because each
     primitive read carries the rule alone.
@@ -132,10 +137,10 @@
    Kept in step with the tag by CI, the same contract the C++ library uses.
    --------------------------------------------------------------------------- */
 
-#define SERIALIZE_VERSION_MAJOR 1
-#define SERIALIZE_VERSION_MINOR 11
-#define SERIALIZE_VERSION_PATCH 2
-#define SERIALIZE_VERSION "1.11.2"
+#define SERIALIZE_VERSION_MAJOR 2
+#define SERIALIZE_VERSION_MINOR 0
+#define SERIALIZE_VERSION_PATCH 0
+#define SERIALIZE_VERSION "2.0.0"
 
 /* ---------------------------------------------------------------------------
    configuration
@@ -374,13 +379,42 @@ typedef long long serialize_int64_t;
 #define serialize_assert assert
 #endif
 
-#include <stddef.h>   /* wchar_t */
+#include <stddef.h>   /* size_t */
 #include <string.h>   /* memcpy — the packer moves whole words through it */
 #include <math.h>     /* ceil, floor — compressed float quantization */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ---------------------------------------------------------------------------
+   refusal reasons
+   --------------------------------------------------------------------------- */
+
+/*
+    Why a read was refused: the closed list STANDARD.md defines under "Refusal
+    reasons", in the same order as the C++ library's serialize::Refusal. Every
+    implementation in the family names these identically, and every refused
+    conformance vector states the one it expects; serialize_refusal_name gives
+    the spelling.
+
+    A read stream latches the FIRST refusal and keeps reporting it: every
+    later read on the failed stream fails too, but the reason is the cause,
+    not the echo. SERIALIZE_REFUSAL_NONE means the stream has refused nothing.
+*/
+typedef enum serialize_refusal_t
+{
+    SERIALIZE_REFUSAL_NONE = 0,             /* the stream has not refused anything */
+    SERIALIZE_REFUSAL_PAST_END,             /* past_end: the read needs more bits than the stream holds */
+    SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE,   /* value_out_of_range: a decoded value outside its declared range or domain */
+    SERIALIZE_REFUSAL_NONZERO_PADDING,      /* nonzero_padding: an align's padding, or the final byte's unused bits, are not zero */
+    SERIALIZE_REFUSAL_TRAILING_DATA,        /* trailing_data: whole bytes remain after the end of the object */
+    SERIALIZE_REFUSAL_NON_FINITE_FLOAT,     /* non_finite_float: a float or double that is NaN or an infinity */
+    SERIALIZE_REFUSAL_INVALID_UTF8,         /* invalid_utf8: a string payload that is not well formed UTF-8 */
+    SERIALIZE_REFUSAL_EMBEDDED_NUL,         /* embedded_nul: a zero byte among a string's transmitted bytes */
+    SERIALIZE_REFUSAL_NON_CANONICAL,        /* non_canonical: an encoding a conforming writer never produces for the value it carries */
+    SERIALIZE_REFUSAL_NUM_REASONS
+} serialize_refusal_t;
 
 /* ---------------------------------------------------------------------------
    streams
@@ -487,6 +521,13 @@ typedef struct serialize_read_stream_t
         unpoisoned and the next read is accepted.
     */
     int error;
+
+    /*
+        Why the stream failed: the FIRST refusal's reason, written only on
+        the refusal path, by serialize_read_fail, and only while it is still
+        SERIALIZE_REFUSAL_NONE. Nothing on the read path consults it.
+    */
+    serialize_refusal_t refusal;
 } serialize_read_stream_t;
 
 /*
@@ -537,7 +578,13 @@ SERIALIZE_INLINE int serialize_write_error( const serialize_write_stream_t * str
    failed: that is caller error, and the poisoned bit limit makes the next
    write assert in a debug build. */
 SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream );
-SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream );
+
+/* A read stream's failure carries its reason, from the closed list
+   (serialize_refusal_t), and the stream keeps the FIRST one: a refusal on a
+   stream that has already failed is an echo, latches nothing new, and still
+   returns 0. The reason must not be SERIALIZE_REFUSAL_NONE, asserted. This is
+   the C++ ReadStream::Fail( Refusal ) spelled in C. */
+SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream, serialize_refusal_t refusal );
 
 SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stream, const void * buffer, int bytes );
 
@@ -559,7 +606,8 @@ SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stre
    trusted. Nothing is copied, and the stream is left in its FAILED state —
    the same latch a refused read leaves, so every read on it fails, nothing
    is written to any destination, and the processed counters are meaningless
-   (see ERRORS at the top of this file). A checked build asserts as well, so
+   (see ERRORS at the top of this file). Its reason is past_end, as the C++
+   ReadStream::InitializePadded reports it. A checked build asserts as well, so
    the mistake is loud where a caller can still fix it; a release build turns
    it into a refusal instead of a copy past the end of the destination. The
    same check covers a negative bytes.
@@ -587,6 +635,17 @@ SERIALIZE_INLINE serialize_int64_t serialize_read_bits_processed( const serializ
 SERIALIZE_INLINE serialize_int64_t serialize_read_bytes_processed( const serialize_read_stream_t * stream );
 SERIALIZE_INLINE serialize_int64_t serialize_read_bits_remaining( const serialize_read_stream_t * stream );
 SERIALIZE_INLINE int serialize_read_error( const serialize_read_stream_t * stream );
+
+/* Why the stream refused: the first refusal's reason since the stream was
+   initialized, or SERIALIZE_REFUSAL_NONE if it has refused nothing. The C++
+   ReadStream::GetRefusal. */
+SERIALIZE_INLINE serialize_refusal_t serialize_read_refusal( const serialize_read_stream_t * stream );
+
+/* The family-wide name of a refusal reason, exactly as STANDARD.md and the
+   conformance corpus spell it: "past_end", "value_out_of_range" and so on,
+   and "none" for SERIALIZE_REFUSAL_NONE. Anything outside the list is
+   "unknown". */
+SERIALIZE_INLINE const char * serialize_refusal_name( serialize_refusal_t refusal );
 
 SERIALIZE_INLINE void serialize_measure_stream_init( serialize_measure_stream_t * stream );
 SERIALIZE_INLINE serialize_int64_t serialize_measure_bits_processed( const serialize_measure_stream_t * stream );
@@ -626,6 +685,26 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_align( serialize_read_stream_t * stre
 
 SERIALIZE_INLINE int serialize_write_align_bits( const serialize_write_stream_t * stream );
 SERIALIZE_INLINE int serialize_read_align_bits( const serialize_read_stream_t * stream );
+
+/*
+    The end of the object (STANDARD.md, "end"). The object ends at the bit
+    index after its last field, and the stream ends there too: in the unused
+    bits of that field's final byte, which a writer leaves zero, and nowhere
+    after. A packet reader MUST read the end after the last field of the
+    packet's top-level object, over a stream initialized with exactly the
+    bytes the writer reported (serialize_write_bytes_processed): that is what
+    makes one value one byte sequence.
+
+    The write and measure halves emit nothing and cost nothing. The read half
+    consults the failure state first, like every read; then refuses a whole
+    byte or more left in the stream as trailing_data, even a zero byte; then
+    reads the 0 to 7 bits left in the final byte and refuses a set one as
+    nonzero_padding. Trailing data is checked first, so a whole byte left over
+    is trailing_data whatever its padding holds. An accepted end leaves the
+    cursor at the end of the stream.
+*/
+SERIALIZE_INLINE int serialize_write_end( serialize_write_stream_t * stream );
+SERIALIZE_INLINE int serialize_read_end( serialize_read_stream_t * stream );
 
 /* ---------------------------------------------------------------------------
    integers
@@ -682,7 +761,23 @@ SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stre
 
 /* ---------------------------------------------------------------------------
    floating point
+
+   float and double carry FINITE values only (STANDARD.md, format 2.0): a
+   pattern whose exponent field is all ones -- NaN with any payload or sign,
+   and both infinities -- is not a value the format carries. A reader refuses
+   one as non_finite_float, in every build, and leaves its destination
+   unwritten; a writer is handed finite values only, asserted in a checked
+   build like every other writer contract. Negative zero and the subnormals
+   are finite and keep their exact bits.
    --------------------------------------------------------------------------- */
+
+/* The bit pattern tests, the C++ float_bits_are_finite and
+   double_bits_are_finite: the exponent field is all ones for NaN and the
+   infinities and for nothing else. Tested on the BITS rather than on the
+   value, so no floating point environment, contraction setting or fast math
+   flag can change the answer. */
+SERIALIZE_ALWAYS_INLINE int serialize_float_bits_are_finite( serialize_uint32_t bits );
+SERIALIZE_ALWAYS_INLINE int serialize_double_bits_are_finite( serialize_uint64_t bits );
 
 SERIALIZE_ALWAYS_INLINE int serialize_write_float( serialize_write_stream_t * stream, float value );
 SERIALIZE_ALWAYS_INLINE int serialize_read_float( serialize_read_stream_t * SERIALIZE_RESTRICT stream, float * SERIALIZE_RESTRICT value );
@@ -690,7 +785,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_float( serialize_read_stream_t * SERI
 SERIALIZE_ALWAYS_INLINE int serialize_write_double( serialize_write_stream_t * stream, double value );
 SERIALIZE_ALWAYS_INLINE int serialize_read_double( serialize_read_stream_t * SERIALIZE_RESTRICT stream, double * SERIALIZE_RESTRICT value );
 
-/* Lossy by construction: a round trip returns the nearest quantum. */
+/* Lossy by construction: a round trip returns the nearest quantum. A decode
+   that is not finite -- the top of a declaration that reaches FLT_MAX can
+   round past it -- is refused as non_finite_float, and a declaration whose
+   top decodes to an infinity is non-conforming, asserted on write. */
 SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float( serialize_write_stream_t * stream, float value, float min, float max, float res );
 SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float( serialize_read_stream_t * stream, float * value, float min, float max, float res );
 
@@ -732,12 +830,17 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERI
    The payload is well-formed UTF-8 with no interior NUL (STANDARD.md). On
    the write side that is the writer's obligation, debug-asserted only. On
    the READ side it is enforced in every build mode (ruling #8, adopted
-   2026-08-15): the reader refuses invalid UTF-8 — overlongs, surrogate code
-   points, anything above U+10FFFF, truncated sequences — and refuses a NUL
-   inside the counted payload, whose wire length and strlen-perceived length
-   would otherwise disagree. Refusal is the read-failure convention: return
-   0, stream error set, sticky. Genuinely arbitrary payloads belong in
-   serialize_write_bytes, which remains exactly that. */
+   2026-08-15): the reader refuses a NUL inside the counted payload as
+   embedded_nul, whose wire length and strlen-perceived length would
+   otherwise disagree, and then refuses invalid UTF-8 -- overlongs, surrogate
+   code points, anything above U+10FFFF, truncated sequences -- as
+   invalid_utf8. The NUL scan runs over the whole payload first, so a payload
+   that breaks both rules is embedded_nul. Refusal is the read-failure
+   convention: return 0, stream error set, sticky. Genuinely arbitrary
+   payloads belong in serialize_write_bytes, which remains exactly that.
+
+   Text is UTF-8 and only UTF-8: format 2.0 removed wstring. A program that
+   holds wide text converts at its own boundary. */
 SERIALIZE_INLINE int serialize_write_string( serialize_write_stream_t * stream, const char * string, int buffer_size );
 SERIALIZE_INLINE int serialize_read_string( serialize_read_stream_t * stream, char * string, int buffer_size );
 
@@ -816,32 +919,6 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_fixed128( serialize_write_stream_t *
 SERIALIZE_ALWAYS_INLINE int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max );
 
 /* ---------------------------------------------------------------------------
-   wide strings
-
-   buffer_size counts WIDE CHARACTERS, not bytes. Each 32-bit group carries
-   one UTF-16 CODE UNIT -- not one code point -- and the payload is
-   well-formed UTF-16 with no interior NUL (STANDARD.md, adopted 2026-08-15):
-   surrogate pairs are valid, an unpaired surrogate is a writer contract
-   violation, debug-asserted. On the READ side well-formedness is enforced in
-   every build mode (ruling #8, adopted 2026-08-15): the reader refuses an
-   unpaired or misordered surrogate, a zero unit inside the counted payload,
-   and any group above 0xFFFF -- which is not a UTF-16 code unit on ANY
-   platform, subsuming the old 2-byte-only "wchar_t cannot hold it" refusal.
-   Refusal is the read-failure convention: return 0, stream error set,
-   sticky. 2-byte and 4-byte wchar_t platforms produce IDENTICAL bytes: the
-   4-byte platform converts at the boundary, splitting an astral code point
-   into its surrogate pair on write and recombining on read.
-
-   NO ALIGNMENT is performed anywhere in this operation -- the one place the
-   wide path deliberately differs from the narrow one, which aligns via
-   serialize_bytes. An implementation that mirrors the narrow path here
-   produces the wrong bytes.
-   --------------------------------------------------------------------------- */
-
-SERIALIZE_INLINE int serialize_write_wstring( serialize_write_stream_t * stream, const wchar_t * string, int buffer_size );
-SERIALIZE_INLINE int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, int buffer_size );
-
-/* ---------------------------------------------------------------------------
    measure stream
 
    One measure operation for every write operation, so a schema that can
@@ -851,12 +928,12 @@ SERIALIZE_INLINE int serialize_read_wstring( serialize_read_stream_t * stream, w
    The measure functions take the arguments that determine the WIDTH and
    nothing else: a ranged integer costs the same whatever the value, so
    serialize_measure_int takes only the bounds. Where the width does depend on
-   the value -- int_relative, string, wstring -- the value is taken too, and
-   there is no way to get the count right without it.
+   the value -- int_relative, string -- the value is taken too, and there is
+   no way to get the count right without it.
 
    They return int for symmetry with the write half, and in a release build
-   they always return 1: measure carries the writer's contracts — a string or
-   wstring longer than its declared buffer, an int_relative that does not
+   they always return 1: measure carries the writer's contracts — a string
+   longer than its declared buffer, an int_relative that does not
    increase, inverted bounds — as serialize_assert, exactly like the write
    half (issue #52 — see ERRORS). The C++ MeasureStream makes the same split:
    its contracts are debug asserts and its release build is pure bit
@@ -873,6 +950,9 @@ SERIALIZE_INLINE int serialize_measure_bits( serialize_measure_stream_t * stream
 SERIALIZE_INLINE int serialize_measure_bits64( serialize_measure_stream_t * stream, int bits );
 SERIALIZE_INLINE int serialize_measure_bool( serialize_measure_stream_t * stream );
 SERIALIZE_INLINE int serialize_measure_align( serialize_measure_stream_t * stream );
+
+/* An end costs nothing: see serialize_read_end. */
+SERIALIZE_INLINE int serialize_measure_end( serialize_measure_stream_t * stream );
 
 SERIALIZE_INLINE int serialize_measure_int( serialize_measure_stream_t * stream, serialize_int32_t min, serialize_int32_t max );
 SERIALIZE_INLINE int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int64_t min, serialize_int64_t max );
@@ -896,7 +976,6 @@ SERIALIZE_ALWAYS_INLINE int serialize_measure_compressed_float_precomputed( seri
 
 SERIALIZE_INLINE int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes );
 SERIALIZE_INLINE int serialize_measure_string( serialize_measure_stream_t * stream, const char * string, int buffer_size );
-SERIALIZE_INLINE int serialize_measure_wstring( serialize_measure_stream_t * stream, const wchar_t * string, int buffer_size );
 
 SERIALIZE_INLINE int serialize_measure_uint128( serialize_measure_stream_t * stream );
 SERIALIZE_INLINE int serialize_measure_int128( serialize_measure_stream_t * stream, serialize_int128_t min, serialize_int128_t max );
@@ -1107,8 +1186,15 @@ SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream )
     of reads under that guard fold its per-read tests away instead of
     carrying a branch per field.
 */
-SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream )
+SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream, serialize_refusal_t refusal )
 {
+    serialize_assert( refusal != SERIALIZE_REFUSAL_NONE );
+    /* the FIRST reason is the cause; a refusal on a stream that has already
+       failed is its echo and keeps it (STANDARD.md, Refusal reasons) */
+    if ( stream->refusal == SERIALIZE_REFUSAL_NONE )
+    {
+        stream->refusal = refusal;
+    }
     stream->error = 1;
     stream->bits_read = stream->num_bits + 1;
     return 0;
@@ -1220,6 +1306,7 @@ SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stre
     stream->num_bits = (serialize_int64_t) bytes * 8;
     stream->bits_read = 0;
     stream->error = 0;
+    stream->refusal = SERIALIZE_REFUSAL_NONE;
 }
 
 /* The padded copy for an exactly sized payload: see the declaration above
@@ -1251,7 +1338,7 @@ SERIALIZE_INLINE void serialize_read_stream_init_padded( serialize_read_stream_t
            refusal in a release build rather than an assert and a trusted
            over-read. */
         serialize_read_stream_init( stream, destination, 0 );
-        serialize_read_fail( stream );
+        serialize_read_fail( stream, SERIALIZE_REFUSAL_PAST_END );
         return;
     }
 
@@ -1322,7 +1409,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIA
        emits none of them. */
     if ( begin + bits > stream->num_bits )
     {
-        return serialize_read_fail( stream );
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_PAST_END );
     }
 
     /* loads up to 7 bytes past the last data byte: the allocation contract
@@ -1429,6 +1516,29 @@ SERIALIZE_INLINE int serialize_read_error( const serialize_read_stream_t * strea
     return stream->error;
 }
 
+SERIALIZE_INLINE serialize_refusal_t serialize_read_refusal( const serialize_read_stream_t * stream )
+{
+    return stream->refusal;
+}
+
+SERIALIZE_INLINE const char * serialize_refusal_name( serialize_refusal_t refusal )
+{
+    switch ( refusal )
+    {
+        case SERIALIZE_REFUSAL_NONE:                return "none";
+        case SERIALIZE_REFUSAL_PAST_END:            return "past_end";
+        case SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE:  return "value_out_of_range";
+        case SERIALIZE_REFUSAL_NONZERO_PADDING:     return "nonzero_padding";
+        case SERIALIZE_REFUSAL_TRAILING_DATA:       return "trailing_data";
+        case SERIALIZE_REFUSAL_NON_FINITE_FLOAT:    return "non_finite_float";
+        case SERIALIZE_REFUSAL_INVALID_UTF8:        return "invalid_utf8";
+        case SERIALIZE_REFUSAL_EMBEDDED_NUL:        return "embedded_nul";
+        case SERIALIZE_REFUSAL_NON_CANONICAL:       return "non_canonical";
+        case SERIALIZE_REFUSAL_NUM_REASONS:
+        default:                                    return "unknown";
+    }
+}
+
 /* ---------------------------------------------------------------------------
    measure stream lifecycle
    --------------------------------------------------------------------------- */
@@ -1474,7 +1584,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bool( serialize_read_stream_t * SERIA
 
 SERIALIZE_INLINE int serialize_write_align_bits( const serialize_write_stream_t * stream )
 {
-    return ( 8 - ( stream->bits_written % 8 ) ) % 8;
+    return (int) ( ( 8 - ( stream->bits_written % 8 ) ) % 8 );
 }
 
 SERIALIZE_INLINE int serialize_read_align_bits( const serialize_read_stream_t * stream )
@@ -1484,7 +1594,7 @@ SERIALIZE_INLINE int serialize_read_align_bits( const serialize_read_stream_t * 
 
 SERIALIZE_ALWAYS_INLINE int serialize_write_align( serialize_write_stream_t * stream )
 {
-    int remainder = stream->bits_written % 8;
+    int remainder = (int) ( stream->bits_written % 8 );
     if ( remainder != 0 )
     {
         return serialize_write_bits( stream, 0, 8 - remainder );
@@ -1507,12 +1617,64 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_align( serialize_read_stream_t * stre
            desynchronization until some later field decoded as nonsense. */
         if ( padding != 0 )
         {
-            return serialize_read_fail( stream );
+            return serialize_read_fail( stream, SERIALIZE_REFUSAL_NONZERO_PADDING );
         }
         return 1;
     }
     /* nothing to read, so nothing tested the limit. See serialize_write_align. */
     return !stream->error;
+}
+
+/* ---------------------------------------------------------------------------
+   end
+   --------------------------------------------------------------------------- */
+
+SERIALIZE_INLINE int serialize_write_end( serialize_write_stream_t * stream )
+{
+    /* a writer's end emits nothing: the flush already leaves the final byte's
+       unused bits zero, which is what the reader's end requires */
+    (void) stream;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_read_end( serialize_read_stream_t * stream )
+{
+    serialize_int64_t remaining;
+
+    /* a read like any other: a failed stream refuses its end too, and keeps
+       its first reason. The poisoned cursor would answer past_end below as
+       well; the flag says it without arithmetic on the poison. */
+    if ( stream->error )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_PAST_END );
+    }
+
+    remaining = stream->num_bits - stream->bits_read;
+
+    /* trailing data FIRST: a whole byte left over is trailing_data whatever
+       the final byte's padding holds, even a zero byte */
+    if ( remaining >= 8 )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_TRAILING_DATA );
+    }
+
+    /* fewer than 8 bits remain, so this is all of them: the final byte's
+       padding, which a conforming writer leaves zero. The bits below it
+       belong to the last field and are never looked at here. */
+    if ( remaining > 0 )
+    {
+        serialize_uint32_t final_padding = 0;
+        if ( !serialize_read_bits( stream, &final_padding, (int) remaining ) )
+        {
+            return 0;
+        }
+        if ( final_padding != 0 )
+        {
+            return serialize_read_fail( stream, SERIALIZE_REFUSAL_NONZERO_PADDING );
+        }
+    }
+
+    return 1;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1573,7 +1735,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_int( serialize_read_stream_t * SERIAL
        min + offset can overflow signed arithmetic on a wide range. */
     if ( offset > (serialize_uint32_t) max - (serialize_uint32_t) min )
     {
-        return serialize_read_fail( stream );
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
 
     *value = (serialize_int32_t) ( (serialize_uint32_t) min + offset );
@@ -1656,7 +1818,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_int64( serialize_read_stream_t * SERI
     /* compare in the unsigned domain: max - min can exceed int64 range */
     if ( offset > (serialize_uint64_t) max - (serialize_uint64_t) min )
     {
-        return serialize_read_fail( stream );
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
 
     *value = (serialize_int64_t) ( (serialize_uint64_t) min + offset );
@@ -1739,12 +1901,28 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_uint64( serialize_read_stream_t * SER
    floating point
    --------------------------------------------------------------------------- */
 
+SERIALIZE_ALWAYS_INLINE int serialize_float_bits_are_finite( serialize_uint32_t bits )
+{
+    return ( bits & 0x7F800000UL ) != 0x7F800000UL;
+}
+
+SERIALIZE_ALWAYS_INLINE int serialize_double_bits_are_finite( serialize_uint64_t bits )
+{
+    /* built by shifting rather than spelled as a 64-bit literal, which the
+       C89 floor has no suffix for: the eleven exponent bits, 52 to 62 */
+    const serialize_uint64_t exponent = ( (serialize_uint64_t) 0x7FF ) << 52;
+    return ( bits & exponent ) != exponent;
+}
+
 SERIALIZE_ALWAYS_INLINE int serialize_write_float( serialize_write_stream_t * stream, float value )
 {
     serialize_uint32_t bits;
     /* through memcpy rather than a union or a cast: the only spelling that is
        not a strict-aliasing violation in every C standard */
     memcpy( &bits, &value, 4 );
+    /* a writer is handed finite values only (STANDARD.md, format 2.0): the
+       writer's contract, asserted on the bits it is about to send */
+    serialize_assert( serialize_float_bits_are_finite( bits ) );
     return serialize_write_bits( stream, bits, 32 );
 }
 
@@ -1755,6 +1933,12 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_float( serialize_read_stream_t * SERI
     {
         return 0;
     }
+    /* NaN and the infinities are refused on the RAW BITS, before the
+       destination is written: a refused read leaves it exactly as it was */
+    if ( !serialize_float_bits_are_finite( bits ) )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_NON_FINITE_FLOAT );
+    }
     memcpy( value, &bits, 4 );
     return 1;
 }
@@ -1763,6 +1947,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_double( serialize_write_stream_t * s
 {
     serialize_uint64_t bits;
     memcpy( &bits, &value, 8 );
+    serialize_assert( serialize_double_bits_are_finite( bits ) );
     return serialize_write_uint64( stream, bits );
 }
 
@@ -1772,6 +1957,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_double( serialize_read_stream_t * SER
     if ( !serialize_read_uint64( stream, &bits ) )
     {
         return 0;
+    }
+    if ( !serialize_double_bits_are_finite( bits ) )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_NON_FINITE_FLOAT );
     }
     memcpy( value, &bits, 8 );
     return 1;
@@ -1790,9 +1979,12 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERI
 {
     if ( bytes < 0 )
     {
-        return serialize_read_fail( stream );
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
 
+    /* the align FIRST, and its padding verified, before the payload length is
+       tested: set padding is nonzero_padding even when the payload would also
+       run past the end (STANDARD.md, bytes) */
     if ( !serialize_read_align( stream ) )
     {
         return 0;
@@ -1800,7 +1992,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERI
 
     if ( bytes > ( stream->num_bits - stream->bits_read ) / 8 )
     {
-        return serialize_read_fail( stream );
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_PAST_END );
     }
 
     /* byte aligned by the align above, so this is a straight copy — through
@@ -1839,6 +2031,12 @@ SERIALIZE_INLINE int serialize_measure_bits64( serialize_measure_stream_t * stre
 SERIALIZE_INLINE int serialize_measure_bool( serialize_measure_stream_t * stream )
 {
     stream->bits_written += 1;
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_measure_end( serialize_measure_stream_t * stream )
+{
+    (void) stream;
     return 1;
 }
 
@@ -1932,16 +2130,17 @@ SERIALIZE_INLINE int serialize_measure_bytes( serialize_measure_stream_t * strea
    --------------------------------------------------------------------------- */
 
 /*
-    Finite, spelled so the C89 floor holds: isfinite is C99. finite - finite
-    is zero; Inf - Inf and NaN - NaN are NaN, and NaN compares unequal to
-    everything, so the subtraction answers for every input. The Makefile's
-    -ffp-contract=off and the absence of any fast-math flag are what keep a
-    compiler from folding it. Referenced only from serialize_assert, so it
-    compiles to nothing under NDEBUG.
+    Finite, spelled so the C89 floor holds: isfinite is C99. Through the bit
+    pattern, the same test the float read refuses on, so no floating point
+    environment, contraction setting or fast math flag can change the answer.
+    Referenced only from serialize_assert, so it compiles to nothing under
+    NDEBUG.
 */
 SERIALIZE_INLINE int serialize_float_is_finite( float value )
 {
-    return value - value == 0.0f;
+    serialize_uint32_t bits;
+    memcpy( &bits, &value, 4 );
+    return serialize_float_bits_are_finite( bits );
 }
 
 /*
@@ -2046,6 +2245,15 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serial
     serialize_assert( delta > 0.0f );
     serialize_assert( serialize_float_is_finite( delta ) );
 
+    /* the declaration's top decode, min + delta rounded once, must be finite
+       (STANDARD.md, compressed_float, format 2.0): a declaration whose top
+       decodes to an infinity is non-conforming as a whole, so this fires for
+       every value written through it, even one that decodes finite. The
+       writer's contract only -- the READ half asserts nothing of the kind and
+       refuses the non-finite decode instead, because a reader faces the
+       network and a declaration a hostile peer chose. */
+    serialize_assert( serialize_float_is_finite( min + delta ) );
+
     /* a non-finite value is non-conforming (serialize fork #6, the ruling
        verbatim: "attempting to send NaN or INF or anything else through
        compressed float is non-conforming and should assert out on write
@@ -2105,8 +2313,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serial
 SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float_precomputed( serialize_read_stream_t * stream, float * value, serialize_uint32_t max_integer_value, int bits, float delta, float min )
 {
     serialize_uint32_t integer_value = 0;
+    serialize_uint32_t decoded_bits;
     float normalized;
     float scaled;
+    float decoded;
 
     serialize_assert( max_integer_value >= 1 );
     serialize_assert( bits == serialize_bits_required( 0, max_integer_value ) );
@@ -2125,7 +2335,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float_precomputed( seriali
 
     if ( integer_value > max_integer_value )
     {
-        return serialize_read_fail( stream );
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
 
     /* The reconstruction is float32 like the writer's quantization, and the
@@ -2139,7 +2349,22 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float_precomputed( seriali
        -ffp-contract=off for the compilers that fuse across statements. */
     normalized = (float) integer_value / (float) max_integer_value;
     scaled = normalized * delta;
-    *value = scaled + min;
+    decoded = scaled + min;
+
+    /* The decode must be finite (STANDARD.md, compressed_float, format 2.0).
+       The integer is in range and every operand is finite, and still the
+       final add can round past FLT_MAX: over [3 * 2^103, FLT_MAX] at
+       resolution 2^104 the top integer decodes to 2^128, which is +inf. Such
+       a value is refused, never handed back, whatever the declaration, and
+       the destination is left unwritten. Tested on the bits, as the float
+       read tests them. */
+    memcpy( &decoded_bits, &decoded, 4 );
+    if ( !serialize_float_bits_are_finite( decoded_bits ) )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_NON_FINITE_FLOAT );
+    }
+
+    *value = decoded;
 
     return 1;
 }
@@ -2197,8 +2422,8 @@ SERIALIZE_ALWAYS_INLINE int serialize_measure_compressed_float( serialize_measur
    2026-08-17 (the ruling, verbatim: "everything in C should be inlined!!!").
 
    These were the last functions living in serialize.c, and every call to one
-   was a boundary call: the C++ reference's equivalents — the string and
-   wstring internals, WriteBytes, int_relative, the 128-bit and fixed point
+   was a boundary call: the C++ reference's equivalents — the string
+   internals, WriteBytes, int_relative, the 128-bit and fixed point
    paths — are header templates and inline members that inline at the call
    site, so every short-string read or write in C paid a call C++ did not,
    and the length-field width was recomputed at runtime where a
@@ -2282,6 +2507,7 @@ SERIALIZE_INLINE int serialize_write_int_relative( serialize_write_stream_t * st
 SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stream, serialize_int32_t previous, serialize_int32_t * current )
 {
     int flag = 0;
+    int absolute = 0;
     serialize_int32_t difference = 0;
     serialize_uint32_t reconstructed = 0;
 
@@ -2364,6 +2590,7 @@ SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stre
             two readings disagree about the same bytes.
         */
         if ( !serialize_read_bits( stream, &reconstructed, 32 ) ) return 0;
+        absolute = 1;
     }
     while ( 0 );
 
@@ -2378,7 +2605,22 @@ SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stre
     */
     if ( reconstructed > 0x7FFFFFFFu || reconstructed <= (serialize_uint32_t) previous )
     {
-        return serialize_read_fail( stream );
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
+
+    /*
+        The absolute tier is canonical too (STANDARD.md, int_relative, format
+        2.0). A writer takes the first tier the difference fits, so an
+        absolute tier carrying a difference of 69914 or less -- one a bounded
+        tier would have taken -- is a second encoding of that value, refused
+        as non_canonical. AFTER the domain and ordering rule, which decides
+        first: a current outside the domain is value_out_of_range whatever
+        its difference. Both ends are in the domain and current is above
+        previous here, so the unsigned difference is exact and cannot wrap.
+    */
+    if ( absolute && reconstructed - (serialize_uint32_t) previous <= 69914u )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_NON_CANONICAL );
     }
 
     *current = (serialize_int32_t) reconstructed;
@@ -2451,7 +2693,7 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
     SERIALIZE_BULK_COPY( stream->data + (size_t) ( stream->bits_written >> 3 ), data, (size_t) bytes );
 
     stream->bits_written += (serialize_int64_t) bytes * 8;
-    stream->word_index = stream->bits_written / 64;
+    stream->word_index = (int) ( stream->bits_written / 64 );
 
     /*
         The tail: reload the trailing partial word into the scratch, so later
@@ -2462,7 +2704,7 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
         bits above the tail are whatever the buffer held and the mask
         discards them.
     */
-    tail_bits = stream->bits_written % 64;
+    tail_bits = (int) ( stream->bits_written % 64 );
     if ( tail_bits != 0 )
     {
         serialize_uint64_t word;
@@ -2481,10 +2723,9 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
 /*
     Does a payload of `length` units fit a buffer of `buffer_size` units?
 
-    The one home of the buffer-fit rule the four string entry points assert:
-    serialize_write_string, serialize_measure_string, serialize_write_wstring
-    and serialize_measure_wstring. It takes the length as size_t, which is the
-    width strlen and the wide unit counter produce, and it is called BEFORE the
+    The one home of the buffer-fit rule the two string entry points assert:
+    serialize_write_string and serialize_measure_string. It takes the length
+    as size_t, which is the width strlen produces, and it is called BEFORE the
     caller's length is narrowed to the int the length field carries. An
     assertion placed after that narrowing is handed a value the narrowing
     already made legal: a string of 2^32 + 5 bytes arrives as 5, which fits any
@@ -2637,13 +2878,13 @@ SERIALIZE_INLINE int serialize_read_string( serialize_read_stream_t * stream, ch
         {
             if ( string[i] == '\0' )
             {
-                return serialize_read_fail( stream );
+                return serialize_read_fail( stream, SERIALIZE_REFUSAL_EMBEDDED_NUL );
             }
         }
 
         if ( !serialize_string_is_valid_utf8( string, length ) )
         {
-            return serialize_read_fail( stream );
+            return serialize_read_fail( stream, SERIALIZE_REFUSAL_INVALID_UTF8 );
         }
     }
     else
@@ -2985,7 +3226,7 @@ SERIALIZE_INLINE int serialize_read_int128( serialize_read_stream_t * stream, se
     /* reject, never clamp */
     if ( serialize_u128_compare( offset, span ) > 0 )
     {
-        return serialize_read_fail( stream );
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
 
     result = serialize_u128_add( umin, offset );
@@ -3047,11 +3288,9 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_fixed_core( serialize_read_stream_t *
            here through them was ever at risk; this guard is what makes the
            statement true of the CORE rather than only of its callers, and
            test/roundtrip.c's degenerate_latched calls the core directly to
-           hold it there. */
-        if ( stream->error )
-        {
-            return 0;
-        }
+           hold it there. Spelled on one line, as the entry points spell it,
+           so the fixed-degenerate-terminal control deletes all four. */
+        if ( stream->error ) return 0;
         *raw_value = raw_min;
         return 1;
     }
@@ -3063,7 +3302,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_fixed_core( serialize_read_stream_t *
 
     if ( serialize_u128_compare( offset, span ) > 0 )
     {
-        return serialize_read_fail( stream );
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
 
     *raw_value = serialize_u128_add( raw_min, offset );
@@ -3101,7 +3340,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_fixed32( serialize_write_stream_t * 
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_fixed32( serialize_read_stream_t * stream, serialize_int32_t * value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
 {
-    serialize_uint128_t raw;
+    serialize_uint128_t raw = { 0, 0 };     /* written on every accepted path; initialized so gcc 13 can see it (-Wmaybe-uninitialized) */
     (void) integer_bits;
     if ( stream->error ) return 0;
     if ( !serialize_read_fixed_core( stream, &raw,
@@ -3126,7 +3365,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_fixed64( serialize_write_stream_t * 
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_fixed64( serialize_read_stream_t * stream, serialize_int64_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
-    serialize_uint128_t raw;
+    serialize_uint128_t raw = { 0, 0 };     /* written on every accepted path; initialized so gcc 13 can see it (-Wmaybe-uninitialized) */
     (void) integer_bits;
     if ( stream->error ) return 0;
     if ( !serialize_read_fixed_core( stream, &raw,
@@ -3149,7 +3388,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_fixed128( serialize_write_stream_t *
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_fixed128( serialize_read_stream_t * stream, serialize_int128_t * value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
-    serialize_uint128_t raw;
+    serialize_uint128_t raw = { 0, 0 };     /* written on every accepted path; initialized so gcc 13 can see it (-Wmaybe-uninitialized) */
     (void) integer_bits;
     if ( stream->error ) return 0;
     if ( !serialize_read_fixed_core( stream, &raw,
@@ -3160,238 +3399,6 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_fixed128( serialize_read_stream_t * s
     }
     value->lo = raw.lo;
     value->hi = raw.hi;
-    return 1;
-}
-
-/* ---------------------------------------------------------------------------
-   wide strings
-   --------------------------------------------------------------------------- */
-
-/*
-    Each 32-bit group carries one UTF-16 CODE UNIT, not one code point
-    (STANDARD.md, adopted 2026-08-15), so 2-byte and 4-byte wchar_t platforms
-    produce identical bytes: the 4-byte platform converts at the boundary,
-    splitting an astral code point into its surrogate pair on write and
-    recombining the pair on read. This counts the units a string transmits —
-    which on a 4-byte platform is more than its character count when astral
-    text is present, and is the count the length field carries.
-
-    The count is a size_t, the width the string itself can reach, so the
-    buffer-fit assertion its callers make sees the real count rather than one
-    an int counter already wrapped. See serialize_length_fits_buffer.
-*/
-SERIALIZE_INLINE size_t serialize_wstring_unit_count( const wchar_t * string )
-{
-    size_t units = 0;
-    size_t i;
-    for ( i = 0; string[i] != 0; i++ )
-    {
-        serialize_uint32_t c = (serialize_uint32_t) string[i];
-        units += ( c >= 0x10000u && c <= 0x10FFFFu ) ? 2 : 1;
-    }
-    return units;
-}
-
-/*
-    The wstring payload is well-formed UTF-16 BY CONTRACT (STANDARD.md): an
-    unpaired surrogate is a writer contract violation, debug-asserted per the
-    writes-trusted doctrine. On a 4-byte wchar_t platform the string is UTF-32,
-    where a surrogate CODE POINT or a value above U+10FFFF is the malformation;
-    on a 2-byte platform it is UTF-16, where the pairing itself is checked.
-    Referenced only from serialize_assert; compiles to nothing under NDEBUG.
-    This validates the WRITER's wchar_t input. The wire itself is no longer
-    trusted: serialize_read_wstring refuses malformed unit sequences inline,
-    in every build mode (ruling #8, adopted 2026-08-15).
-*/
-SERIALIZE_INLINE int serialize_wstring_is_valid_utf16( const wchar_t * string )
-{
-    /* through a local rather than tested inline, so MSVC's /W4 does not flag
-       the constant conditional */
-    const int wide_wchar = sizeof( wchar_t ) >= 4 ? 1 : 0;
-    int i = 0;
-    while ( string[i] != 0 )
-    {
-        serialize_uint32_t c = (serialize_uint32_t) string[i];
-        if ( wide_wchar )
-        {
-            if ( c >= 0xD800u && c <= 0xDFFFu ) return 0;   /* a surrogate is not a code point */
-            if ( c > 0x10FFFFu ) return 0;                  /* above Unicode */
-            i += 1;
-        }
-        else
-        {
-            if ( c >= 0xD800u && c <= 0xDBFFu )
-            {
-                serialize_uint32_t next = (serialize_uint32_t) string[i+1];
-                if ( next < 0xDC00u || next > 0xDFFFu ) return 0;   /* high surrogate without its pair */
-                i += 2;
-            }
-            else if ( c >= 0xDC00u && c <= 0xDFFFu )
-            {
-                return 0;                                   /* low surrogate with no high before it */
-            }
-            else
-            {
-                i += 1;
-            }
-        }
-    }
-    return 1;
-}
-
-SERIALIZE_INLINE int serialize_write_wstring( serialize_write_stream_t * stream, const wchar_t * string, int buffer_size )
-{
-    size_t unit_count;
-    int units;
-    int i;
-
-    /* the writer's contract, debug only. See serialize_wstring_is_valid_utf16. */
-    serialize_assert( serialize_wstring_is_valid_utf16( string ) );
-
-    unit_count = serialize_wstring_unit_count( string );
-
-    /* fitting the declared buffer is the writer's contract, debug-asserted
-       (issue #52), exactly as the narrow string path asserts it, and on the
-       untruncated count. See serialize_length_fits_buffer. */
-    serialize_assert( serialize_length_fits_buffer( unit_count, buffer_size ) );
-
-    units = (int) unit_count;
-
-    if ( !serialize_write_int( stream, units, 0, buffer_size - 1 ) )
-    {
-        return 0;
-    }
-
-    /* NO align here -- deliberately unlike the narrow path. See the wide
-       strings prototype block above. */
-    for ( i = 0; string[i] != 0; i++ )
-    {
-        serialize_uint32_t c = (serialize_uint32_t) string[i];
-        if ( c >= 0x10000u && c <= 0x10FFFFu )
-        {
-            /* an astral code point in a 4-byte wchar_t: split into its
-               surrogate pair at the boundary, so the bytes are the ones a
-               2-byte wchar_t platform produces */
-            serialize_uint32_t v = c - 0x10000u;
-            if ( !serialize_write_bits( stream, 0xD800u + ( v >> 10 ), 32 ) )
-            {
-                return 0;
-            }
-            if ( !serialize_write_bits( stream, 0xDC00u + ( v & 0x3FFu ), 32 ) )
-            {
-                return 0;
-            }
-        }
-        else
-        {
-            if ( !serialize_write_bits( stream, c, 32 ) )
-            {
-                return 0;
-            }
-        }
-    }
-
-    return 1;
-}
-
-SERIALIZE_INLINE int serialize_read_wstring( serialize_read_stream_t * stream, wchar_t * string, int buffer_size )
-{
-    const int wide_wchar = sizeof( wchar_t ) >= 4 ? 1 : 0;      /* a local, so /W4 does not flag the constant conditional */
-    serialize_int32_t units = 0;
-    serialize_uint32_t pending = 0;     /* a high surrogate awaiting its pair */
-    int have_pending = 0;
-    int out = 0;
-    int i;
-
-    if ( stream->error )
-    {
-        return 0;
-    }
-
-    if ( !serialize_read_int( stream, &units, 0, buffer_size - 1 ) )
-    {
-        return 0;
-    }
-
-    for ( i = 0; i < units; i++ )
-    {
-        serialize_uint32_t c = 0;
-        if ( !serialize_read_bits( stream, &c, 32 ) )
-        {
-            return 0;
-        }
-
-        /*
-            Content refusals (ruling #8, adopted 2026-08-15). The payload is
-            well-formed UTF-16 with no interior NUL, and the reader REFUSES
-            anything else in every build mode, on BOTH wchar_t widths — the
-            4-byte platform no longer passes malformed sequences through just
-            because a wide wchar_t happens to hold them.
-
-            A zero unit first: the writer derives the unit count from the
-            terminator, so a NUL inside the counted payload is impossible from
-            conformance — and accepting one mints a string whose wire length
-            and whose wcslen-perceived length disagree, the two-lengths
-            smuggling primitive. Then the unit range: each 32-bit group
-            carries one UTF-16 CODE UNIT, so a group above 0xFFFF is
-            malformed on every platform — this subsumes the old 2-byte-only
-            "wchar_t cannot hold it" refusal. The surrogate pairing is
-            checked below.
-        */
-        if ( c == 0 )
-        {
-            return serialize_read_fail( stream );
-        }
-        if ( c > 0xFFFFu )
-        {
-            return serialize_read_fail( stream );
-        }
-
-        if ( have_pending )
-        {
-            if ( c < 0xDC00u || c > 0xDFFFu )
-            {
-                return serialize_read_fail( stream );   /* high surrogate without its low */
-            }
-            if ( wide_wchar )
-            {
-                /* recombine at the boundary: the pair becomes one code
-                   point, the inverse of the split the writer performed */
-                string[out++] = (wchar_t) ( 0x10000u + ( ( pending - 0xD800u ) << 10 ) + ( c - 0xDC00u ) );
-            }
-            else
-            {
-                /* a 2-byte wchar_t IS a UTF-16 code unit: the pair is
-                   stored as the two units it arrived as */
-                string[out++] = (wchar_t) pending;
-                string[out++] = (wchar_t) c;
-            }
-            have_pending = 0;
-            continue;
-        }
-
-        if ( c >= 0xD800u && c <= 0xDBFFu )
-        {
-            pending = c;
-            have_pending = 1;
-            continue;
-        }
-
-        if ( c >= 0xDC00u && c <= 0xDFFFu )
-        {
-            return serialize_read_fail( stream );       /* low surrogate with no high before it */
-        }
-
-        string[out++] = (wchar_t) c;
-    }
-
-    if ( have_pending )
-    {
-        return serialize_read_fail( stream );           /* the payload ends inside a pair */
-    }
-
-    string[out] = 0;
-
     return 1;
 }
 
@@ -3500,28 +3507,6 @@ SERIALIZE_INLINE int serialize_measure_string( serialize_measure_stream_t * stre
 
     serialize_measure_int( stream, 0, buffer_size - 1 );
     serialize_measure_bytes( stream, length );
-
-    return 1;
-}
-
-/* NO align, matching serialize_write_wstring. See the wide strings prototype
-   block above. Counts UTF-16 CODE UNITS through the same helper the writer
-   uses, so an astral character on a 4-byte wchar_t platform measures as the
-   two groups it transmits. */
-SERIALIZE_INLINE int serialize_measure_wstring( serialize_measure_stream_t * stream, const wchar_t * string, int buffer_size )
-{
-    size_t unit_count = serialize_wstring_unit_count( string );
-    int units;
-
-    /* the caller's contract, debug-asserted exactly as the narrow path
-       asserts it (issue #52), and on the untruncated count. See
-       serialize_length_fits_buffer. */
-    serialize_assert( serialize_length_fits_buffer( unit_count, buffer_size ) );
-
-    units = (int) unit_count;
-
-    stream->bits_written += serialize_bits_required( 0, (serialize_uint32_t) ( buffer_size - 1 ) );
-    stream->bits_written += (serialize_int64_t) units * 32;
 
     return 1;
 }

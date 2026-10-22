@@ -11,7 +11,7 @@ foreign import serialize "shim.o"
 
 // Opaque stream storage. Sizes are asserted against the C truth at startup.
 Write_Stream :: struct #align (8) {
-	_opaque: [48]u8,
+	_opaque: [56]u8,
 }
 Read_Stream :: struct #align (8) {
 	_opaque: [32]u8,
@@ -29,6 +29,7 @@ foreign serialize {
 	serialize_read_int :: proc(stream: ^Read_Stream, value: ^i32, min: i32, max: i32) -> i32 ---
 	serialize_read_bool :: proc(stream: ^Read_Stream, value: ^i32) -> i32 ---
 	serialize_read_float :: proc(stream: ^Read_Stream, value: ^f32) -> i32 ---
+	serialize_read_end :: proc(stream: ^Read_Stream) -> i32 ---
 	serialize_read_error :: proc(stream: ^Read_Stream) -> i32 ---
 
 	serialize_shim_sizeof_write_stream :: proc() -> i32 ---
@@ -60,6 +61,9 @@ main :: proc() {
 	serialize_read_int(&r, &health, 0, 1000)
 	serialize_read_bool(&r, &at_rest)
 	serialize_read_float(&r, &x)
+	// a packet reader reads the end after the last field: no byte after the
+	// object, and zero padding in its final byte (STANDARD.md, "end")
+	serialize_read_end(&r)
 	if serialize_read_error(&r) != 0 {
 		fmt.eprintln("FAILED: read error on a valid stream")
 		os.exit(1)

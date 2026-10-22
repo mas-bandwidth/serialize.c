@@ -40,28 +40,26 @@
     "00"
 
 /*
-    The wide surface: uint128, ranged int128, fixed32/64/128 and wstring.
-    70 bytes.
+    The wide surface: uint128, ranged int128 and fixed32/64/128, then an end.
+    58 bytes.
 
-    This section exists because the core one cannot cover the 128-bit, fixed
-    point and wide string paths, and those are the hand-rolled two-lane 64-bit
-    emulation -- the likeliest place in the library for a byte order bug, and
-    for a long while the only part of it a big-endian run never touched.
+    This section exists because the core one cannot cover the 128-bit and
+    fixed point paths, and those are the hand-rolled two-lane 64-bit
+    emulation -- the likeliest place in the library for a byte order bug,
+    and for a long while the only part of it a big-endian run never touched.
 
     The last two ranged cases span MORE THAN 64 BITS on purpose. Everything
     before them fits its offset in the low lane, so groups 2 and 3 of the
     32-bit splitting are never reached; a lane mix-up would have gone
     unnoticed.
+
+    Format 2.0 removed wstring, which ended this sequence until then (70
+    bytes): the sequence lost that one field and nothing else, so these bytes
+    are the old ones up to where the wide string began, with the final byte's
+    padding zero. A wire change, made with the format's major version.
 */
 #define SERIALIZE_GOLDEN_WIDE \
     "1032547698badcfeefcdab8967452301351b4f37b20000600400c07579000049452f0706" \
-    "12cf8a4602de9b5713cf8a463e0000000000800389371e0200001c02000020020000"
-
-/*
-    STANDARD.md's worked wstring example is pinned separately, as the byte
-    array the document itself prints, in test/wstest.c. It stays in that shape
-    on purpose: it is a conformance check against the specification's own
-    worked example, not against this family's implementations.
-*/
+    "12cf8a4602de9b5713cf8a463e000000000080038907"
 
 #endif /* SERIALIZE_TEST_VECTORS_H */

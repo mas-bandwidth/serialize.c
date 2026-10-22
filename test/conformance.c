@@ -22,13 +22,31 @@
 
       accepted   the read succeeds, every step decodes the stated value, and
                  serialize_read_bits_processed equals the stated `consumed`
-      refused    the read fails, the caller's SCALAR destination holds exactly
-                 what it held before the call -- the non-mutation rule under
-                 Reader Obligations, checked here against a sentinel the
-                 caller planted -- and the stream is left TERMINAL
+      refused    the read fails FOR THE STATED REASON -- the stream's first
+                 refusal, serialize_read_refusal, compared by name with the
+                 one the record states, since a refusal under any other rule
+                 is a disagreement about the format -- the caller's SCALAR
+                 destination holds exactly what it held before the call --
+                 the non-mutation rule under Reader Obligations, checked here
+                 against a sentinel the caller planted -- and the stream is
+                 left TERMINAL
 
-    A caller-owned BUFFER -- bytes, string and wstring -- is left UNSPECIFIED
-    after a refusal by the standard, so nothing here checks one.
+    A caller-owned BUFFER -- bytes and string -- is left UNSPECIFIED after a
+    refusal by the standard, so nothing here checks one.
+
+    `writer_input bits = 0x...` (compressed_float only) hands the writer that
+    float32 and requires the record's bytes exactly, on refused vectors too:
+    it pins the quantization arithmetic for values that do not decode back to
+    themselves.
+
+    Vector names are unique across the corpus, and a repeated one fails.
+
+    NEGATIVE CONTROLS. `--expect-failures FILE` inverts the verdict for a
+    reader built with one refusal rule deleted (see the Makefile's `controls`
+    target): the run passes exactly when the set of vectors that fail equals
+    the names FILE lists -- conformance-controls/<rule>.expected, vendored
+    from the reference -- and no others. A failure no vector owns, such as a
+    malformed line, is never expected.
 
     `writer = canonical` additionally pins the bytes a conforming writer emits:
     the decoded values are re-emitted through the write stream and the WHOLE
@@ -89,12 +107,13 @@
 #endif
 
 #define MAX_PARAMS 8
-#define MAX_STEPS 48                /* the golden message is 28 operations long */
+#define MAX_STEPS 48                /* the golden message is 29 operations long */
 #define MAX_BYTES 256
 #define MAX_SLACK 8
 #define SLACK_FILL 0xA5
 #define MAX_TEXT 128
 #define MAX_LINE 512
+#define MAX_VECTORS 2048            /* the 2.0 corpus holds a few hundred */
 
 /* ---------------------------------------------------------------------------
    the vector record
@@ -113,23 +132,55 @@ typedef struct
     serialize_uint8_t bytes[MAX_BYTES];
     int byte_count;
     int refused;
+    serialize_refusal_t reason;     /* the refusal the record states, when refused */
     char expect[MAX_LINE];
     serialize_int64_t consumed;
     int have_consumed;
     serialize_int64_t measure_at_least;
     int have_measure;
     int writer_canonical;
+    int have_writer_input;
+    serialize_uint32_t writer_input; /* a float32 pattern handed to the writer */
 } vector_t;
 
 static int failures = 0;
 static int vectors_run = 0;
 static int writer_checks = 0;
 static int measure_checks = 0;
+static int reason_checks = 0;
+
+/* every vector name seen, for the uniqueness rule, and every vector that
+   failed, for --expect-failures */
+static char seen_names[MAX_VECTORS][MAX_TEXT];
+static int seen_count = 0;
+static char failed_names[MAX_VECTORS][MAX_TEXT];
+static int failed_count = 0;
+static int unattributed_failures = 0;
+static int expect_failures_mode = 0;
 
 static void fail( const vector_t * v, const char * what )
 {
-    printf( "FAILED %s: %s [%s]\n", v->name, what, v->file );
+    int i;
+    if ( !expect_failures_mode )
+    {
+        printf( "FAILED %s: %s [%s]\n", v->name, what, v->file );
+    }
     failures++;
+    for ( i = 0; i < failed_count; i++ )
+    {
+        if ( strcmp( failed_names[i], v->name ) == 0 )
+        {
+            return;
+        }
+    }
+    if ( failed_count < MAX_VECTORS && v->name[0] != '\0' )
+    {
+        strcpy( failed_names[failed_count++], v->name );
+    }
+    else
+    {
+        unattributed_failures++;
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -277,7 +328,7 @@ typedef enum
     STEP_COMPRESSED_FLOAT,
     STEP_BYTES,
     STEP_STRING,
-    STEP_WSTRING,
+    STEP_END,
     STEP_FIXED,
     STEP_OBJECT                     /* wraps the next `width` steps in a nested object */
 } step_kind_t;
@@ -302,7 +353,6 @@ typedef struct
     serialize_int128_t number;      /* int, int64, int128, int_relative, fixed */
     int boolean;
     serialize_uint8_t buffer[MAX_BYTES + 1];
-    wchar_t wbuffer[MAX_BYTES + 1];
 } step_t;
 
 static step_t * failed_step = NULL;
@@ -360,17 +410,21 @@ static int object_read( serialize_read_stream_t * r, step_t * steps, int count )
 
 static int step_read( serialize_read_stream_t * r, step_t * step )
 {
+    /* every destination is copied back into the step whether the read
+       succeeded or not, so the runner's sentinel check sees exactly what the
+       library left in the caller's variable: a reader that writes its
+       destination and then refuses goes red (STANDARD.md, a refused read
+       leaves its destination unwritten) */
+    int ok;
+
     switch ( step->kind )
     {
         case STEP_BITS:
         {
             serialize_uint64_t value = pattern_lo( step );
-            if ( !serialize_read_bits64( r, &value, (int) step->width ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_bits64( r, &value, (int) step->width );
             set_pattern_lo( step, value );
-            return 1;
+            return ok;
         }
 
         case STEP_BOOL:
@@ -385,23 +439,17 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
         case STEP_INT:
         {
             serialize_int32_t value = (serialize_int32_t) step->number.lo;
-            if ( !serialize_read_int( r, &value, (serialize_int32_t) step->min.lo, (serialize_int32_t) step->max.lo ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_int( r, &value, (serialize_int32_t) step->min.lo, (serialize_int32_t) step->max.lo );
             step->number = serialize_int128_from_int64( (serialize_int64_t) value );
-            return 1;
+            return ok;
         }
 
         case STEP_INT64:
         {
             serialize_int64_t value = (serialize_int64_t) step->number.lo;
-            if ( !serialize_read_int64( r, &value, (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_int64( r, &value, (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo );
             step->number = serialize_int128_from_int64( value );
-            return 1;
+            return ok;
         }
 
         case STEP_INT128:
@@ -410,12 +458,9 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
         case STEP_INT_RELATIVE:
         {
             serialize_int32_t value = (serialize_int32_t) step->number.lo;
-            if ( !serialize_read_int_relative( r, step->previous, &value ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_int_relative( r, step->previous, &value );
             step->number = serialize_int128_from_int64( (serialize_int64_t) value );
-            return 1;
+            return ok;
         }
 
         case STEP_FLOAT:
@@ -423,13 +468,10 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
             serialize_uint32_t bits = (serialize_uint32_t) pattern_lo( step );
             float value;
             memcpy( &value, &bits, 4 );
-            if ( !serialize_read_float( r, &value ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_float( r, &value );
             memcpy( &bits, &value, 4 );
             set_pattern_lo( step, (serialize_uint64_t) bits );
-            return 1;
+            return ok;
         }
 
         case STEP_DOUBLE:
@@ -437,13 +479,10 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
             serialize_uint64_t bits = pattern_lo( step );
             double value;
             memcpy( &value, &bits, 8 );
-            if ( !serialize_read_double( r, &value ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_double( r, &value );
             memcpy( &bits, &value, 8 );
             set_pattern_lo( step, bits );
-            return 1;
+            return ok;
         }
 
         case STEP_COMPRESSED_FLOAT:
@@ -451,13 +490,10 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
             serialize_uint32_t bits = (serialize_uint32_t) pattern_lo( step );
             float value;
             memcpy( &value, &bits, 4 );
-            if ( !serialize_read_compressed_float( r, &value, step->fmin, step->fmax, step->fres ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_compressed_float( r, &value, step->fmin, step->fmax, step->fres );
             memcpy( &bits, &value, 4 );
             set_pattern_lo( step, (serialize_uint64_t) bits );
-            return 1;
+            return ok;
         }
 
         case STEP_BYTES:
@@ -466,32 +502,26 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
         case STEP_STRING:
             return serialize_read_string( r, (char *) step->buffer, (int) step->width );
 
-        case STEP_WSTRING:
-            return serialize_read_wstring( r, step->wbuffer, (int) step->width );
+        case STEP_END:
+            return serialize_read_end( r );
 
         case STEP_FIXED:
         {
             if ( step->fixed_storage == 32 )
             {
                 serialize_int32_t value = (serialize_int32_t) step->number.lo;
-                if ( !serialize_read_fixed32( r, &value, step->integer_bits, step->fraction_bits,
-                                              (serialize_int32_t) step->min.lo, (serialize_int32_t) step->max.lo ) )
-                {
-                    return 0;
-                }
+                ok = serialize_read_fixed32( r, &value, step->integer_bits, step->fraction_bits,
+                                              (serialize_int32_t) step->min.lo, (serialize_int32_t) step->max.lo );
                 step->number = serialize_int128_from_int64( (serialize_int64_t) value );
-                return 1;
+                return ok;
             }
             if ( step->fixed_storage == 64 )
             {
                 serialize_int64_t value = (serialize_int64_t) step->number.lo;
-                if ( !serialize_read_fixed64( r, &value, step->integer_bits, step->fraction_bits,
-                                              (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo ) )
-                {
-                    return 0;
-                }
+                ok = serialize_read_fixed64( r, &value, step->integer_bits, step->fraction_bits,
+                                              (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo );
                 step->number = serialize_int128_from_int64( value );
-                return 1;
+                return ok;
             }
             return serialize_read_fixed128( r, &step->number, step->integer_bits, step->fraction_bits,
                                             (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo );
@@ -601,8 +631,8 @@ static int step_write( serialize_write_stream_t * w, step_t * step )
         case STEP_STRING:
             return serialize_write_string( w, (const char *) step->buffer, (int) step->width );
 
-        case STEP_WSTRING:
-            return serialize_write_wstring( w, step->wbuffer, (int) step->width );
+        case STEP_END:
+            return serialize_write_end( w );
 
         case STEP_FIXED:
             if ( step->fixed_storage == 32 )
@@ -702,8 +732,8 @@ static int step_measure( serialize_measure_stream_t * m, step_t * step )
         case STEP_STRING:
             return serialize_measure_string( m, (const char *) step->buffer, (int) step->width );
 
-        case STEP_WSTRING:
-            return serialize_measure_wstring( m, step->wbuffer, (int) step->width );
+        case STEP_END:
+            return serialize_measure_end( m );
 
         case STEP_FIXED:
             if ( step->fixed_storage == 32 )
@@ -779,55 +809,6 @@ static void bytes_to_hex( const serialize_uint8_t * data, int count, char * out,
     out[written] = '\0';
 }
 
-/*
-    STANDARD.md, "wstring": each 32-bit group carries one UTF-16 CODE UNIT, and
-    a 4-byte wchar_t platform "converts at the boundary -- splits astral code
-    points into surrogate pairs on write, recombines on read". The corpus states
-    units, so a code point that came back recombined is split again here and
-    both platforms compare the same text.
-*/
-static void units_to_hex( const wchar_t * units, char * out, int out_size )
-{
-    static const char * digits = "0123456789ABCDEF";
-    int written = 0;
-    int i;
-    for ( i = 0; units[i] != 0; i++ )
-    {
-        unsigned int pair[2];
-        int count = 1;
-        int u;
-        unsigned int code_point = (unsigned int) units[i];
-        if ( code_point > 0xFFFFu )
-        {
-            unsigned int offset = code_point - 0x10000u;
-            pair[0] = 0xD800u + ( offset >> 10 );
-            pair[1] = 0xDC00u + ( offset & 0x3FFu );
-            count = 2;
-        }
-        else
-        {
-            pair[0] = code_point;
-            pair[1] = 0;
-        }
-        for ( u = 0; u < count; u++ )
-        {
-            if ( written + 6 >= out_size )
-            {
-                break;
-            }
-            if ( written > 0 )
-            {
-                out[written++] = ' ';
-            }
-            out[written++] = digits[( pair[u] >> 12 ) & 0xF];
-            out[written++] = digits[( pair[u] >> 8 ) & 0xF];
-            out[written++] = digits[( pair[u] >> 4 ) & 0xF];
-            out[written++] = digits[pair[u] & 0xF];
-        }
-    }
-    out[written] = '\0';
-}
-
 static int step_pattern( const step_t * step, serialize_uint128_t * out )
 {
     if ( step_value_is_a_pattern( step->kind ) )
@@ -857,8 +838,9 @@ static void render_step_value( const step_t * step, char * out, int out_size )
     {
         case STEP_OBJECT:
         case STEP_ALIGN:
-            /* neither has a value of its own; for align the corpus states the
-               padding it consumed, which a conforming read always finds zero */
+        case STEP_END:
+            /* none has a value of its own; for align and end the corpus states
+               the padding consumed, which a conforming read always finds zero */
             strcpy( out, "0" );
             return;
 
@@ -872,10 +854,6 @@ static void render_step_value( const step_t * step, char * out, int out_size )
 
         case STEP_STRING:
             bytes_to_hex( step->buffer, (int) strlen( (const char *) step->buffer ), out, out_size );
-            return;
-
-        case STEP_WSTRING:
-            units_to_hex( step->wbuffer, out, out_size );
             return;
 
         default:
@@ -980,7 +958,7 @@ static int operation_takes_param( const char * operation, const char * name )
     if ( strcmp( name, "preceding_bits" ) == 0 )    return strcmp( operation, "align" ) == 0 || strcmp( operation, "bytes" ) == 0;
     if ( strcmp( name, "bits" ) == 0 )              return strcmp( operation, "bits" ) == 0;
     if ( strcmp( name, "count" ) == 0 )             return strcmp( operation, "bytes" ) == 0;
-    if ( strcmp( name, "buffer_size" ) == 0 )       return strcmp( operation, "string" ) == 0 || strcmp( operation, "wstring" ) == 0;
+    if ( strcmp( name, "buffer_size" ) == 0 )       return strcmp( operation, "string" ) == 0;
     if ( strcmp( name, "previous" ) == 0 )          return strcmp( operation, "int_relative" ) == 0;
     if ( strcmp( name, "res" ) == 0 )               return strcmp( operation, "compressed_float" ) == 0;
     if ( strcmp( name, "integer_bits" ) == 0 || strcmp( name, "fraction_bits" ) == 0 )
@@ -1135,6 +1113,11 @@ static int step_from_words( step_t * step, const char * text )
         step->kind = STEP_ALIGN;
         return 1;
     }
+    if ( strcmp( words[0], "end" ) == 0 && word_count == 1 )
+    {
+        step->kind = STEP_END;
+        return 1;
+    }
     if ( strcmp( words[0], "float" ) == 0 && word_count == 1 )
     {
         step->kind = STEP_FLOAT;
@@ -1179,12 +1162,6 @@ static int step_from_words( step_t * step, const char * text )
     if ( strcmp( words[0], "string" ) == 0 && word_count == 2 && parse_number( words[1], &a ) )
     {
         step->kind = STEP_STRING;
-        step->width = (serialize_int64_t) a.lo;
-        return step->width > 0 && step->width <= MAX_BYTES;
-    }
-    if ( strcmp( words[0], "wstring" ) == 0 && word_count == 2 && parse_number( words[1], &a ) )
-    {
-        step->kind = STEP_WSTRING;
         step->width = (serialize_int64_t) a.lo;
         return step->width > 0 && step->width <= MAX_BYTES;
     }
@@ -1274,6 +1251,10 @@ static int build_steps( const vector_t * v, step_t * steps, int * out_count )
     {
         step->kind = STEP_ALIGN;
     }
+    else if ( strcmp( v->operation, "end" ) == 0 )
+    {
+        step->kind = STEP_END;
+    }
     else if ( strcmp( v->operation, "int" ) == 0 )
     {
         if ( !param_number( v, "min", &min ) || !param_number( v, "max", &max ) ) return 0;
@@ -1328,12 +1309,6 @@ static int build_steps( const vector_t * v, step_t * steps, int * out_count )
         step->kind = STEP_STRING;
         step->width = width;
     }
-    else if ( strcmp( v->operation, "wstring" ) == 0 )
-    {
-        if ( !param_int( v, "buffer_size", &width ) || width < 1 || width > MAX_BYTES ) return 0;
-        step->kind = STEP_WSTRING;
-        step->width = width;
-    }
     else if ( strcmp( v->operation, "fixed" ) == 0 )
     {
         if ( !param_int( v, "integer_bits", &integer_bits ) || !param_int( v, "fraction_bits", &fraction_bits ) ) return 0;
@@ -1366,6 +1341,7 @@ static int build_steps( const vector_t * v, step_t * steps, int * out_count )
 static void fail_unless_stream_is_terminal( const vector_t * v, serialize_read_stream_t * r )
 {
     serialize_uint32_t after = 0xFFFFFFFFu;
+    const serialize_int64_t cursor = serialize_read_bits_processed( r );
 
     if ( serialize_read_bits( r, &after, 8 ) )
     {
@@ -1380,7 +1356,33 @@ static void fail_unless_stream_is_terminal( const vector_t * v, serialize_read_s
     if ( !serialize_read_error( r ) )
     {
         fail( v, "the stream is not in its failed state after a refusal" );
+        return;
     }
+    /* consumes no bits: on this port the latched cursor sits at its poison,
+       num_bits + 1, and a refused read re-clamps it there */
+    if ( serialize_read_bits_processed( r ) != cursor )
+    {
+        fail( v, "the read after the refusal moved the cursor" );
+    }
+}
+
+/* a refused read writes no scalar destination: the step must still hold the
+   sentinels the runner planted */
+static int step_holds_sentinels( const step_t * step, serialize_uint64_t sentinel_pattern, serialize_int128_t sentinel_number )
+{
+    if ( step_value_is_a_pattern( step->kind ) && !serialize_uint128_equal( step->pattern, serialize_uint128_make( 0, sentinel_pattern ) ) )
+    {
+        return 0;
+    }
+    if ( step_value_is_a_number( step->kind ) && !serialize_int128_equal( step->number, sentinel_number ) )
+    {
+        return 0;
+    }
+    if ( step->kind == STEP_BOOL && step->boolean != 1 )
+    {
+        return 0;
+    }
+    return 1;
 }
 
 static void run_reader( const vector_t * v, step_t * steps, int step_count )
@@ -1423,23 +1425,29 @@ static void run_reader( const vector_t * v, step_t * steps, int step_count )
             return;
         }
 
+        /* STANDARD.md, "Refusal reasons": a reader must refuse for the reason
+           the vector states, and the reason reported is the FIRST refusal's.
+           A refusal for any other reason is a disagreement about the format
+           however red the stream ends up. */
+        reason_checks++;
+        if ( serialize_read_refusal( &r ) != v->reason )
+        {
+            char message[MAX_LINE];
+            sprintf( message, "refused as %s, the corpus states %s",
+                     serialize_refusal_name( serialize_read_refusal( &r ) ), serialize_refusal_name( v->reason ) );
+            fail( v, message );
+            return;
+        }
+
         /* STANDARD.md, "A refused primitive read must leave its destination
            unwritten". The rule reaches the scalars only: a read into a
-           caller-owned buffer -- bytes, string and wstring -- leaves that
+           caller-owned buffer -- bytes and string -- leaves that
            buffer's contents unspecified after a refusal, and the document says
            so in as many words, so those kinds are not checked here. */
-        if ( failed_step != NULL )
+        if ( failed_step != NULL && !step_holds_sentinels( failed_step, sentinel_pattern, sentinel_number ) )
         {
-            const step_t * step = failed_step;
-            if ( ( step_value_is_a_pattern( step->kind )
-                   && !serialize_uint128_equal( step->pattern, serialize_uint128_make( 0, sentinel_pattern ) ) )
-              || ( step_value_is_a_number( step->kind )
-                   && !serialize_int128_equal( step->number, sentinel_number ) )
-              || ( step->kind == STEP_BOOL && step->boolean != 1 ) )
-            {
-                fail( v, "the refused read wrote to the destination" );
-                return;
-            }
+            fail( v, "the refused read wrote to the destination" );
+            return;
         }
 
         /* Failure is terminal, and a sequence states its own successors: every
@@ -1452,6 +1460,13 @@ static void run_reader( const vector_t * v, step_t * steps, int step_count )
         {
             for ( i = stopped_at + step_span( steps, stopped_at ); i < step_count; i += step_span( steps, i ) )
             {
+                int j;
+                for ( j = i; j < i + step_span( steps, i ); j++ )
+                {
+                    steps[j].pattern = serialize_uint128_make( 0, sentinel_pattern );
+                    steps[j].number = sentinel_number;
+                    steps[j].boolean = 1;
+                }
                 if ( steps_read( &r, steps + i, step_span( steps, i ), NULL ) )
                 {
                     char message[MAX_LINE];
@@ -1459,6 +1474,17 @@ static void run_reader( const vector_t * v, step_t * steps, int step_count )
                              i + 1, stopped_at + 1 );
                     fail( v, message );
                     return;
+                }
+                for ( j = i; j < i + step_span( steps, i ); j++ )
+                {
+                    if ( !step_holds_sentinels( &steps[j], sentinel_pattern, sentinel_number ) )
+                    {
+                        char message[MAX_LINE];
+                        sprintf( message, "step %d wrote its destination after step %d was refused",
+                                 j + 1, stopped_at + 1 );
+                        fail( v, message );
+                        return;
+                    }
                 }
             }
         }
@@ -1500,7 +1526,7 @@ static void run_reader( const vector_t * v, step_t * steps, int step_count )
             char rendered[MAX_LINE];
             char message[MAX_LINE * 3];
             render_step_value( &steps[offset + i], rendered, MAX_LINE );
-            sprintf( message, "step %d decoded %s, the corpus states %s", offset + i + 1, rendered, entries[i] );
+            sprintf( message, "step %d decoded %.*s, the corpus states %.*s", offset + i + 1, MAX_LINE - 1, rendered, MAX_LINE - 1, entries[i] );
             fail( v, message );
             return;
         }
@@ -1542,7 +1568,7 @@ static void run_writer( const vector_t * v, step_t * steps, int step_count )
     }
     serialize_write_flush( &w );
 
-    written = serialize_write_bytes_processed( &w );
+    written = (int) serialize_write_bytes_processed( &w );
     if ( written != v->byte_count )
     {
         char message[MAX_LINE];
@@ -1593,6 +1619,72 @@ static void run_measure( const vector_t * v, step_t * steps, int step_count )
     }
 }
 
+/*
+    The writer input leg. A compressed_float record carrying `writer_input`
+    hands the writer that float32 and requires the record's bytes exactly,
+    on refused records too: it is how the quantization arithmetic is pinned
+    for values that do not decode back to themselves -- between quanta, and
+    in the clamp band where a fused writer moves the integer.
+*/
+static void run_writer_input( const vector_t * v, step_t * steps, int step_count )
+{
+    serialize_uint8_t scratch[MAX_BYTES + 64];
+    serialize_write_stream_t w;
+    int capacity = (int) sizeof( scratch ) & ~7;    /* the packer stores qwords */
+    int written;
+    float value;
+
+    writer_checks++;
+
+    if ( step_count != 1 || steps[0].kind != STEP_COMPRESSED_FLOAT )
+    {
+        fail( v, "writer_input is defined for a single compressed_float operation only" );
+        return;
+    }
+
+    memcpy( &value, &v->writer_input, 4 );
+
+    memset( scratch, SLACK_FILL, sizeof( scratch ) );
+    serialize_write_stream_init( &w, scratch, capacity );
+
+    if ( !serialize_write_compressed_float( &w, value, steps[0].fmin, steps[0].fmax, steps[0].fres ) )
+    {
+        fail( v, "the writer refused its input" );
+        return;
+    }
+    serialize_write_flush( &w );
+
+    written = (int) serialize_write_bytes_processed( &w );
+    if ( written != v->byte_count || ( written > 0 && memcmp( scratch, v->bytes, (size_t) written ) != 0 ) )
+    {
+        char got[MAX_LINE];
+        char want[MAX_LINE];
+        char message[MAX_LINE * 3];
+        bytes_to_hex( scratch, written, got, MAX_LINE );
+        bytes_to_hex( v->bytes, v->byte_count, want, MAX_LINE );
+        sprintf( message, "the writer handed its input emitted %s, the corpus states %s", got, want );
+        fail( v, message );
+    }
+}
+
+/* STANDARD.md, the vector format: a name is unique across the corpus */
+static int name_is_new( const char * name )
+{
+    int i;
+    for ( i = 0; i < seen_count; i++ )
+    {
+        if ( strcmp( seen_names[i], name ) == 0 )
+        {
+            return 0;
+        }
+    }
+    if ( seen_count < MAX_VECTORS )
+    {
+        strcpy( seen_names[seen_count++], name );
+    }
+    return 1;
+}
+
 static void run_vector( const vector_t * v )
 {
     step_t steps[MAX_STEPS];
@@ -1601,6 +1693,17 @@ static void run_vector( const vector_t * v )
     int i;
 
     vectors_run++;
+
+    if ( v->name[0] == '\0' )
+    {
+        fail( v, "a vector without a name" );
+        return;
+    }
+    if ( !name_is_new( v->name ) )
+    {
+        fail( v, "the name is not unique across the corpus" );
+        return;
+    }
 
     for ( i = 0; i < v->param_count; i++ )
     {
@@ -1628,6 +1731,15 @@ static void run_vector( const vector_t * v )
 
     failures_before = failures;
     run_reader( v, steps, step_count );
+
+    if ( v->have_writer_input && failures == failures_before )
+    {
+        /* a fresh step list: the reader above decoded into these */
+        if ( build_steps( v, steps, &step_count ) )
+        {
+            run_writer_input( v, steps, step_count );
+        }
+    }
 
     /* the writer and the measure are handed the values the reader decoded, so
        running them after a reader failure reports a second failure about a
@@ -1690,6 +1802,43 @@ static void bad_line( const char * path, int line_number, const char * what )
 {
     printf( "FAILED %s:%d: %s\n", path, line_number, what );
     failures++;
+    unattributed_failures++;
+}
+
+/* the closed list, by the name the corpus spells it; NONE for anything else */
+static serialize_refusal_t reason_from_name( const char * name )
+{
+    int i;
+    for ( i = SERIALIZE_REFUSAL_NONE + 1; i < SERIALIZE_REFUSAL_NUM_REASONS; i++ )
+    {
+        if ( strcmp( name, serialize_refusal_name( (serialize_refusal_t) i ) ) == 0 )
+        {
+            return (serialize_refusal_t) i;
+        }
+    }
+    return SERIALIZE_REFUSAL_NONE;
+}
+
+/* `bits = 0x...`, the spelling of a float32 pattern on a writer_input line */
+static int parse_bits_pattern( char * value, serialize_uint32_t * out )
+{
+    char * equals = strchr( value, '=' );
+    serialize_int128_t number;
+    if ( equals == NULL )
+    {
+        return 0;
+    }
+    *equals = '\0';
+    if ( strcmp( trim( value ), "bits" ) != 0 )
+    {
+        return 0;
+    }
+    if ( !parse_number( trim( equals + 1 ), &number ) || number.hi != 0 || number.lo > 0xFFFFFFFFu )
+    {
+        return 0;
+    }
+    *out = (serialize_uint32_t) number.lo;
+    return 1;
 }
 
 static void run_file( const char * path )
@@ -1795,9 +1944,18 @@ static void run_file( const char * path )
         }
         else if ( strcmp( key, "expect" ) == 0 )
         {
-            if ( strcmp( value, "refused" ) == 0 )
+            if ( strncmp( value, "refused", 7 ) == 0 && ( value[7] == '\0' || value[7] == ' ' ) )
             {
+                /* `expect refused <reason>`, the reason from the closed list.
+                   A missing or unknown reason makes the record malformed: a
+                   refusal the record does not name cannot be checked */
                 v.refused = 1;
+                v.reason = reason_from_name( trim( value + 7 ) );
+                if ( v.reason == SERIALIZE_REFUSAL_NONE )
+                {
+                    bad_line( path, line_number, "expect refused without a reason from the closed list" );
+                    continue;
+                }
             }
             else
             {
@@ -1840,6 +1998,15 @@ static void run_file( const char * path )
                 continue;
             }
             v.writer_canonical = 1;
+        }
+        else if ( strcmp( key, "writer_input" ) == 0 )
+        {
+            if ( !parse_bits_pattern( value, &v.writer_input ) )
+            {
+                bad_line( path, line_number, "malformed writer_input line" );
+                continue;
+            }
+            v.have_writer_input = 1;
         }
         else
         {
@@ -1925,10 +2092,129 @@ static int run_directory( const char * directory )
     return files;
 }
 
+/*
+    --expect-failures: the failing set must equal the names the file lists,
+    exactly. The file is conformance-controls/<rule>.expected, one name per
+    line, `#` comments and blank lines ignored.
+*/
+static int check_expected_failures( const char * path )
+{
+    static char expected[MAX_VECTORS][MAX_TEXT];
+    int expected_count = 0;
+    char line[MAX_LINE];
+    FILE * file = fopen( path, "r" );
+    int mismatches = 0;
+    int i, j;
+
+    if ( file == NULL )
+    {
+        printf( "FAILED: cannot open %s\n", path );
+        return 0;
+    }
+    while ( fgets( line, (int) sizeof( line ), file ) != NULL )
+    {
+        char * text;
+        if ( line[0] == '#' )
+        {
+            continue;
+        }
+        text = trim( line );
+        if ( *text == '\0' || expected_count >= MAX_VECTORS )
+        {
+            continue;
+        }
+        copy_text( expected[expected_count++], MAX_TEXT, text );
+    }
+    fclose( file );
+
+    if ( expected_count == 0 )
+    {
+        printf( "FAILED: %s names no vectors; a control that expects nothing proves nothing\n", path );
+        return 0;
+    }
+
+    for ( i = 0; i < expected_count; i++ )
+    {
+        int found = 0;
+        for ( j = 0; j < failed_count; j++ )
+        {
+            if ( strcmp( expected[i], failed_names[j] ) == 0 ) found = 1;
+        }
+        if ( !found )
+        {
+            printf( "FAILED: %s was expected to fail and passed\n", expected[i] );
+            mismatches++;
+        }
+    }
+    for ( j = 0; j < failed_count; j++ )
+    {
+        int found = 0;
+        for ( i = 0; i < expected_count; i++ )
+        {
+            if ( strcmp( expected[i], failed_names[j] ) == 0 ) found = 1;
+        }
+        if ( !found )
+        {
+            printf( "FAILED: %s failed and was not expected to\n", failed_names[j] );
+            mismatches++;
+        }
+    }
+    if ( unattributed_failures > 0 )
+    {
+        printf( "FAILED: %d failure(s) no vector owns\n", unattributed_failures );
+        mismatches++;
+    }
+
+    if ( mismatches == 0 && serialize_test_verbose() )
+    {
+        printf( "conformance: exactly the %d vector(s) %s names failed\n", expected_count, path );
+    }
+
+    return mismatches == 0;
+}
+
 int main( int argc, char ** argv )
 {
-    const char * directory = argc > 1 ? argv[1] : "conformance";
-    int files = run_directory( directory );
+    const char * path = "conformance";
+    const char * expected = NULL;
+    int files;
+    int i;
+
+    for ( i = 1; i < argc; i++ )
+    {
+        if ( strcmp( argv[i], "--expect-failures" ) == 0 && i + 1 < argc )
+        {
+            expected = argv[++i];
+            expect_failures_mode = 1;
+        }
+        else
+        {
+            path = argv[i];
+        }
+    }
+
+    /* a single vector file runs alone: that is how the unknown-operation
+       control is run, a file the corpus glob deliberately does not reach */
+    if ( is_vector_file( path ) )
+    {
+        run_file( path );
+        files = 1;
+    }
+    else
+    {
+        files = run_directory( path );
+    }
+
+    if ( expected != NULL )
+    {
+        if ( vectors_run == 0 || !check_expected_failures( expected ) )
+        {
+            printf( "FAILED (control: %d vectors, %d failed, expected the list in %s)\n", vectors_run, failed_count, expected );
+            return 1;
+        }
+        printf( "OK (control: exactly the expected %d vector(s) failed)\n", failed_count );
+        return 0;
+    }
 
     if ( failures > 0 || vectors_run == 0 )
     {
@@ -1940,8 +2226,8 @@ int main( int argc, char ** argv )
 
     if ( serialize_test_verbose() )
     {
-        printf( "conformance: %d vectors from %d files in %s, %d writer checks, %d measure checks\n",
-                vectors_run, files, directory, writer_checks, measure_checks );
+        printf( "conformance: %d vectors from %d files in %s, %d reasons checked, %d writer checks, %d measure checks\n",
+                vectors_run, files, path, reason_checks, writer_checks, measure_checks );
     }
 
     printf( "OK\n" );

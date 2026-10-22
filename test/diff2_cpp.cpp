@@ -23,9 +23,6 @@ template <typename Stream> bool write_wide( Stream & stream )
     serialize::int128_t widemax =  ( serialize::int128_t( 1 ) << 100 );
     serialize::int128_t f128wide = serialize::int128_t( -12345LL * ( int64_t( 1 ) << 48 ) );
 
-    wchar_t ws[8];
-    ws[0] = 0x043C; ws[1] = 0x0438; ws[2] = 0x0440; ws[3] = 0;
-
     serialize_uint128( stream, u128 );
     serialize_int128( stream, i128, i128min, i128max );
     serialize_fixed( stream, f32, 16, 16, -180, 180 );
@@ -34,7 +31,7 @@ template <typename Stream> bool write_wide( Stream & stream )
     serialize_fixed( stream, fticks, 32, 0, 0, 1000000 );
     serialize_int128( stream, wide, widemin, widemax );
     serialize_fixed( stream, f128wide, 80, 48, -1000000, 1000000 );
-    serialize_wstring( stream, ws, 8 );
+    serialize_end( stream );
     return true;
 }
 

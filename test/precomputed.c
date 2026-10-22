@@ -161,7 +161,9 @@ SERIALIZE_INLINE int frozen_read_compressed_float( serialize_read_stream_t * str
 
     if ( integer_value > max_integer_value )
     {
-        return serialize_read_fail( stream );
+        /* format 2.0 gave every refusal a reason; the call's spelling is the
+           only change to the frozen body */
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
 
     normalized = (float) integer_value / (float) max_integer_value;
@@ -862,7 +864,7 @@ static void test_precomputed_differential( void )
            16-bit widths; above that the boundary codes are pinned and the
            interior is sampled */
         {
-            const serialize_uint32_t top_code = ( bits == 32 ) ? 0xFFFFFFFFUL : ( ( 1UL << bits ) - 1UL );
+            const serialize_uint32_t top_code = (serialize_uint32_t) ( ( bits == 32 ) ? 0xFFFFFFFFUL : ( ( 1UL << bits ) - 1UL ) );
             if ( bits <= 16 )
             {
                 serialize_uint32_t code;

@@ -14,9 +14,10 @@
     qemu-s390x is what proves the big-endian path.
 
     TWO sequences, because one could not cover the surface. The core one is
-    everything built on 32-bit groups; the wide one is the 128-bit, fixed
-    point and wide string paths, which are a hand-rolled two-lane 64-bit
-    emulation and so the likeliest place in the library for a byte order bug.
+    everything built on 32-bit groups; the wide one is the 128-bit and fixed
+    point paths, which are a hand-rolled two-lane 64-bit emulation and so the
+    likeliest place in the library for a byte order bug. Both end with an
+    end, and both are read back through it over exactly the bytes written.
 
     Both sequences are also READ BACK, field by field, so the golden is a live
     stream and not a string that happens to match.
@@ -92,6 +93,7 @@ static int golden_core( void )
     serialize_write_int_relative( &w, 100, 400 );
     serialize_write_int_relative( &w, 100, 5000 );
     serialize_write_int_relative( &w, 100, 999999 );
+    serialize_write_end( &w );
 
     serialize_write_flush( &w );
 
@@ -101,7 +103,7 @@ static int golden_core( void )
         return 0;
     }
 
-    n = serialize_write_bytes_processed( &w );
+    n = (int) serialize_write_bytes_processed( &w );
 
     if ( !check_bytes( "core", buffer, n, expected_core ) )
     {
@@ -121,7 +123,7 @@ static int golden_core( void )
         serialize_int64_t i64 = 0;
         float fv = 0.0f, cf = 0.0f;
         double dv = 0.0;
-        serialize_uint8_t blob_out[5];
+        serialize_uint8_t blob_out[5] = { 0, 0, 0, 0, 0 };
         char str[64];
         serialize_int32_t rel = 0;
 
@@ -153,10 +155,12 @@ static int golden_core( void )
         CHECK( serialize_read_int_relative( &r, 100, &rel ) );  CHECK( rel == 400 );
         CHECK( serialize_read_int_relative( &r, 100, &rel ) );  CHECK( rel == 5000 );
         CHECK( serialize_read_int_relative( &r, 100, &rel ) );  CHECK( rel == 999999 );
+        CHECK( serialize_read_end( &r ) );
         CHECK( !serialize_read_error( &r ) );
 
-        /* the reader consumed exactly what the writer produced */
-        CHECK( serialize_read_bits_processed( &r ) == serialize_write_bits_processed( &w ) );
+        /* the reader consumed exactly what the writer produced, and its end
+           consumed the final byte's padding: the whole stream */
+        CHECK( serialize_read_bits_processed( &r ) == serialize_write_bytes_processed( &w ) * 8 );
     }
 
     printf( "core: OK (%d bytes)\n", n );
@@ -168,11 +172,7 @@ static int golden_wide( void )
 {
     static serialize_uint8_t buffer[1024 + 8];      /* + 8: read buffer allocations extend 8 bytes past the data */
     serialize_write_stream_t w;
-    wchar_t ws[8];
     int n;
-
-    /* the same three characters STANDARD.md uses in its worked example */
-    ws[0] = 0x043C; ws[1] = 0x0438; ws[2] = 0x0440; ws[3] = 0;
 
     serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
 
@@ -195,7 +195,7 @@ static int golden_wide( void )
         serialize_int128_make( 0x0000001000000000ULL, 0x0000000000000000ULL ) );
     serialize_write_fixed128( &w, serialize_int128_from_int64( -12345LL * ( (serialize_int64_t) 1 << 48 ) ), 80, 48, -1000000, 1000000 );
 
-    serialize_write_wstring( &w, ws, 8 );
+    serialize_write_end( &w );
 
     serialize_write_flush( &w );
 
@@ -205,7 +205,7 @@ static int golden_wide( void )
         return 0;
     }
 
-    n = serialize_write_bytes_processed( &w );
+    n = (int) serialize_write_bytes_processed( &w );
 
     if ( !check_bytes( "wide", buffer, n, expected_wide ) )
     {
@@ -219,7 +219,6 @@ static int golden_wide( void )
         serialize_int32_t f32 = 0;
         serialize_int64_t f64 = 0;
         serialize_int128_t f128 = { 0, 0 };
-        wchar_t ws_out[8];
 
         serialize_read_stream_init( &r, buffer, n );
 
@@ -251,11 +250,10 @@ static int golden_wide( void )
         CHECK( serialize_read_fixed128( &r, &f128, 80, 48, -1000000, 1000000 ) );
         CHECK( serialize_int128_equal( f128, serialize_int128_from_int64( -12345LL * ( (serialize_int64_t) 1 << 48 ) ) ) );
 
-        CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
-        CHECK( ws_out[0] == 0x043C && ws_out[1] == 0x0438 && ws_out[2] == 0x0440 && ws_out[3] == 0 );
+        CHECK( serialize_read_end( &r ) );
 
         CHECK( !serialize_read_error( &r ) );
-        CHECK( serialize_read_bits_processed( &r ) == serialize_write_bits_processed( &w ) );
+        CHECK( serialize_read_bits_processed( &r ) == serialize_write_bytes_processed( &w ) * 8 );
     }
 
     printf( "wide: OK (%d bytes)\n", n );

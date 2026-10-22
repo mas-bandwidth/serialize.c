@@ -161,7 +161,7 @@ int main( void )
         serialize_uint8_t u8 = 0; serialize_uint16_t u16 = 0; serialize_uint32_t u32 = 0;
         serialize_uint64_t u64 = 0; serialize_int64_t i64 = 0;
         float fv = 0.0f, cf = 0.0f; double dv = 0.0;
-        serialize_uint8_t blob[5];
+        serialize_uint8_t blob[5] = { 0, 0, 0, 0, 0 };
         char str[64];
         serialize_int32_t rel = 0;
 
@@ -186,7 +186,7 @@ int main( void )
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
 
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_bits( &r, &b3, 3 ) );      CHECK( b3 == 5 );
         CHECK( serialize_read_bool( &r, &t ) );          CHECK( t == 1 );
         CHECK( serialize_read_bool( &r, &f ) );          CHECK( f == 0 );
@@ -222,7 +222,7 @@ int main( void )
             serialize_write_int_relative( &w, 1000, 1000 + deltas[i] );
             serialize_write_flush( &w );
             CHECK( !serialize_write_error( &w ) );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( serialize_read_int_relative( &r, 1000, &got ) );
             CHECK( got == 1000 + deltas[i] );
         }
@@ -239,7 +239,7 @@ int main( void )
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
         serialize_write_bits( &w, 127, 7 );          /* 127 is outside [0,100] */
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
         CHECK( serialize_read_error( &r ) );
 
@@ -248,7 +248,7 @@ int main( void )
         serialize_write_bits( &w, 1, 1 );
         serialize_write_bits( &w, 0x7F, 7 );         /* padding that is not zero */
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         { serialize_uint32_t one = 0; CHECK( serialize_read_bits( &r, &one, 1 ) ); }
         CHECK( !serialize_read_align( &r ) );
         CHECK( serialize_read_error( &r ) );
@@ -354,7 +354,7 @@ int main( void )
         CHECK( serialize_write_bits_processed( &w ) == 32 );
         serialize_write_flush( &w );
 
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 1.0e9f, 0.0001f ) );
         CHECK( !serialize_read_error( &r ) );
     }
@@ -377,7 +377,7 @@ int main( void )
         CHECK( serialize_write_compressed_float( &w, 8388609.0f, 0.0f, 8388609.0f, 1.0f ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 8388609.0f, 1.0f ) );
         CHECK( !serialize_read_error( &r ) );
         CHECK( out == 8388609.0f );
@@ -390,7 +390,7 @@ int main( void )
         CHECK( serialize_write_compressed_float( &w, 16777215.0f, 0.0f, 16777215.0f, 1.0f ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 16777215.0f, 1.0f ) );
         CHECK( !serialize_read_error( &r ) );
         CHECK( out == 16777215.0f );
@@ -414,7 +414,7 @@ int main( void )
         serialize_write_bits( &w, 127, 7 );                  /* outside [0,100] */
         serialize_write_bits( &w, 0xAB, 8 );                 /* and a valid field behind it */
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
         CHECK( serialize_read_error( &r ) );
         CHECK( !serialize_read_bits( &r, &raw, 8 ) );        /* the field behind it must NOT be readable */
@@ -427,7 +427,7 @@ int main( void )
         serialize_write_bits( &w, 0x7F, 7 );
         serialize_write_bits( &w, 0xCD, 8 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_bits( &r, &raw, 1 ) );
         CHECK( !serialize_read_align( &r ) );
         CHECK( serialize_read_error( &r ) );
@@ -486,7 +486,7 @@ int main( void )
         serialize_write_bits( &w, 127, 7 );
         serialize_write_bits( &w, 0xAB, 8 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
         CHECK( latched( &r ) );
 
@@ -496,7 +496,7 @@ int main( void )
         serialize_write_bits( &w, 0x7F, 7 );
         serialize_write_bits( &w, 0xCD, 8 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_bits( &r, &raw, 1 ) );
         CHECK( !serialize_read_align( &r ) );
         CHECK( latched( &r ) );
@@ -507,7 +507,7 @@ int main( void )
         { static const unsigned char bad[1] = { 0x80 };
           serialize_write_bytes( &w, bad, 1 ); }
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_string( &r, str_out, 64 ) );
         CHECK( latched( &r ) );
 
@@ -518,7 +518,7 @@ int main( void )
             serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
             serialize_write_bool( &w, 1 );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( !serialize_read_int_relative( &r, 2147483647, &rel ) );
             CHECK( rel == 0x1B1B1B1 );                  /* refused, so unwritten */
             CHECK( latched( &r ) );
@@ -544,7 +544,8 @@ int main( void )
 
         /* explicit latch on a fresh stream */
         serialize_read_stream_init( &r, buffer, 4 );
-        CHECK( !serialize_read_fail( &r ) );
+        CHECK( !serialize_read_fail( &r, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE ) );
+        CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
         CHECK( degenerate_latched( &r ) );
 
         /* latched by running past the end */
@@ -557,7 +558,7 @@ int main( void )
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
         serialize_write_bits( &w, 127, 7 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         {
             serialize_int32_t v = 0;
             CHECK( !serialize_read_int( &r, &v, 0, 100 ) );
@@ -568,7 +569,7 @@ int main( void )
            and the latch brings it back, over and over, so the poison is a
            FIXED POINT rather than a value that climbs */
         serialize_read_stream_init( &r, buffer, 4 );
-        CHECK( !serialize_read_fail( &r ) );
+        CHECK( !serialize_read_fail( &r, SERIALIZE_REFUSAL_PAST_END ) );
         poison = serialize_read_bits_processed( &r );
         CHECK( serialize_read_bits_remaining( &r ) == -1 );
         for ( i = 0; i < 1000; i++ )
@@ -586,7 +587,7 @@ int main( void )
             There is a measure counterpart for every write operation, and the
             README says so; this is what makes that true rather than claimed.
             The variable-width ones matter most -- int_relative picks its tier
-            from the difference and wstring its length field from the buffer
+            from the difference and string its length field from the buffer
             size, so neither can be worked around with measure_bits by a
             caller who does not want to reimplement the ladder. ---- */
     {
@@ -597,10 +598,7 @@ int main( void )
         serialize_int128_t widelo = serialize_int128_make( 0xFFFFFFF000000000ULL, 0x0000000000000000ULL );
         serialize_int128_t widehi = serialize_int128_make( 0x0000001000000000ULL, 0x0000000000000000ULL );
         serialize_int128_t wideval = serialize_int128_make( 0x0000000F23456789ULL, 0xABCDEF0123456789ULL );
-        wchar_t ws[8];
         int i;
-
-        ws[0] = 0x043C; ws[1] = 0x0438; ws[2] = 0x0440; ws[3] = 0;
 
         MEASURED( serialize_write_bits( &w, 5, 3 ),  serialize_measure_bits( &m, 3 ), 0 );
         MEASURED( serialize_write_bool( &w, 1 ),     serialize_measure_bool( &m ), 0 );
@@ -638,11 +636,8 @@ int main( void )
                   serialize_measure_string( &m, "the quick brown fox", 64 ), 0 );
         MEASURED( serialize_write_string( &w, "", 64 ), serialize_measure_string( &m, "", 64 ), 0 );
 
-        /* wstring deliberately never aligns, so it must still measure EXACTLY */
-        MEASURED( serialize_write_wstring( &w, ws, 8 ),  serialize_measure_wstring( &m, ws, 8 ), 0 );
-        ws[0] = 0;
-        MEASURED( serialize_write_wstring( &w, ws, 8 ),  serialize_measure_wstring( &m, ws, 8 ), 0 );
-        ws[0] = 0x043C;
+        /* an end emits nothing and costs nothing */
+        MEASURED( serialize_write_end( &w ),  serialize_measure_end( &m ), 0 );
 
         MEASURED( serialize_write_uint128( &w, serialize_uint128_make( 0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL ) ),
                   serialize_measure_uint128( &m ), 0 );
@@ -685,7 +680,6 @@ int main( void )
         CHECK( serialize_write_align( &w ) );                 CHECK( serialize_measure_align( &m ) );
         CHECK( serialize_write_bytes( &w, src, 3 ) );         CHECK( serialize_measure_bytes( &m, 3 ) );
         CHECK( serialize_write_string( &w, "fox", 64 ) );     CHECK( serialize_measure_string( &m, "fox", 64 ) );
-        CHECK( serialize_write_wstring( &w, ws, 8 ) );        CHECK( serialize_measure_wstring( &m, ws, 8 ) );
         CHECK( serialize_write_fixed64( &w, 65536, 48, 16, -1000000, 1000000 ) );
         CHECK( serialize_measure_fixed64( &m, 48, 16, -1000000, 1000000 ) );
         CHECK( serialize_write_compressed_float( &w, 0.5f, 0.0f, 1.0f, 0.01f ) );
@@ -708,20 +702,17 @@ int main( void )
            test/assertdeath.c proves each of those asserts fires. */
     }
 
-    /* ---- 128-bit, fixed point and wide strings ---- */
+    /* ---- 128-bit and fixed point ---- */
     {
         serialize_uint128_t u = serialize_uint128_make( 0x0123456789ABCDEFULL, 0xFEDCBA9876543210ULL );
-        serialize_uint128_t u_out;
+        serialize_uint128_t u_out = { 0, 0 };
         serialize_int128_t i_in = serialize_int128_from_int64( -1234567890123LL );
         serialize_int128_t i_out;
         serialize_int128_t lo = serialize_int128_from_int64( -2000000000000LL );
         serialize_int128_t hi = serialize_int128_from_int64( 2000000000000LL );
         serialize_int32_t f32 = 0;
         serialize_int64_t f64 = 0;
-        serialize_int128_t f128;
-        wchar_t ws_in[8], ws_out[8];
-
-        ws_in[0] = 0x043C; ws_in[1] = 0x0438; ws_in[2] = 0x0440; ws_in[3] = 0;
+        serialize_int128_t f128 = { 0, 0 };
 
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
         serialize_write_uint128( &w, u );
@@ -729,11 +720,10 @@ int main( void )
         serialize_write_fixed32( &w, 100 * 65536, 16, 16, -180, 180 );
         serialize_write_fixed64( &w, -5000LL * 65536, 48, 16, -1000000, 1000000 );
         serialize_write_fixed128( &w, serialize_int128_from_int64( 777LL * 65536 ), 112, 16, -1000000, 1000000 );
-        serialize_write_wstring( &w, ws_in, 8 );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
 
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_uint128( &r, &u_out ) );
         CHECK( serialize_uint128_equal( u_out, u ) );
         CHECK( serialize_read_int128( &r, &i_out, lo, hi ) );
@@ -744,8 +734,7 @@ int main( void )
         CHECK( f64 == -5000LL * 65536 );
         CHECK( serialize_read_fixed128( &r, &f128, 112, 16, -1000000, 1000000 ) );
         CHECK( serialize_int128_equal( f128, serialize_int128_from_int64( 777LL * 65536 ) ) );
-        CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
-        CHECK( ws_out[0] == 0x043C && ws_out[1] == 0x0438 && ws_out[2] == 0x0440 && ws_out[3] == 0 );
+        CHECK( serialize_read_end( &r ) );
         CHECK( !serialize_read_error( &r ) );
 
         /* fixed point is EXACT -- that is the whole reason it exists, so a
@@ -756,7 +745,7 @@ int main( void )
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
         serialize_write_fixed32( &w, 12345, 32, 0, 0, 1000000 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_fixed32( &r, &f32, 32, 0, 0, 1000000 ) );
         CHECK( f32 == 12345 );
 
@@ -765,121 +754,18 @@ int main( void )
         serialize_write_bits( &w, 0xFFFFFFFFu, 32 );
         serialize_write_bits( &w, 0xFFFFFFFFu, 32 );
         serialize_write_flush( &w );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( !serialize_read_int128( &r, &i_out, lo, hi ) );
         CHECK( serialize_read_error( &r ) );
     }
 
-    /* ---- wstring transmits UTF-16 CODE UNITS: an astral code point is a
-            surrogate pair on the wire, and 2- and 4-byte wchar_t platforms
-            produce IDENTICAL bytes -- the 4-byte platform converts at the
-            boundary (STANDARD.md, adopted 2026-08-15). The input is built per
-            the local width, the expected bytes are the code-unit stream
-            spelled out directly, and the two must agree everywhere. ---- */
-    {
-        const int wide_wchar = sizeof( wchar_t ) >= 4 ? 1 : 0;
-        serialize_uint8_t expected_buffer[64];
-        serialize_write_stream_t we;
-        serialize_measure_stream_t m;
-        serialize_uint32_t astral = 0x1F600u;           /* U+1F600, the pair 0xD83D 0xDE00 */
-        wchar_t ws_in[8];
-        wchar_t ws_out[8];
-        int n;
-
-        if ( wide_wchar )
-        {
-            ws_in[0] = (wchar_t) astral;                /* one character, two units */
-            ws_in[1] = (wchar_t) 0x0041;
-            ws_in[2] = 0;
-        }
-        else
-        {
-            ws_in[0] = (wchar_t) 0xD83Du;               /* already the pair: 2-byte wchar_t IS UTF-16 */
-            ws_in[1] = (wchar_t) 0xDE00u;
-            ws_in[2] = (wchar_t) 0x0041;
-            ws_in[3] = 0;
-        }
-
-        /* the wire, spelled out: three units in a [0,7] length field, then
-           each unit as a 32-bit group */
-        serialize_write_stream_init( &we, expected_buffer, sizeof( expected_buffer ) );
-        CHECK( serialize_write_int( &we, 3, 0, 7 ) );
-        CHECK( serialize_write_bits( &we, 0xD83Du, 32 ) );
-        CHECK( serialize_write_bits( &we, 0xDE00u, 32 ) );
-        CHECK( serialize_write_bits( &we, 0x0041u, 32 ) );
-        serialize_write_flush( &we );
-        CHECK( !serialize_write_error( &we ) );
-
-        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
-        CHECK( serialize_write_wstring( &w, ws_in, 8 ) );
-        serialize_write_flush( &w );
-        CHECK( !serialize_write_error( &w ) );
-        n = serialize_write_bytes_processed( &w );
-        CHECK( n == serialize_write_bytes_processed( &we ) );
-        CHECK( memcmp( buffer, expected_buffer, (size_t) n ) == 0 );
-
-        /* the measure counts the units transmitted, not the characters held */
-        serialize_measure_stream_init( &m );
-        CHECK( serialize_measure_wstring( &m, ws_in, 8 ) );
-        CHECK( serialize_measure_bits_processed( &m ) == serialize_write_bits_processed( &w ) );
-
-        /* and the read arrives back at the platform's own representation:
-           recombined on 4-byte wchar_t, the pair itself on 2-byte */
-        serialize_read_stream_init( &r, buffer, n );
-        CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
-        CHECK( !serialize_read_error( &r ) );
-        if ( wide_wchar )
-        {
-            CHECK( ws_out[0] == ws_in[0] && ws_out[1] == ws_in[1] && ws_out[2] == 0 );
-        }
-        else
-        {
-            CHECK( ws_out[0] == ws_in[0] && ws_out[1] == ws_in[1] && ws_out[2] == ws_in[2] && ws_out[3] == 0 );
-        }
-    }
-
-    /* ---- security#32: serialize_measure_wstring bit count widening ----
-       At >= 2^26 units, multiplying units * 32 in signed 32-bit int overflows
-       and returns a negative bit count (caught by UBSan). Widening units
-       to serialize_int64_t before multiplication prevents overflow and
-       matches the 64-bit bits_written counter. */
-    {
-        const size_t unit_count = (size_t) 1 << 26;  /* 67,108,864 units: 67108864 * 32 = 2^31 */
-        const int buffer_size = (int) unit_count + 1;
-        wchar_t * huge_ws;
-        serialize_measure_stream_t m;
-        size_t idx;
-        serialize_int64_t expected_bits;
-
-        huge_ws = (wchar_t *) malloc( ( unit_count + 1 ) * sizeof( wchar_t ) );
-        CHECK( huge_ws != NULL );
-        if ( huge_ws != NULL )
-        {
-            for ( idx = 0; idx < unit_count; idx++ )
-            {
-                huge_ws[idx] = (wchar_t) 'a';
-            }
-            huge_ws[unit_count] = 0;
-
-            serialize_measure_stream_init( &m );
-            CHECK( serialize_measure_wstring( &m, huge_ws, buffer_size ) );
-            expected_bits = (serialize_int64_t) serialize_bits_required( 0, (serialize_uint32_t) ( buffer_size - 1 ) )
-                          + ( (serialize_int64_t) unit_count * 32 );
-            CHECK( serialize_measure_bits_processed( &m ) == expected_bits );
-            CHECK( serialize_measure_bits_processed( &m ) > 0 );
-
-            free( huge_ws );
-        }
-    }
-
     /* ---- the read path refuses malformed string CONTENT (ruling #8,
-            adopted 2026-08-15): (a) invalid UTF-8, (b) an interior NUL in a
-            narrow string, (c) unpaired/invalid surrogates in a wide string,
-            (d) an interior zero unit in a wide string.
+            adopted 2026-08-15): (a) invalid UTF-8, refused as invalid_utf8,
+            and (b) an interior NUL, refused as embedded_nul.
 
             Every stream here is DOCTORED through the primitives -- write_int
             for the length, then write_bytes/write_bits for the payload --
-            because write_string/write_wstring debug-assert these contracts
+            because write_string debug-asserts these contracts
             away and could never produce the bytes. The wire shape is exactly
             what the reader parses; only the content is hostile. And every
             refusal class is fenced by an accepted neighbor as close to the
@@ -888,7 +774,6 @@ int main( void )
             bug. ---- */
     {
         char str_out[64];
-        wchar_t ws_out[8];
         int k;
 
         /* (a) invalid UTF-8, one payload per malformation class. All are
@@ -915,9 +800,10 @@ int main( void )
                 CHECK( serialize_write_int( &w, bad_utf8[k].length, 0, 63 ) );
                 CHECK( serialize_write_bytes( &w, bad_utf8[k].byte, bad_utf8[k].length ) );
                 serialize_write_flush( &w );
-                serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+                serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
                 CHECK( !serialize_read_string( &r, str_out, 64 ) );
                 CHECK( serialize_read_error( &r ) );
+                CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_INVALID_UTF8 );
             }
         }
 
@@ -940,7 +826,7 @@ int main( void )
             CHECK( serialize_write_int( &w, good_length, 0, 63 ) );
             CHECK( serialize_write_bytes( &w, good_utf8, good_length ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( serialize_read_string( &r, str_out, 64 ) );
             CHECK( !serialize_read_error( &r ) );
             CHECK( (int) strlen( str_out ) == good_length );
@@ -960,104 +846,18 @@ int main( void )
             CHECK( serialize_write_int( &w, 3, 0, 63 ) );
             CHECK( serialize_write_bytes( &w, nul_inside, 3 ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( !serialize_read_string( &r, str_out, 64 ) );
             CHECK( serialize_read_error( &r ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_EMBEDDED_NUL );
 
             serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
             CHECK( serialize_write_int( &w, 3, 0, 63 ) );
             CHECK( serialize_write_bytes( &w, nul_fence, 3 ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( serialize_read_string( &r, str_out, 64 ) );
             CHECK( strcmp( str_out, "A B" ) == 0 );
-        }
-
-        /* (c) unpaired/invalid surrogates in a wide string, every ordering:
-           high without its low, low with no high before it, a payload that
-           ends inside a pair, and a group that is not a UTF-16 code unit at
-           all -- refused on BOTH wchar_t widths now, not just where wchar_t
-           cannot hold the value. */
-        {
-            static const struct { serialize_uint32_t unit[3]; int units; } bad_utf16[] =
-            {
-                { { 0xD83Du, 0x0041u, 0 }, 2 },     /* high surrogate, then a non-low */
-                { { 0xDE00u, 0x0041u, 0 }, 2 },     /* low surrogate with no high */
-                { { 0x0041u, 0xD83Du, 0 }, 2 },     /* payload ends inside a pair */
-                { { 0xD83Du, 0xD83Du, 0 }, 2 },     /* high followed by another high */
-                { { 0x110000u, 0, 0 },     1 },     /* not a UTF-16 code unit */
-                { { 0xFFFFFFFFu, 0, 0 },   1 }      /* not a UTF-16 code unit */
-            };
-            int j;
-            for ( k = 0; k < (int) ( sizeof( bad_utf16 ) / sizeof( bad_utf16[0] ) ); k++ )
-            {
-                serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
-                CHECK( serialize_write_int( &w, bad_utf16[k].units, 0, 7 ) );
-                for ( j = 0; j < bad_utf16[k].units; j++ )
-                {
-                    CHECK( serialize_write_bits( &w, bad_utf16[k].unit[j], 32 ) );
-                }
-                serialize_write_flush( &w );
-                serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
-                CHECK( !serialize_read_wstring( &r, ws_out, 8 ) );
-                CHECK( serialize_read_error( &r ) );
-            }
-        }
-
-        /* the accepted fence for (c): the boundary units around every
-           refusal -- 0xD7FF and 0xE000 hugging the surrogate block, 0xFFFF
-           the last code unit, and a correctly ordered pair -- doctored
-           through the same primitives, must be accepted and arrive as the
-           platform's own representation */
-        {
-            const int wide_wchar = sizeof( wchar_t ) >= 4 ? 1 : 0;
-            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
-            CHECK( serialize_write_int( &w, 5, 0, 7 ) );
-            CHECK( serialize_write_bits( &w, 0xD7FFu, 32 ) );
-            CHECK( serialize_write_bits( &w, 0xE000u, 32 ) );
-            CHECK( serialize_write_bits( &w, 0xFFFFu, 32 ) );
-            CHECK( serialize_write_bits( &w, 0xD83Du, 32 ) );
-            CHECK( serialize_write_bits( &w, 0xDE00u, 32 ) );
-            serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
-            CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
-            CHECK( !serialize_read_error( &r ) );
-            CHECK( ws_out[0] == (wchar_t) 0xD7FF && ws_out[1] == (wchar_t) 0xE000 && ws_out[2] == (wchar_t) 0xFFFF );
-            if ( wide_wchar )
-            {
-                CHECK( (serialize_uint32_t) ws_out[3] == 0x1F600u && ws_out[4] == 0 );
-            }
-            else
-            {
-                CHECK( ws_out[3] == (wchar_t) 0xD83Du && ws_out[4] == (wchar_t) 0xDE00u && ws_out[5] == 0 );
-            }
-        }
-
-        /* (d) an interior zero unit in a wide string: the wire says 3
-           units, wcslen would say 1 -- the same smuggling primitive as (b),
-           in units instead of bytes. The fence is the same three units with
-           the zero replaced. */
-        {
-            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
-            CHECK( serialize_write_int( &w, 3, 0, 7 ) );
-            CHECK( serialize_write_bits( &w, 0x0041u, 32 ) );
-            CHECK( serialize_write_bits( &w, 0x0000u, 32 ) );
-            CHECK( serialize_write_bits( &w, 0x0042u, 32 ) );
-            serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
-            CHECK( !serialize_read_wstring( &r, ws_out, 8 ) );
-            CHECK( serialize_read_error( &r ) );
-
-            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
-            CHECK( serialize_write_int( &w, 3, 0, 7 ) );
-            CHECK( serialize_write_bits( &w, 0x0041u, 32 ) );
-            CHECK( serialize_write_bits( &w, 0x0020u, 32 ) );
-            CHECK( serialize_write_bits( &w, 0x0042u, 32 ) );
-            serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
-            CHECK( serialize_read_wstring( &r, ws_out, 8 ) );
-            CHECK( !serialize_read_error( &r ) );
-            CHECK( ws_out[0] == (wchar_t) 0x41 && ws_out[1] == (wchar_t) 0x20 && ws_out[2] == (wchar_t) 0x42 && ws_out[3] == 0 );
         }
 
         /* refusal is the standard read-failure convention: sticky */
@@ -1069,32 +869,30 @@ int main( void )
               CHECK( serialize_write_bytes( &w, bad, 1 ) ); }
             CHECK( serialize_write_int( &w, 7, 0, 100 ) );
             serialize_write_flush( &w );
-            serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( !serialize_read_string( &r, str_out, 64 ) );
             CHECK( !serialize_read_int( &r, &v, 0, 100 ) );         /* the in-range int behind it is unreachable */
             CHECK( serialize_read_error( &r ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_INVALID_UTF8 );   /* the first reason, not the echo */
         }
     }
 
     /* ---- valid string round trips through the PUBLIC writer are unchanged
-            by the refusals: multi-byte UTF-8 through write_string, an astral
-            pair through write_wstring (the latter also proven above and in
-            the code-unit block) ---- */
+            by the refusals: multi-byte UTF-8 through write_string ---- */
     {
-        static const char cafe[] = { (char) 0x63, (char) 0x61, (char) 0x66,
-                                     (char) 0xC3, (char) 0xA9,                                  /* "café" */
-                                     (char) 0x20,
-                                     (char) 0xE2, (char) 0x82, (char) 0xAC,                     /* the euro sign */
-                                     (char) 0x20,
-                                     (char) 0xF0, (char) 0x9F, (char) 0x98, (char) 0x80,        /* U+1F600 */
-                                     (char) 0x00 };
+        static const char cafe[] = "caf"
+                                   "\xC3\xA9"              /* "café" */
+                                   " "
+                                   "\xE2\x82\xAC"          /* the euro sign */
+                                   " "
+                                   "\xF0\x9F\x98\x80";     /* U+1F600 */
         char str_out[64];
 
         serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
         CHECK( serialize_write_string( &w, cafe, 64 ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        serialize_read_stream_init( &r, buffer, serialize_write_bytes_processed( &w ) );
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
         CHECK( serialize_read_string( &r, str_out, 64 ) );
         CHECK( !serialize_read_error( &r ) );
         CHECK( strcmp( str_out, cafe ) == 0 );
@@ -1102,11 +900,10 @@ int main( void )
 
     /* ---- the buffer-fit rule sees the caller's UNTRUNCATED length ----
 
-            serialize_length_fits_buffer is the one home of the rule the four
-            string entry points assert -- serialize_write_string,
-            serialize_measure_string, serialize_write_wstring and
-            serialize_measure_wstring -- and it takes the length as size_t, the
-            width strlen and the wide unit counter produce, so it runs BEFORE
+            serialize_length_fits_buffer is the one home of the rule the two
+            string entry points assert -- serialize_write_string and
+            serialize_measure_string -- and it takes the length as size_t, the
+            width strlen produces, so it runs BEFORE
             the length is narrowed to the int the length field carries. A check
             placed after that narrowing is handed a value the narrowing already
             made legal: a string of 2^32 + 5 bytes arrives as 5, which fits any
@@ -1165,7 +962,7 @@ int main( void )
         CHECK( serialize_write_bits( &w, 0x155u, 9 ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        n = serialize_write_bytes_processed( &w );
+        n = (int) serialize_write_bytes_processed( &w );
 
         /* accept path: identical decode with a zeroed tail and a poisoned tail */
         {
@@ -1252,7 +1049,7 @@ int main( void )
         CHECK( serialize_write_bits( &w, 0x155u, 9 ) );
         serialize_write_flush( &w );
         CHECK( !serialize_write_error( &w ) );
-        n = serialize_write_bytes_processed( &w );
+        n = (int) serialize_write_bytes_processed( &w );
         CHECK( n % 8 != 0 );
 
         memset( direct, 0, sizeof( direct ) );
@@ -1349,6 +1146,7 @@ int main( void )
 
             /* failed before the first read, and nothing was copied */
             CHECK( serialize_read_error( &sm ) );
+            CHECK( serialize_read_refusal( &sm ) == SERIALIZE_REFUSAL_PAST_END );     /* as the C++ InitializePadded reports it */
             for ( j = 0; j < (int) sizeof( undersized ); j++ )
             {
                 CHECK( undersized[j] == 0xFF );
@@ -1376,10 +1174,315 @@ int main( void )
             CHECK( memcmp( undersized, exact, sizeof( undersized ) - 8 ) == 0 );
             for ( j = 0; j < 8; j++ )
             {
-                CHECK( undersized[ sizeof( undersized ) - 8 + j ] == 0 );
+                CHECK( undersized[ sizeof( undersized ) - 8 + (size_t) j ] == 0 );
             }
         }
 #endif /* NDEBUG */
+    }
+
+    /* ---- format 2.0: every refusal names its reason, the reader refuses
+            non-finite floats and a non-finite compressed decode, the
+            absolute int_relative tier is canonical, and a reader ends the
+            object with serialize_read_end. The conformance corpus pins each
+            rule with vectors and `make controls` deletes each one and
+            watches the corpus go red; these are the same rules seen from
+            the API, with the accessor, the destination and the latch in
+            view. ---- */
+    {
+        serialize_uint8_t fbuf[64 + 8];             /* + 8: read buffer allocations extend 8 bytes past the data */
+        int k;
+
+        /* the closed list, spelled as STANDARD.md and the corpus spell it */
+        CHECK( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_NONE ), "none" ) == 0 );
+        CHECK( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_PAST_END ), "past_end" ) == 0 );
+        CHECK( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE ), "value_out_of_range" ) == 0 );
+        CHECK( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_NONZERO_PADDING ), "nonzero_padding" ) == 0 );
+        CHECK( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_TRAILING_DATA ), "trailing_data" ) == 0 );
+        CHECK( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_NON_FINITE_FLOAT ), "non_finite_float" ) == 0 );
+        CHECK( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_INVALID_UTF8 ), "invalid_utf8" ) == 0 );
+        CHECK( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_EMBEDDED_NUL ), "embedded_nul" ) == 0 );
+        CHECK( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_NON_CANONICAL ), "non_canonical" ) == 0 );
+        CHECK( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_NUM_REASONS ), "unknown" ) == 0 );
+
+        /* a fresh stream has refused nothing, and re-initializing a failed
+           one clears its reason with its latch */
+        serialize_read_stream_init( &r, fbuf, 0 );
+        CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_NONE );
+        CHECK( !serialize_read_bool( &r, &k ) );
+        CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_PAST_END );
+        serialize_read_stream_init( &r, fbuf, 0 );
+        CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_NONE );
+        CHECK( !serialize_read_error( &r ) );
+
+        /* float: every non-finite pattern is refused as non_finite_float with
+           the destination untouched, and its finite neighbours -- the largest
+           finite magnitude, -0 and the smallest subnormal -- come back bit
+           exact. The refusal is on the raw bits, so a signaling NaN cannot
+           be quieted into something else first. */
+        {
+            static const serialize_uint32_t refused[] = { 0x7F800000UL, 0xFF800000UL, 0x7FC00000UL, 0xFFC00000UL, 0x7F800001UL, 0x7FBFFFFFUL, 0xFFFFFFFFUL };
+            static const serialize_uint32_t accepted[] = { 0x7F7FFFFFUL, 0xFF7FFFFFUL, 0x80000000UL, 0x00000001UL, 0x807FFFFFUL, 0x00000000UL };
+            for ( k = 0; k < (int) ( sizeof( refused ) / sizeof( refused[0] ) ); k++ )
+            {
+                float out = 42.0f;
+                serialize_write_stream_init( &w, fbuf, 64 );
+                CHECK( serialize_write_bits( &w, refused[k], 32 ) );      /* doctored: write_float asserts finite */
+                serialize_write_flush( &w );
+                serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) );
+                CHECK( !serialize_read_float( &r, &out ) );
+                CHECK( out == 42.0f );
+                CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_NON_FINITE_FLOAT );
+                CHECK( latched( &r ) );
+                CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_NON_FINITE_FLOAT );   /* the echoes keep the first reason */
+            }
+            for ( k = 0; k < (int) ( sizeof( accepted ) / sizeof( accepted[0] ) ); k++ )
+            {
+                float in, out = 42.0f;
+                serialize_uint32_t bits = 0;
+                memcpy( &in, &accepted[k], 4 );
+                serialize_write_stream_init( &w, fbuf, 64 );
+                CHECK( serialize_write_float( &w, in ) );
+                serialize_write_flush( &w );
+                serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) );
+                CHECK( serialize_read_float( &r, &out ) );
+                memcpy( &bits, &out, 4 );
+                CHECK( bits == accepted[k] );
+                CHECK( serialize_read_end( &r ) );
+            }
+        }
+
+        /* double: the same at 64 bits, the payload in the low group alone
+           included, which a reader that tests only the high group misses */
+        {
+            static const serialize_uint32_t refused_hi[] = { 0x7FF00000UL, 0xFFF00000UL, 0x7FF80000UL, 0x7FF00000UL, 0xFFFFFFFFUL };
+            static const serialize_uint32_t refused_lo[] = { 0x00000000UL, 0x00000000UL, 0x00000000UL, 0x00000001UL, 0xFFFFFFFFUL };
+            for ( k = 0; k < (int) ( sizeof( refused_hi ) / sizeof( refused_hi[0] ) ); k++ )
+            {
+                double out = 42.0;
+                serialize_write_stream_init( &w, fbuf, 64 );
+                CHECK( serialize_write_bits( &w, refused_lo[k], 32 ) );
+                CHECK( serialize_write_bits( &w, refused_hi[k], 32 ) );
+                serialize_write_flush( &w );
+                serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) );
+                CHECK( !serialize_read_double( &r, &out ) );
+                CHECK( out == 42.0 );
+                CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_NON_FINITE_FLOAT );
+            }
+            {
+                /* the largest finite double and -0, bit exact */
+                double in, out = 42.0;
+                serialize_uint64_t bits_in = ( (serialize_uint64_t) 0x7FEFFFFFUL << 32 ) | 0xFFFFFFFFUL;
+                serialize_uint64_t bits_out = 0;
+                memcpy( &in, &bits_in, 8 );
+                serialize_write_stream_init( &w, fbuf, 64 );
+                CHECK( serialize_write_double( &w, in ) );
+                CHECK( serialize_write_double( &w, -0.0 ) );
+                serialize_write_flush( &w );
+                serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) );
+                CHECK( serialize_read_double( &r, &out ) );
+                memcpy( &bits_out, &out, 8 );
+                CHECK( bits_out == bits_in );
+                CHECK( serialize_read_double( &r, &out ) );
+                memcpy( &bits_out, &out, 8 );
+                CHECK( bits_out == ( (serialize_uint64_t) 1 << 63 ) );
+                CHECK( serialize_read_end( &r ) );
+            }
+        }
+
+        /* compressed float: over [3 * 2^103, FLT_MAX] at resolution 2^104 the
+           top integer, 2^24 - 2, decodes to +inf and is refused with the
+           destination untouched; the integer below it decodes finite. The
+           declaration is non-conforming, so its WRITE asserts -- the read
+           asserts nothing and refuses. Doctored through write_bits. */
+        {
+            const float min = 30423614405477505635920876929024.0f;     /* 3 * 2^103 */
+            const float max = 340282346638528859811704183484516925440.0f;
+            const float res = 20282409603651670423947251286016.0f;     /* 2^104 */
+            float out = 42.0f;
+            serialize_uint32_t bits = 0;
+
+            serialize_write_stream_init( &w, fbuf, 64 );
+            CHECK( serialize_write_bits( &w, 0xFFFFFEu, 24 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) );
+            CHECK( !serialize_read_compressed_float( &r, &out, min, max, res ) );
+            CHECK( out == 42.0f );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_NON_FINITE_FLOAT );
+
+            serialize_write_stream_init( &w, fbuf, 64 );
+            CHECK( serialize_write_bits( &w, 0xFFFFFDu, 24 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) );
+            CHECK( serialize_read_compressed_float( &r, &out, min, max, res ) );
+            memcpy( &bits, &out, 4 );
+            CHECK( bits == 0x7F7FFFFEUL );
+            CHECK( serialize_read_end( &r ) );
+        }
+
+        /* int_relative: the absolute tier carrying a difference a bounded
+           tier would take is non_canonical; the first difference past the
+           last tier is accepted; and the domain rule decides first, so a
+           current outside the domain is value_out_of_range even with a
+           small difference. Each case writes the absolute tier by hand:
+           six zero flags, then current as 32 raw bits. */
+        {
+            static const struct { serialize_int32_t previous; serialize_uint32_t current; serialize_refusal_t expected; } cases[] =
+            {
+                { 100, 101, SERIALIZE_REFUSAL_NON_CANONICAL },                      /* the one-bit tier's difference */
+                { 100, 100 + 69914, SERIALIZE_REFUSAL_NON_CANONICAL },              /* the last bounded tier's top */
+                { 100, 100 + 69915, SERIALIZE_REFUSAL_NONE },                       /* the first difference only absolute carries */
+                { 100, 100, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE },                 /* not increasing: the domain rule first */
+                { 2147483647 - 5, 2147483648UL, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE } /* outside the domain, though the difference is small */
+            };
+            for ( k = 0; k < (int) ( sizeof( cases ) / sizeof( cases[0] ) ); k++ )
+            {
+                serialize_int32_t current = 0x1B1B1B1;
+                int accepted;
+                serialize_write_stream_init( &w, fbuf, 64 );
+                CHECK( serialize_write_bits( &w, 0, 6 ) );
+                CHECK( serialize_write_bits( &w, cases[k].current, 32 ) );
+                serialize_write_flush( &w );
+                serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) );
+                accepted = serialize_read_int_relative( &r, cases[k].previous, &current );
+                CHECK( accepted == ( cases[k].expected == SERIALIZE_REFUSAL_NONE ) );
+                CHECK( serialize_read_refusal( &r ) == cases[k].expected );
+                if ( accepted )
+                {
+                    CHECK( (serialize_uint32_t) current == cases[k].current );
+                }
+                else
+                {
+                    CHECK( current == 0x1B1B1B1 );
+                }
+            }
+        }
+
+        /* end: an exact stream is accepted, and the cursor lands on its end;
+           a whole byte after the object is trailing_data even when zero, and
+           wins over the padding; a set padding bit is nonzero_padding; the
+           field's own bits are never examined; a failed stream refuses its
+           end with its first reason; and nothing can be read after an end */
+        {
+            serialize_uint32_t field = 0;
+            serialize_int32_t number = 0;
+
+            /* the empty object over the empty stream */
+            serialize_read_stream_init( &r, fbuf, 0 );
+            CHECK( serialize_read_end( &r ) );
+            CHECK( serialize_read_bits_processed( &r ) == 0 );
+
+            /* three bits of field, five of zero padding */
+            fbuf[0] = 0x07;
+            serialize_read_stream_init( &r, fbuf, 1 );
+            CHECK( serialize_read_bits( &r, &field, 3 ) );
+            CHECK( field == 7 );
+            CHECK( serialize_read_end( &r ) );
+            CHECK( serialize_read_bits_processed( &r ) == 8 );
+            CHECK( !serialize_read_bits( &r, &field, 1 ) );                     /* nothing is left */
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_PAST_END );
+
+            /* the lowest and the highest padding bit */
+            fbuf[0] = 0x0D;
+            serialize_read_stream_init( &r, fbuf, 1 );
+            CHECK( serialize_read_bits( &r, &field, 3 ) );
+            CHECK( !serialize_read_end( &r ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_NONZERO_PADDING );
+            fbuf[0] = 0x85;
+            serialize_read_stream_init( &r, fbuf, 1 );
+            CHECK( serialize_read_bits( &r, &field, 3 ) );
+            CHECK( !serialize_read_end( &r ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_NONZERO_PADDING );
+
+            /* a whole zero byte after an unaligned object, padding set too:
+               trailing data is checked first */
+            fbuf[0] = 0x0D; fbuf[1] = 0x00;
+            serialize_read_stream_init( &r, fbuf, 2 );
+            CHECK( serialize_read_bits( &r, &field, 3 ) );
+            CHECK( !serialize_read_end( &r ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_TRAILING_DATA );
+
+            /* one zero byte where the empty object should end */
+            fbuf[0] = 0x00;
+            serialize_read_stream_init( &r, fbuf, 1 );
+            CHECK( !serialize_read_end( &r ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_TRAILING_DATA );
+
+            /* a failed stream refuses its end and keeps the first reason */
+            fbuf[0] = 0x7F;
+            serialize_read_stream_init( &r, fbuf, 1 );
+            CHECK( !serialize_read_int( &r, &number, 0, 100 ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+            CHECK( !serialize_read_end( &r ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+
+            /* a writer's end emits nothing: a whole message written and read
+               with its end, over exactly the bytes the writer reported */
+            serialize_write_stream_init( &w, fbuf, 64 );
+            CHECK( serialize_write_bits( &w, 5, 3 ) );
+            CHECK( serialize_write_string( &w, "end", 8 ) );
+            CHECK( serialize_write_int( &w, 42, 0, 1000 ) );
+            CHECK( serialize_write_end( &w ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) );
+            {
+                char text[8];
+                CHECK( serialize_read_bits( &r, &field, 3 ) );
+                CHECK( serialize_read_string( &r, text, 8 ) );
+                CHECK( serialize_read_int( &r, &number, 0, 1000 ) );
+                CHECK( serialize_read_end( &r ) );
+                CHECK( field == 5 && number == 42 && strcmp( text, "end" ) == 0 );
+            }
+
+            /* the same bytes handed over with one byte too many */
+            fbuf[ serialize_write_bytes_processed( &w ) ] = 0;
+            serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) + 1 );
+            {
+                char text[8];
+                CHECK( serialize_read_bits( &r, &field, 3 ) );
+                CHECK( serialize_read_string( &r, text, 8 ) );
+                CHECK( serialize_read_int( &r, &number, 0, 1000 ) );
+                CHECK( !serialize_read_end( &r ) );
+                CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_TRAILING_DATA );
+            }
+        }
+
+        /* a length claim checked against the remaining bytes BEFORE any copy:
+           this library allocates nothing (the destination is the caller's),
+           and a tiny stream claiming a long payload is refused as past_end
+           with nothing copied -- the string's claimed 200 bytes against the
+           one byte left, and a bytes block of 200 against the same */
+        {
+            static char big[256];
+            static serialize_uint8_t block[256];
+            memset( big, 0x5A, sizeof( big ) );
+            memset( block, 0x5A, sizeof( block ) );
+            serialize_write_stream_init( &w, fbuf, 64 );
+            CHECK( serialize_write_int( &w, 200, 0, 255 ) );
+            CHECK( serialize_write_bits( &w, 0, 8 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, fbuf, (int) serialize_write_bytes_processed( &w ) );
+            CHECK( !serialize_read_string( &r, big, 256 ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_PAST_END );
+            CHECK( big[0] == 0x5A && big[199] == 0x5A );
+
+            fbuf[0] = 0x41;
+            serialize_read_stream_init( &r, fbuf, 1 );
+            CHECK( !serialize_read_bytes( &r, block, 200 ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_PAST_END );
+            CHECK( block[0] == 0x5A && block[199] == 0x5A );
+        }
+
+        /* the align before the payload length: set padding is
+           nonzero_padding even when the payload would also run past the end */
+        {
+            serialize_uint8_t block[4];
+            serialize_uint32_t lead = 0;
+            fbuf[0] = 0x81;                             /* bit 0 is a field, bit 7 set padding */
+            serialize_read_stream_init( &r, fbuf, 1 );
+            CHECK( serialize_read_bits( &r, &lead, 1 ) );
+            CHECK( !serialize_read_bytes( &r, block, 4 ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_NONZERO_PADDING );
+        }
     }
 
     /* ---- NaN through compressed float, in a RELEASE build only.
@@ -1426,7 +1529,7 @@ int main( void )
             CHECK( memcmp( nan_buffer, min_buffer, sizeof( nan_buffer ) ) == 0 );
 
             out = 42.0f;
-            serialize_read_stream_init( &r, nan_buffer, serialize_write_bytes_processed( &w ) );
+            serialize_read_stream_init( &r, nan_buffer, (int) serialize_write_bytes_processed( &w ) );
             CHECK( serialize_read_compressed_float( &r, &out, 0.0f, 10.0f, 0.01f ) );
             CHECK( out == 0.0f );       /* integer 0 reconstructs to min exactly */
         }
