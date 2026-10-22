@@ -410,17 +410,21 @@ static int object_read( serialize_read_stream_t * r, step_t * steps, int count )
 
 static int step_read( serialize_read_stream_t * r, step_t * step )
 {
+    /* every destination is copied back into the step whether the read
+       succeeded or not, so the runner's sentinel check sees exactly what the
+       library left in the caller's variable: a reader that writes its
+       destination and then refuses goes red (STANDARD.md, a refused read
+       leaves its destination unwritten) */
+    int ok;
+
     switch ( step->kind )
     {
         case STEP_BITS:
         {
             serialize_uint64_t value = pattern_lo( step );
-            if ( !serialize_read_bits64( r, &value, (int) step->width ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_bits64( r, &value, (int) step->width );
             set_pattern_lo( step, value );
-            return 1;
+            return ok;
         }
 
         case STEP_BOOL:
@@ -435,23 +439,17 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
         case STEP_INT:
         {
             serialize_int32_t value = (serialize_int32_t) step->number.lo;
-            if ( !serialize_read_int( r, &value, (serialize_int32_t) step->min.lo, (serialize_int32_t) step->max.lo ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_int( r, &value, (serialize_int32_t) step->min.lo, (serialize_int32_t) step->max.lo );
             step->number = serialize_int128_from_int64( (serialize_int64_t) value );
-            return 1;
+            return ok;
         }
 
         case STEP_INT64:
         {
             serialize_int64_t value = (serialize_int64_t) step->number.lo;
-            if ( !serialize_read_int64( r, &value, (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_int64( r, &value, (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo );
             step->number = serialize_int128_from_int64( value );
-            return 1;
+            return ok;
         }
 
         case STEP_INT128:
@@ -460,12 +458,9 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
         case STEP_INT_RELATIVE:
         {
             serialize_int32_t value = (serialize_int32_t) step->number.lo;
-            if ( !serialize_read_int_relative( r, step->previous, &value ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_int_relative( r, step->previous, &value );
             step->number = serialize_int128_from_int64( (serialize_int64_t) value );
-            return 1;
+            return ok;
         }
 
         case STEP_FLOAT:
@@ -473,13 +468,10 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
             serialize_uint32_t bits = (serialize_uint32_t) pattern_lo( step );
             float value;
             memcpy( &value, &bits, 4 );
-            if ( !serialize_read_float( r, &value ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_float( r, &value );
             memcpy( &bits, &value, 4 );
             set_pattern_lo( step, (serialize_uint64_t) bits );
-            return 1;
+            return ok;
         }
 
         case STEP_DOUBLE:
@@ -487,13 +479,10 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
             serialize_uint64_t bits = pattern_lo( step );
             double value;
             memcpy( &value, &bits, 8 );
-            if ( !serialize_read_double( r, &value ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_double( r, &value );
             memcpy( &bits, &value, 8 );
             set_pattern_lo( step, bits );
-            return 1;
+            return ok;
         }
 
         case STEP_COMPRESSED_FLOAT:
@@ -501,13 +490,10 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
             serialize_uint32_t bits = (serialize_uint32_t) pattern_lo( step );
             float value;
             memcpy( &value, &bits, 4 );
-            if ( !serialize_read_compressed_float( r, &value, step->fmin, step->fmax, step->fres ) )
-            {
-                return 0;
-            }
+            ok = serialize_read_compressed_float( r, &value, step->fmin, step->fmax, step->fres );
             memcpy( &bits, &value, 4 );
             set_pattern_lo( step, (serialize_uint64_t) bits );
-            return 1;
+            return ok;
         }
 
         case STEP_BYTES:
@@ -524,24 +510,18 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
             if ( step->fixed_storage == 32 )
             {
                 serialize_int32_t value = (serialize_int32_t) step->number.lo;
-                if ( !serialize_read_fixed32( r, &value, step->integer_bits, step->fraction_bits,
-                                              (serialize_int32_t) step->min.lo, (serialize_int32_t) step->max.lo ) )
-                {
-                    return 0;
-                }
+                ok = serialize_read_fixed32( r, &value, step->integer_bits, step->fraction_bits,
+                                              (serialize_int32_t) step->min.lo, (serialize_int32_t) step->max.lo );
                 step->number = serialize_int128_from_int64( (serialize_int64_t) value );
-                return 1;
+                return ok;
             }
             if ( step->fixed_storage == 64 )
             {
                 serialize_int64_t value = (serialize_int64_t) step->number.lo;
-                if ( !serialize_read_fixed64( r, &value, step->integer_bits, step->fraction_bits,
-                                              (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo ) )
-                {
-                    return 0;
-                }
+                ok = serialize_read_fixed64( r, &value, step->integer_bits, step->fraction_bits,
+                                              (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo );
                 step->number = serialize_int128_from_int64( value );
-                return 1;
+                return ok;
             }
             return serialize_read_fixed128( r, &step->number, step->integer_bits, step->fraction_bits,
                                             (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo );
@@ -1361,6 +1341,7 @@ static int build_steps( const vector_t * v, step_t * steps, int * out_count )
 static void fail_unless_stream_is_terminal( const vector_t * v, serialize_read_stream_t * r )
 {
     serialize_uint32_t after = 0xFFFFFFFFu;
+    const serialize_int64_t cursor = serialize_read_bits_processed( r );
 
     if ( serialize_read_bits( r, &after, 8 ) )
     {
@@ -1375,7 +1356,33 @@ static void fail_unless_stream_is_terminal( const vector_t * v, serialize_read_s
     if ( !serialize_read_error( r ) )
     {
         fail( v, "the stream is not in its failed state after a refusal" );
+        return;
     }
+    /* consumes no bits: on this port the latched cursor sits at its poison,
+       num_bits + 1, and a refused read re-clamps it there */
+    if ( serialize_read_bits_processed( r ) != cursor )
+    {
+        fail( v, "the read after the refusal moved the cursor" );
+    }
+}
+
+/* a refused read writes no scalar destination: the step must still hold the
+   sentinels the runner planted */
+static int step_holds_sentinels( const step_t * step, serialize_uint64_t sentinel_pattern, serialize_int128_t sentinel_number )
+{
+    if ( step_value_is_a_pattern( step->kind ) && !serialize_uint128_equal( step->pattern, serialize_uint128_make( 0, sentinel_pattern ) ) )
+    {
+        return 0;
+    }
+    if ( step_value_is_a_number( step->kind ) && !serialize_int128_equal( step->number, sentinel_number ) )
+    {
+        return 0;
+    }
+    if ( step->kind == STEP_BOOL && step->boolean != 1 )
+    {
+        return 0;
+    }
+    return 1;
 }
 
 static void run_reader( const vector_t * v, step_t * steps, int step_count )
@@ -1437,18 +1444,10 @@ static void run_reader( const vector_t * v, step_t * steps, int step_count )
            caller-owned buffer -- bytes and string -- leaves that
            buffer's contents unspecified after a refusal, and the document says
            so in as many words, so those kinds are not checked here. */
-        if ( failed_step != NULL )
+        if ( failed_step != NULL && !step_holds_sentinels( failed_step, sentinel_pattern, sentinel_number ) )
         {
-            const step_t * step = failed_step;
-            if ( ( step_value_is_a_pattern( step->kind )
-                   && !serialize_uint128_equal( step->pattern, serialize_uint128_make( 0, sentinel_pattern ) ) )
-              || ( step_value_is_a_number( step->kind )
-                   && !serialize_int128_equal( step->number, sentinel_number ) )
-              || ( step->kind == STEP_BOOL && step->boolean != 1 ) )
-            {
-                fail( v, "the refused read wrote to the destination" );
-                return;
-            }
+            fail( v, "the refused read wrote to the destination" );
+            return;
         }
 
         /* Failure is terminal, and a sequence states its own successors: every
@@ -1461,6 +1460,13 @@ static void run_reader( const vector_t * v, step_t * steps, int step_count )
         {
             for ( i = stopped_at + step_span( steps, stopped_at ); i < step_count; i += step_span( steps, i ) )
             {
+                int j;
+                for ( j = i; j < i + step_span( steps, i ); j++ )
+                {
+                    steps[j].pattern = serialize_uint128_make( 0, sentinel_pattern );
+                    steps[j].number = sentinel_number;
+                    steps[j].boolean = 1;
+                }
                 if ( steps_read( &r, steps + i, step_span( steps, i ), NULL ) )
                 {
                     char message[MAX_LINE];
@@ -1468,6 +1474,17 @@ static void run_reader( const vector_t * v, step_t * steps, int step_count )
                              i + 1, stopped_at + 1 );
                     fail( v, message );
                     return;
+                }
+                for ( j = i; j < i + step_span( steps, i ); j++ )
+                {
+                    if ( !step_holds_sentinels( &steps[j], sentinel_pattern, sentinel_number ) )
+                    {
+                        char message[MAX_LINE];
+                        sprintf( message, "step %d wrote its destination after step %d was refused",
+                                 j + 1, stopped_at + 1 );
+                        fail( v, message );
+                        return;
+                    }
                 }
             }
         }
