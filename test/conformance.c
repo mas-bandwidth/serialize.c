@@ -1500,7 +1500,7 @@ static void run_reader( const vector_t * v, step_t * steps, int step_count )
             char rendered[MAX_LINE];
             char message[MAX_LINE * 3];
             render_step_value( &steps[offset + i], rendered, MAX_LINE );
-            sprintf( message, "step %d decoded %s, the corpus states %s", offset + i + 1, rendered, entries[i] );
+            sprintf( message, "step %d decoded %.*s, the corpus states %.*s", offset + i + 1, MAX_LINE - 1, rendered, MAX_LINE - 1, entries[i] );
             fail( v, message );
             return;
         }
@@ -1542,7 +1542,7 @@ static void run_writer( const vector_t * v, step_t * steps, int step_count )
     }
     serialize_write_flush( &w );
 
-    written = serialize_write_bytes_processed( &w );
+    written = (int) serialize_write_bytes_processed( &w );
     if ( written != v->byte_count )
     {
         char message[MAX_LINE];

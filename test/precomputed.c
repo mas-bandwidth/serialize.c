@@ -862,7 +862,7 @@ static void test_precomputed_differential( void )
            16-bit widths; above that the boundary codes are pinned and the
            interior is sampled */
         {
-            const serialize_uint32_t top_code = ( bits == 32 ) ? 0xFFFFFFFFUL : ( ( 1UL << bits ) - 1UL );
+            const serialize_uint32_t top_code = (serialize_uint32_t) ( ( bits == 32 ) ? 0xFFFFFFFFUL : ( ( 1UL << bits ) - 1UL ) );
             if ( bits <= 16 )
             {
                 serialize_uint32_t code;

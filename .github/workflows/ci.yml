@@ -93,7 +93,7 @@ jobs:
           if not defined SUITES ( echo MSVC_SUITES not found in Makefile & exit /b 1 )
           echo suites:%SUITES%
           for %%t in (%SUITES%) do (
-            cl /nologo /W4 /O2 /fp:precise %STDFLAG% /I. test\%%t.c serialize.c /Fe:%%t.exe || exit /b 1
+            cl /nologo /W4 /WX /O2 /fp:precise %STDFLAG% /I. test\%%t.c serialize.c /Fe:%%t.exe || exit /b 1
             .\%%t.exe || exit /b 1
           )
 
@@ -143,7 +143,7 @@ jobs:
       - name: Build and run every suite big-endian
         run: |
           make test golden wstest CC=s390x-linux-gnu-gcc \
-            CFLAGS='-std=c99 -Wall -Wextra -O2 -ffp-contract=off -static'
+            CFLAGS='-std=c99 $(WARNINGS) -O2 -ffp-contract=off -static'
 
   # Byte-compares this library against the C++ one over the same sequence.
   # The port exists to be wire compatible; everything else is detail.
@@ -190,9 +190,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: Test
         run: |
-          make test CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-          make golden CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-          make wstest CFLAGS="-std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          make test CFLAGS='-std=c99 $(WARNINGS) -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
+          make golden CFLAGS='-std=c99 $(WARNINGS) -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
+          make wstest CFLAGS='-std=c99 $(WARNINGS) -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
 
   # The untrusted read boundary, explored rather than enumerated. The fixed
   # suites prove the paths someone thought of; sixty seconds of libFuzzer per

@@ -13,7 +13,19 @@ CSTD    ?= c99
 # writer's local guards the wire on standard-conforming compilers, but the
 # reader's reconstruction and any compiler that fuses across statements
 # (gcc's gnu modes default to -ffp-contract=fast) are only held by the flag.
-CFLAGS  ?= -std=$(CSTD) -Wall -Wextra -pedantic -O2 -ffp-contract=off
+# WARNINGS is the family's strict set, as errors, on by default: a warning in
+# a build a consumer can run is a defect. CI legs that override CFLAGS spell
+# $(WARNINGS) inside their override, so there is one list and no leg drops it.
+#
+# One exception, and only under c89: -Wlong-long. C89 has no 64-bit integer,
+# the wire has 64-bit fields, and the header's int64 typedefs are long long
+# (MSVC: __int64) by design -- under -std=c89 -Wpedantic that is the one
+# diagnostic every 64-bit declaration and LL literal raises, and it is the C89
+# floor claim itself rather than a defect. Every other warning stays an error
+# under c89 too.
+WARNINGS_c89 = -Wno-long-long
+WARNINGS ?= -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wcast-qual -Wformat=2 -Wundef -Wdouble-promotion -Werror $(WARNINGS_$(CSTD))
+CFLAGS  ?= -std=$(CSTD) $(WARNINGS) -O2 -ffp-contract=off
 LDLIBS  ?= -lm
 
 # The C++ library, for the differential test. Override if it lives elsewhere.
@@ -86,7 +98,7 @@ test: release-check $(TEST_SUITES:%=build/%)
 # standards on both unix runners, the s390x cross build, the sanitizers job --
 # with no list of its own to forget. Not on the MSVC leg: there is no make
 # there, and these flags are not cl-shaped.
-RELEASE_WARN_CFLAGS = -std=$(CSTD) -Wall -Wextra -Wunused-parameter -O2 -ffp-contract=off -DNDEBUG
+RELEASE_WARN_CFLAGS = -std=$(CSTD) $(filter-out -Werror,$(WARNINGS)) -Wunused-parameter -O2 -ffp-contract=off -DNDEBUG
 
 release-check: build/release-roundtrip
 	@mkdir -p build/negctl
@@ -284,7 +296,7 @@ build/diff_cpp: test/diff_cpp.cpp test/vectors.h $(SERIALIZE_CPP)/serialize.h
 # build/, not in the tree.
 FUZZ_CLANG   ?= clang
 FUZZ_CLANGXX ?= clang++
-FUZZ_CFLAGS  ?= -std=c99 -Wall -Wextra -pedantic -g -O1 -ffp-contract=off \
+FUZZ_CFLAGS  ?= -std=c99 $(WARNINGS) -g -O1 -ffp-contract=off \
                 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 
 fuzz: build/fuzz

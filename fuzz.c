@@ -671,7 +671,7 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                     fuzz_check( value >= -10.001f && value <= +10.001f );
                     if ( expected >= -10.0f && expected <= +10.0f )
                     {
-                        fuzz_check( fabs( value - expected ) <= 0.011f );
+                        fuzz_check( fabs( (double) ( value - expected ) ) <= (double) 0.011f );
                     }
                 }
             }
@@ -720,7 +720,7 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                 else
                 {
                     fuzz_check( serialize_read_bytes( r, value, num_bytes ) );
-                    fuzz_check( memcmp( value, expected, num_bytes ) == 0 );
+                    fuzz_check( memcmp( value, expected, (size_t) num_bytes ) == 0 );
                 }
             }
             break;
@@ -935,7 +935,7 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
         fuzz_round_trip( FUZZ_MEASURE, NULL, &measure_stream, NULL, ops, FUZZ_NUM_OPS, &pool );
         fuzz_check( serialize_measure_bits_processed( &measure_stream ) >= serialize_write_bits_processed( &write_stream ) );    /* measure must be conservative */
 
-        serialize_read_stream_init( &read_stream, write_buffer, serialize_write_bytes_processed( &write_stream ) );
+        serialize_read_stream_init( &read_stream, write_buffer, (int) serialize_write_bytes_processed( &write_stream ) );
         fuzz_pool_init( &pool, payload, payload_bytes );
         fuzz_round_trip( FUZZ_READ, NULL, NULL, &read_stream, ops, FUZZ_NUM_OPS, &pool );
         fuzz_check( !serialize_read_error( &read_stream ) );            /* reading back our own data must always succeed */
