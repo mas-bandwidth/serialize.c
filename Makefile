@@ -42,14 +42,14 @@ SERIALIZE_CPP ?= ../serialize
 # between the two variables into a red `make` on every Makefile-driven leg.
 # Adding a suite therefore reaches every CI leg by construction, or fails
 # loudly; it never skips silently.
-TEST_SUITES = roundtrip conformance precomputed precomputed-fma assertdeath
+TEST_SUITES = roundtrip conformance corpus_root precomputed precomputed-fma assertdeath
 
 # Not on MSVC, with reasons: assertdeath forks (POSIX); precomputed-fma is
 # precomputed rebuilt at -ffp-contract=on, and cl has no contraction flag
 # to vary.
 NOT_ON_MSVC = precomputed-fma assertdeath
 
-MSVC_SUITES = roundtrip conformance precomputed golden
+MSVC_SUITES = roundtrip conformance corpus_root precomputed golden
 
 ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) golden)))
 $(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden minus NOT_ON_MSVC (issue 37))
@@ -83,20 +83,28 @@ test: release-check controls $(TEST_SUITES:%=build/%)
 # corpus's verdict. The runner is copied beside the sabotaged header because
 # it includes "../serialize.h" relative to itself; it includes nothing from
 # serialize.c, which is an empty translation unit and is not linked.
+# WHICH CORPUS. The vendored conformance/ and conformance-controls/ by
+# default. SERIALIZE_CONFORMANCE_ROOT, from the environment or the command
+# line, names a checkout of mas-bandwidth/serialize to read both from
+# instead: the nightly conformance job sets it to run these controls, and the
+# runner, against the CURRENT upstream corpus. The runner reads the same
+# variable itself (test/corpus_root.h), so one setting moves both.
+SERIALIZE_CONFORMANCE_ROOT ?= .
+
 CONTROLS = align-padding ranged-reconstruction ranged-range fixed-degenerate-terminal float-finite double-finite compressed-float-finite end-trailing-data end-padding int-relative-canonical string-embedded-nul string-utf8 string-utf8-surrogate int64-through-double wrong-reason
 
 controls: build/conformance build/sabotage
-	@if ./build/conformance conformance-controls/unknown-operation.txt > build/control-unknown-operation.log 2>&1; then \
+	@if ./build/conformance $(SERIALIZE_CONFORMANCE_ROOT)/conformance-controls/unknown-operation.txt > build/control-unknown-operation.log 2>&1; then \
 		echo "control unknown-operation FAILED: the runner accepted an operation it has no code for"; exit 1; \
 	fi
 	@echo "control unknown-operation: red, as it must be"
 	@for control in $(CONTROLS); do \
 		mkdir -p build/controls/$$control/test || exit 1; \
 		./build/sabotage $$control serialize.h build/controls/$$control/serialize.h || exit 1; \
-		cp test/conformance.c test/verbose.h build/controls/$$control/test/ || exit 1; \
+		cp test/conformance.c test/verbose.h test/corpus_root.h build/controls/$$control/test/ || exit 1; \
 		$(CC) $(CFLAGS) -DNDEBUG build/controls/$$control/test/conformance.c -o build/controls/$$control/conformance $(LDLIBS) || exit 1; \
 		printf "control %s: " $$control; \
-		./build/controls/$$control/conformance --expect-failures conformance-controls/$$control.expected conformance || exit 1; \
+		./build/controls/$$control/conformance --expect-failures $(SERIALIZE_CONFORMANCE_ROOT)/conformance-controls/$$control.expected $(SERIALIZE_CONFORMANCE_ROOT)/conformance || exit 1; \
 	done
 
 build/sabotage: tools/sabotage.c
@@ -182,9 +190,15 @@ build/roundtrip: test/roundtrip.c serialize.c serialize.h
 # runs on the next build, and an empty directory fails the run. It takes the
 # directory as an optional argument and defaults to conformance/, which is what
 # lets CI's Windows leg run it with no arguments from the repository root.
-build/conformance: test/conformance.c test/verbose.h serialize.c serialize.h
+build/conformance: test/conformance.c test/verbose.h test/corpus_root.h serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/conformance.c serialize.c -o $@ $(LDLIBS)
+
+# Unit test for test/corpus_root.h, the rule that picks the vendored corpus or
+# SERIALIZE_CONFORMANCE_ROOT's checkout: pure string work, no files read.
+build/corpus_root: test/corpus_root.c test/corpus_root.h serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -I. test/corpus_root.c serialize.c -o $@ $(LDLIBS)
 
 # The mas-bandwidth/schema#82 differential: since the split, the compressed
 # float entry points derive their constants with

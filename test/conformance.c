@@ -99,6 +99,7 @@
 #include <string.h>
 #include "../serialize.h"
 #include "verbose.h"
+#include "corpus_root.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -2175,10 +2176,20 @@ static int check_expected_failures( const char * path )
 
 int main( int argc, char ** argv )
 {
-    const char * path = "conformance";
+    static char corpus[MAX_LINE];
+    const char * path = corpus;
     const char * expected = NULL;
     int files;
     int i;
+
+    /* the vendored conformance/ unless SERIALIZE_CONFORMANCE_ROOT names
+       another checkout (test/corpus_root.h); a path on the command line
+       wins over both */
+    if ( !serialize_test_corpus_directory( getenv( "SERIALIZE_CONFORMANCE_ROOT" ), "conformance", corpus, sizeof( corpus ) ) )
+    {
+        printf( "FAILED: SERIALIZE_CONFORMANCE_ROOT makes a corpus path longer than %d bytes\n", MAX_LINE - 1 );
+        return 1;
+    }
 
     for ( i = 1; i < argc; i++ )
     {
