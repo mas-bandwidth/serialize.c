@@ -45,7 +45,7 @@ permissions:
 jobs:
   conformance:
     name: conformance against mas-bandwidth/serialize main
-    runs-on: [ self-hosted, Linux, X64, fleet ]
+    runs-on: [self-hosted, Linux, X64, nightly]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
