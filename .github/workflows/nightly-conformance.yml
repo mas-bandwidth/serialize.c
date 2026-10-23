@@ -1,0 +1,122 @@
+# THIS PORT AGAINST THE CURRENT C++ REFERENCE, every night, on our own fleet.
+#
+# CI on every push holds conformance/ and conformance-controls/ to upstream
+# by diff, and runs this port's reader, writer and measure over the copy it
+# vendored. Neither says what tonight's upstream corpus makes of this port:
+# a vector the reference gains, or a rule it tightens, is invisible here
+# until someone re-vendors. This job closes that gap. It clones
+# mas-bandwidth/serialize at main HEAD, builds the C++ reference with its own
+# CMake build and has it certify the corpus (its conformance target and every
+# negative control), then runs THIS port's runner and controls over that
+# upstream corpus -- not the vendored copy -- through SERIALIZE_CONFORMANCE_ROOT
+# (test/corpus_root.h, and the Makefile's controls target). Encodes must match
+# byte for byte, decodes of the reference's bytes must match values, and
+# every control must still go red on exactly its rule's vectors.
+#
+# The corpus is never generated from an implementation (STANDARD.md, "The
+# conformance corpus"), and serialize has no generator: the committed corpus
+# at upstream HEAD, certified by the reference build, IS the C++ data.
+#
+# Drift fails the job. A vendored copy behind upstream is a port behind the
+# standard, which is what this job exists to catch, so it is reported every
+# night until the port re-vendors (tools/revendor.sh) and releases.
+#
+# A functional test, and nightly only: no push or pull_request trigger, so
+# the per-commit tier keeps its budget.
+#
+# NEGATIVE CONTROL. Dispatch with flip_byte=true and the job flips one byte
+# of one upstream vector in the throwaway clone, after the reference has
+# certified it, and must go red. Nothing is committed anywhere.
+name: Nightly Conformance
+
+on:
+  schedule:
+    - cron: '17 4 * * *'   # every day at 04:17 UTC
+  workflow_dispatch:
+    inputs:
+      flip_byte:
+        description: 'Negative control: flip one byte of one upstream vector; the job must go red'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: conformance against mas-bandwidth/serialize main
+    runs-on: [self-hosted, Linux, X64, nightly]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7
+
+      # cmake comes in with the job, never from the machine: a fleet runner is
+      # shared, and a nightly that installs into it leaves state behind. The C
+      # and C++ compilers are the machine's, and a runner without them is said
+      # by name rather than failing somewhere inside cmake.
+      - uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3   # v2.2.0
+
+      - name: Runner and toolchain
+        run: |
+          echo "runner: $RUNNER_NAME ($(uname -srm))"
+          for tool in cc c++ make; do
+            command -v $tool > /dev/null || { echo "::error::no $tool on runner $RUNNER_NAME: the C++ reference and this port cannot be built"; exit 1; }
+          done
+          cc --version | head -1
+          c++ --version | head -1
+          cmake --version | head -1
+
+      - name: Clone mas-bandwidth/serialize at main HEAD
+        id: upstream
+        run: |
+          rm -rf upstream
+          git clone --quiet --depth 1 https://github.com/mas-bandwidth/serialize.git upstream
+          echo "upstream: mas-bandwidth/serialize@$(git -C upstream rev-parse HEAD)"
+
+      # The reference's own build, the way BUILDING.md says. ctest's
+      # conformance tests are the corpus run through the C++ reader, writer
+      # and measure, plus every sabotaged-reader control: this is the C++
+      # reference certifying the data this port is about to be held to.
+      - name: Build the C++ reference and certify the corpus
+        run: |
+          cmake -S upstream -B upstream/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build upstream/build --config Release --parallel
+          ctest --test-dir upstream/build --build-config Release -R conformance --output-on-failure
+
+      - name: 'Negative control: flip one byte of one upstream vector'
+        if: ${{ inputs.flip_byte }}
+        run: |
+          # bool-true's stream 01 becomes 00: a reader that decodes it as
+          # true, and a writer that emits it, no longer agree with the vector
+          sed -i '0,/^bytes 01$/s//bytes 00/' upstream/conformance/bool.txt
+          git -C upstream diff --stat
+          git -C upstream diff --quiet && { echo "the flip changed nothing"; exit 1; } || true
+
+      - name: Build this port's runner
+        run: make build/conformance build/sabotage
+
+      - name: Run this port against the upstream corpus
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        env:
+          SERIALIZE_CONFORMANCE_ROOT: upstream
+          SERIALIZE_TEST_VERBOSE: 1
+        run: ./build/conformance
+
+      - name: Run this port's negative controls against the upstream lists
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        env:
+          SERIALIZE_CONFORMANCE_ROOT: upstream
+        run: make controls
+
+      - name: Vendored copy against upstream (drift fails)
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        run: |
+          fail=0
+          diff -u upstream/STANDARD.md STANDARD.md || fail=1
+          diff -ru upstream/conformance conformance || fail=1
+          diff -ru upstream/conformance-controls conformance-controls || fail=1
+          if [ $fail -ne 0 ]; then
+            echo "::error::the vendored STANDARD.md, conformance/ or conformance-controls/ has drifted from mas-bandwidth/serialize main; re-vendor with tools/revendor.sh"
+            exit 1
+          fi
+          echo "vendored copy matches upstream"
