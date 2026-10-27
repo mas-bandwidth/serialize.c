@@ -70,11 +70,32 @@ static int failed = 0;
 
 static void violate_capacity( void )
 {
-    serialize_uint8_t buffer[4];                        /* 32 bits of room */
+    serialize_uint8_t buffer[8];                        /* 64 bits of room */
     serialize_write_stream_t w;
     serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_bits( &w, 0, 32 );
     serialize_write_bits( &w, 0xFFFFFF, 24 );
     serialize_write_bits( &w, 0, 16 );                  /* 8 bits past the end */
+}
+
+/* the buffer size must be a multiple of 8: the writer commits whole 8-byte
+   words, so a 100-byte buffer written to exactly its 800 bits -- inside
+   capacity, every other assert satisfied -- would have its last commit store
+   8 bytes at offset 96, four past the end. The C++ BitWriter asserts this at
+   construction and so does init. The buffer is 104 bytes so that, should the
+   assert ever go missing, the child writes inside its own memory and exits
+   cleanly, which must_abort reports as the failure it is. */
+static void violate_write_buffer_multiple_of_8( void )
+{
+    serialize_uint8_t buffer[104];
+    serialize_write_stream_t w;
+    int i;
+    serialize_write_stream_init( &w, buffer, 100 );     /* 100 is not a multiple of 8 */
+    for ( i = 0; i < 25; i++ )
+    {
+        serialize_write_bits( &w, 0, 32 );              /* exactly 800 bits: within capacity */
+    }
+    serialize_write_flush( &w );
 }
 
 static void violate_int_range( void )
@@ -361,6 +382,7 @@ static void must_abort( void (*violation)( void ), const char * name )
 int main( void )
 {
     must_abort( violate_capacity,                        "capacity" );
+    must_abort( violate_write_buffer_multiple_of_8,      "write_buffer_multiple_of_8" );
     must_abort( violate_int_range,                       "int_range" );
     must_abort( violate_int_relative_order,              "int_relative_order" );
     must_abort( violate_int_relative_previous_domain,    "int_relative_previous_domain" );
