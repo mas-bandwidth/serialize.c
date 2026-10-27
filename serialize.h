@@ -139,8 +139,8 @@
 
 #define SERIALIZE_VERSION_MAJOR 2
 #define SERIALIZE_VERSION_MINOR 0
-#define SERIALIZE_VERSION_PATCH 1
-#define SERIALIZE_VERSION "2.0.1"
+#define SERIALIZE_VERSION_PATCH 2
+#define SERIALIZE_VERSION "2.0.2"
 
 /* ---------------------------------------------------------------------------
    configuration
@@ -423,10 +423,15 @@ typedef enum serialize_refusal_t
 /*
     A write stream. Initialize it over a buffer, perform writes, then flush.
 
-    The buffer must be a multiple of 4 bytes and 4-byte aligned: the packer
-    accumulates into a 64-bit scratch word and commits whole 8-byte words, so
-    the last commit may touch bytes past the meaningful length. Ask for the
-    length with serialize_write_bytes_processed after flushing.
+    The buffer size must be a multiple of 8 bytes: the packer accumulates
+    into a 64-bit scratch word and commits whole 8-byte words, so the last
+    commit may touch bytes past the meaningful length, and only a multiple
+    of 8 keeps that commit inside the buffer. Bytes past the written data
+    are only ever written as zeros. Like every write contract this is a
+    debug assert in serialize_write_stream_init, never a release check. The
+    buffer needs no particular alignment: each word is stored through
+    memcpy. Ask for the length with serialize_write_bytes_processed after
+    flushing.
 */
 typedef struct serialize_write_stream_t
 {
@@ -1139,6 +1144,9 @@ SERIALIZE_INLINE int serialize_bits_required64( serialize_uint64_t min, serializ
 SERIALIZE_INLINE void serialize_write_stream_init( serialize_write_stream_t * stream, void * buffer, int bytes )
 {
     serialize_assert( buffer );
+    /* the writer commits whole 8-byte words, so only a multiple of 8 keeps
+       the last commit inside the buffer — the C++ BitWriter's assert */
+    serialize_assert( ( bytes % 8 ) == 0 );
     stream->data = (serialize_uint8_t *) buffer;
     /* Cast before multiplying: int * 8 overflows at 256 MiB (issue #67).
        The C read path already does this; C++ BitWriter stores int64_t. */
