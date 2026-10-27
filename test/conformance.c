@@ -413,11 +413,7 @@ static int steps_read( serialize_read_stream_t * r, step_t * steps, int count, i
 */
 static int object_read( serialize_read_stream_t * r, step_t * steps, int count )
 {
-    if ( serialize_read_error( r ) )
-        return 0;
-    if ( !steps_read( r, steps, count, NULL ) || serialize_read_error( r ) )
-        return 0;
-    return 1;
+    return !serialize_read_error( r ) && steps_read( r, steps, count, NULL ) && !serialize_read_error( r );
 }
 
 static int step_read( serialize_read_stream_t * r, step_t * step )

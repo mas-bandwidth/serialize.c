@@ -3,7 +3,7 @@
 # STANDARD.md, conformance/ and conformance-controls/, verbatim. CI's sync jobs
 # hold the copies to upstream; this is how they are brought back into step.
 #
-#   tools/revendor.sh v2.0.0
+#   tools/revendor.sh v2.0.1
 #
 # Clones the tag into a scratch directory, replaces the three vendored paths
 # with its copies, and prints the resulting diff stat for review.

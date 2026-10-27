@@ -287,8 +287,10 @@ proves only that the port agrees with itself.
 **The negative controls** prove the instrument responds. `conformance-controls/`
 is vendored verbatim beside the corpus. `make controls` (part of `make test`)
 runs the runner over `unknown-operation.txt`, which it must reject, and then,
-for each of the fifteen refusal rules, builds a reader with that one rule
-deleted (`tools/sabotage.c` patches a scratch copy of the header) and requires
+for each of the sixteen refusal rules, builds a reader with that one rule
+deleted (`tools/sabotage.c` patches a scratch copy of the header, or for
+`object-terminal` of the runner, whose `object_read` is this port's nested
+object) and requires
 it to fail **exactly** the vectors `conformance-controls/<rule>.expected`
 names — the reference's own lists — and no others. A needle that stops
 matching is a hard failure: a control that has quietly stopped sabotaging
