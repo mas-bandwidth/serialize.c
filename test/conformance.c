@@ -331,7 +331,8 @@ typedef enum
     STEP_STRING,
     STEP_END,
     STEP_FIXED,
-    STEP_OBJECT                     /* wraps the next `width` steps in a nested object */
+    STEP_OBJECT,                    /* wraps the next `width` steps in a nested object */
+    STEP_REJECT                     /* the caller refuses here: no bits, no value */
 } step_kind_t;
 
 typedef struct
@@ -399,22 +400,50 @@ static void set_pattern_lo( step_t * step, serialize_uint64_t value )
 static int steps_read( serialize_read_stream_t * r, step_t * steps, int count, int * stopped_at );
 
 /*
-    A nested object's own serialize function. STANDARD.md, "object": it is
-    composition and not an encoding -- no framing, no length prefix, no
-    alignment inserted around it -- which in C is exactly a call that runs the
-    nested steps against the same stream.
+    A nested object, composed through the library's serialize_read_object
+    (STANDARD.md, "object"; IMPLEMENTING.md U2): the callback runs the nested
+    steps against the same stream. The entry test, the exit test and the
+    `rejected` latch are the library's, so the controls that delete them live
+    in serialize.h.
 
-    Failure is terminal across the nesting too, as the C++ serialize_object
-    enforces it: a stream that has already refused refuses the object on
-    ENTRY, without running it, and a stream that refused inside it refuses on
-    EXIT. The entry test is the one an empty object needs -- it consumes no
-    bits, so nothing inside it ever meets the poisoned cursor, and without the
-    test it would succeed on a failed stream.
+    STANDARD.md, "The vector format": a `reject` step at the top level refuses
+    through serialize_read_reject, and inside an object it is the callback
+    returning 0 with no refusal of its own, which the object must latch as
+    `rejected`. object_depth tells the two apart.
 */
-static int object_read( serialize_read_stream_t * r, step_t * steps, int count )
+typedef struct
 {
-    return !serialize_read_error( r ) && steps_read( r, steps, count, NULL ) && !serialize_read_error( r );
+    step_t * steps;
+    int count;
+    int called;
+    int swallow;                    /* report success whatever the steps did */
+} object_context_t;
+
+static int object_depth = 0;
+
+static int object_read_callback( serialize_read_stream_t * r, void * context )
+{
+    object_context_t * object = (object_context_t *) context;
+    int result;
+    object->called = 1;
+    object_depth++;
+    result = steps_read( r, object->steps, object->count, NULL );
+    object_depth--;
+    return object->swallow ? 1 : result;
 }
+
+static int object_refuses_callback( serialize_read_stream_t * r, void * context )
+{
+    (void) r;
+    (void) context;
+    return 0;
+}
+
+static int object_read_with( serialize_read_stream_t * r, object_context_t * object )
+{
+    return serialize_read_object( r, object_read_callback, object );
+}
+
 
 static int step_read( serialize_read_stream_t * r, step_t * step )
 {
@@ -535,6 +564,12 @@ static int step_read( serialize_read_stream_t * r, step_t * step )
                                             (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo );
         }
 
+        case STEP_REJECT:
+            /* the top level: the caller refuses through the reject entry
+               point. Inside an object steps_read turns it into the callback
+               returning 0 before it reaches here */
+            return serialize_read_reject( r );
+
         case STEP_OBJECT:
         default:
             /* nesting is driven by steps_read, which owns the step range an
@@ -551,11 +586,27 @@ static int steps_read( serialize_read_stream_t * r, step_t * steps, int count, i
         int span = step_span( steps, i );
         if ( steps[i].kind == STEP_OBJECT )
         {
-            if ( !object_read( r, steps + i + 1, (int) steps[i].width ) )
+            /* a callback reached on a stream that had already refused is the
+               entry test missing, and counts as the object accepted, as the
+               reference runner counts it: the exit test would otherwise hide
+               the missing entry test from the object-terminal control */
+            const int already_failed = serialize_read_error( r );
+            object_context_t object;
+            object.steps = steps + i + 1;
+            object.count = (int) steps[i].width;
+            object.called = 0;
+            object.swallow = 0;
+            if ( !object_read_with( r, &object ) && !( already_failed && object.called ) )
             {
                 if ( stopped_at != NULL ) *stopped_at = i;
                 return 0;
             }
+        }
+        else if ( steps[i].kind == STEP_REJECT && object_depth > 0 )
+        {
+            /* the callback refuses on its own: it returns 0 and touches nothing */
+            if ( stopped_at != NULL ) *stopped_at = i;
+            return 0;
         }
         else if ( !step_read( r, &steps[i] ) )
         {
@@ -574,9 +625,24 @@ static int steps_read( serialize_read_stream_t * r, step_t * steps, int count, i
 
 static int steps_write( serialize_write_stream_t * w, step_t * steps, int count );
 
+typedef struct
+{
+    step_t * steps;
+    int count;
+} object_steps_t;
+
+static int object_write_callback( serialize_write_stream_t * w, void * context )
+{
+    object_steps_t * object = (object_steps_t *) context;
+    return steps_write( w, object->steps, object->count );
+}
+
 static int object_write( serialize_write_stream_t * w, step_t * steps, int count )
 {
-    return steps_write( w, steps, count );
+    object_steps_t object;
+    object.steps = steps;
+    object.count = count;
+    return serialize_write_object( w, object_write_callback, &object );
 }
 
 static int step_write( serialize_write_stream_t * w, step_t * step )
@@ -658,6 +724,7 @@ static int step_write( serialize_write_stream_t * w, step_t * step )
             return serialize_write_fixed128( w, step->number, step->integer_bits, step->fraction_bits,
                                              (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo );
 
+        case STEP_REJECT:               /* only in refused vectors, which no writer or measure runs */
         case STEP_OBJECT:
         default:
             return 0;
@@ -692,9 +759,18 @@ static int steps_write( serialize_write_stream_t * w, step_t * steps, int count 
 
 static int steps_measure( serialize_measure_stream_t * m, step_t * steps, int count );
 
+static int object_measure_callback( serialize_measure_stream_t * m, void * context )
+{
+    object_steps_t * object = (object_steps_t *) context;
+    return steps_measure( m, object->steps, object->count );
+}
+
 static int object_measure( serialize_measure_stream_t * m, step_t * steps, int count )
 {
-    return steps_measure( m, steps, count );
+    object_steps_t object;
+    object.steps = steps;
+    object.count = count;
+    return serialize_measure_object( m, object_measure_callback, &object );
 }
 
 static int step_measure( serialize_measure_stream_t * m, step_t * step )
@@ -757,6 +833,7 @@ static int step_measure( serialize_measure_stream_t * m, step_t * step )
             return serialize_measure_fixed128( m, step->integer_bits, step->fraction_bits,
                                                (serialize_int64_t) step->min.lo, (serialize_int64_t) step->max.lo );
 
+        case STEP_REJECT:               /* only in refused vectors, which no writer or measure runs */
         case STEP_OBJECT:
         default:
             return 0;
@@ -1155,6 +1232,11 @@ static int step_from_words( step_t * step, const char * text )
         step->kind = STEP_COMPRESSED_FLOAT;
         return 1;
     }
+    if ( strcmp( words[0], "reject" ) == 0 && word_count == 1 )
+    {
+        step->kind = STEP_REJECT;
+        return 1;
+    }
     if ( strcmp( words[0], "object" ) == 0 && word_count == 2 && parse_number( words[1], &a ) )
     {
         step->kind = STEP_OBJECT;
@@ -1374,6 +1456,107 @@ static void fail_unless_stream_is_terminal( const vector_t * v, serialize_read_s
     }
 }
 
+/*
+    The object composition checks, run on every refused vector in object.txt,
+    as the reference runner runs them (STANDARD.md, "object" and "Refusal
+    reasons"; IMPLEMENTING.md U2). Over the refused stream: an empty object
+    must refuse without calling its callback and without moving the cursor or
+    the reason. Over a fresh stream on the same bytes: a callback that returns
+    0 with nothing refused must latch `rejected`, terminally, and keep it
+    through the echoes. And a callback that swallows the vector's own refusal
+    and returns success must still refuse, keeping the first reason.
+*/
+static int vector_is_in( const vector_t * v, const char * base_name )
+{
+    const char * slash = strrchr( v->file, '/' );
+    const char * backslash = strrchr( v->file, '\\' );
+    const char * base = v->file;
+    if ( slash != NULL && slash + 1 > base ) base = slash + 1;
+    if ( backslash != NULL && backslash + 1 > base ) base = backslash + 1;
+    return strcmp( base, base_name ) == 0;
+}
+
+static void fail_unless_objects_refuse( const vector_t * v, serialize_read_stream_t * r, const serialize_uint8_t * buffer, step_t * steps, int step_count )
+{
+    object_context_t empty;
+    serialize_read_stream_t fresh;
+    serialize_int32_t probe = 12345;
+    serialize_uint32_t probe_bits = 0xFFFFFFFFu;
+    const serialize_int64_t cursor = serialize_read_bits_processed( r );
+    const serialize_refusal_t reason = serialize_read_refusal( r );
+
+    empty.steps = NULL;
+    empty.count = 0;
+    empty.called = 0;
+    empty.swallow = 0;
+    if ( object_read_with( r, &empty ) )
+    {
+        fail( v, "the stream accepted an object read after the refusal: failure is not terminal" );
+        return;
+    }
+    if ( empty.called )
+    {
+        fail( v, "the object read after the refusal invoked its callback" );
+        return;
+    }
+    if ( serialize_read_bits_processed( r ) != cursor || serialize_read_refusal( r ) != reason )
+    {
+        fail( v, "the object read after the refusal moved the cursor or the reason" );
+        return;
+    }
+
+    serialize_read_stream_init( &fresh, buffer, v->byte_count );
+    if ( serialize_read_object( &fresh, object_refuses_callback, NULL ) )
+    {
+        fail( v, "serialize_read_object accepted a callback returning 0" );
+        return;
+    }
+    if ( serialize_read_refusal( &fresh ) != SERIALIZE_REFUSAL_REJECTED )
+    {
+        fail( v, "serialize_read_object did not latch rejected for a callback-only refusal" );
+        return;
+    }
+    if ( serialize_read_int( &fresh, &probe, 7, 7 ) || probe != 12345 )
+    {
+        fail( v, "a zero-bit read succeeded after a callback-only refusal" );
+        return;
+    }
+    empty.called = 0;
+    if ( object_read_with( &fresh, &empty ) || empty.called )
+    {
+        fail( v, "an object read succeeded or invoked its callback after a callback-only refusal" );
+        return;
+    }
+    if ( serialize_read_bits( &fresh, &probe_bits, 8 ) || probe_bits != 0xFFFFFFFFu )
+    {
+        fail( v, "a read succeeded after a callback-only refusal" );
+        return;
+    }
+    if ( serialize_read_refusal( &fresh ) != SERIALIZE_REFUSAL_REJECTED )
+    {
+        fail( v, "the echoes of a callback-only refusal overwrote rejected" );
+        return;
+    }
+
+    {
+        object_context_t swallowing;
+        swallowing.steps = steps;
+        swallowing.count = step_count;
+        swallowing.called = 0;
+        swallowing.swallow = 1;
+        serialize_read_stream_init( &fresh, buffer, v->byte_count );
+        if ( object_read_with( &fresh, &swallowing ) )
+        {
+            fail( v, "serialize_read_object accepted a callback that returned success after an inner refusal" );
+            return;
+        }
+        if ( serialize_read_refusal( &fresh ) != reason )
+        {
+            fail( v, "serialize_read_object did not keep the inner refusal when the callback returned success" );
+        }
+    }
+}
+
 /* a refused read writes no scalar destination: the step must still hold the
    sentinels the runner planted */
 static int step_holds_sentinels( const step_t * step, serialize_uint64_t sentinel_pattern, serialize_int128_t sentinel_number )
@@ -1494,6 +1677,16 @@ static void run_reader( const vector_t * v, step_t * steps, int step_count )
                         return;
                     }
                 }
+            }
+        }
+
+        if ( vector_is_in( v, "object.txt" ) )
+        {
+            const int failures_before = failures;
+            fail_unless_objects_refuse( v, &r, buffer, steps, step_count );
+            if ( failures != failures_before )
+            {
+                return;
             }
         }
 

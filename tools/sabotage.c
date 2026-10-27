@@ -7,9 +7,11 @@
     `make controls` passes every file a control's reader is built from
     (serialize.h and test/conformance.c); the one the control's rule lives in
     is sabotaged and the others are copied unchanged. Each entry names the
-    file its rule lives in: serialize.h, except object-terminal, which lives
-    in the runner, because this port's nested object is the caller's
-    composition and not a library call.
+    file its rule lives in. Since 2.1 every rule lives in serialize.h,
+    object-terminal included: the nested object is the library's
+    serialize_read_object, no longer the runner's own composition. The
+    runner stays in the list so a rule can move back without a Makefile
+    change.
 
     STANDARD.md, "The conformance corpus": a gate nobody has seen go red is a
     claim, not a measurement. For each refusal rule, a reader with that one
@@ -134,15 +136,24 @@ static const sabotage_t sabotages[] =
       "                return serialize_read_fail( stream, SERIALIZE_REFUSAL_EMBEDDED_NUL );",
       "                return serialize_read_fail( stream, SERIALIZE_REFUSAL_INVALID_UTF8 ); /* NEGATIVE CONTROL: the wrong reason on purpose */", "serialize.h" },
 
-    /* this port has no object API: a nested object is the caller's own
-       function, and the runner's object_read is that composition. Both its
-       latch tests go, as the reference's control reverts serialize_object to
-       the macro without them -- the exit test alone would still refuse an
-       empty object on a failed stream */
-    { "object-terminal", "a nested object on a failed stream refuses", 0,
-      "    return !serialize_read_error( r ) && steps_read( r, steps, count, NULL ) && !serialize_read_error( r );",
-      "    return steps_read( r, steps, count, NULL ); /* NEGATIVE CONTROL: this rule is deleted on purpose */",
-      "conformance.c" },
+    /* the nested object is the library's serialize_read_object (2.1, U2);
+       its entry test goes, as the reference's control deletes the entry test
+       of serialize_object */
+    { "object-terminal", "a nested object on a failed stream refuses before its callback runs", 0,
+      "    if ( serialize_read_error( stream ) )",
+      "    if ( serialize_read_error( stream ) && !serialize_read_error( stream ) ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
+
+    /* the 2.0 latch: the object still fails the stream for good, but records
+       no reason, so a callback-only refusal reports none */
+    { "object-latch-rejected", "a nested object that refuses on its own latches rejected", 0,
+      "        return serialize_read_fail( stream, SERIALIZE_REFUSAL_REJECTED ); /* the object latch */",
+      "        { stream->error = 1; stream->bits_read = stream->num_bits + 1; return 0; } /* NEGATIVE CONTROL: the 2.0 latch, recording no reason, on purpose */", "serialize.h" },
+
+    /* serialize_read_reject refuses under a wire rule's name: the stream
+       still fails and stays failed, only the reason is wrong */
+    { "reject-reason", "serialize_read_reject refuses as rejected", 0,
+      "    return serialize_read_fail( stream, SERIALIZE_REFUSAL_REJECTED ); /* the caller's refusal */",
+      "    return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE ); /* NEGATIVE CONTROL: the wrong reason on purpose */", "serialize.h" },
 };
 
 static char * read_file( const char * path, long * size )

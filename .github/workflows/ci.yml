@@ -168,9 +168,9 @@ jobs:
           # v2.0.0 is the floor (format 2.0 removed wstring and added end, and
           # diff2_cpp.cpp's wide sequence carries an end and no wide string,
           # so against a 1.x header it neither compiles nor matches the pin).
-          # v2.0.1 is the latest release: read terminality across nested
-          # objects; the write path, and so this comparison, is unchanged.
-          SERIALIZE_TAG: v2.0.1
+          # v2.1.0 is the latest release: the caller's refusal, `rejected`, and
+          # the U1-U16 rules; the write path, and so this comparison, is unchanged.
+          SERIALIZE_TAG: v2.1.0
         run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git ../serialize
       - name: Compare
         run: make diff

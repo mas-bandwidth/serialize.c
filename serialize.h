@@ -138,9 +138,9 @@
    --------------------------------------------------------------------------- */
 
 #define SERIALIZE_VERSION_MAJOR 2
-#define SERIALIZE_VERSION_MINOR 0
-#define SERIALIZE_VERSION_PATCH 2
-#define SERIALIZE_VERSION "2.0.2"
+#define SERIALIZE_VERSION_MINOR 1
+#define SERIALIZE_VERSION_PATCH 0
+#define SERIALIZE_VERSION "2.1.0"
 
 /* ---------------------------------------------------------------------------
    configuration
@@ -400,7 +400,13 @@ extern "C" {
 
     A read stream latches the FIRST refusal and keeps reporting it: every
     later read on the failed stream fails too, but the reason is the cause,
-    not the echo. SERIALIZE_REFUSAL_NONE means the stream has refused nothing.
+    not the echo. SERIALIZE_REFUSAL_NONE means the stream has refused nothing:
+    a failed read stream never reports it (STANDARD.md 2.1, `rejected`).
+
+    SERIALIZE_REFUSAL_REJECTED is the caller's own refusal, not the wire's:
+    serialize_read_reject, a nested object whose callback fails with nothing
+    latched (serialize_read_object), or serialize_read_fail given NONE or a
+    value outside the list. It changes no byte of the wire.
 */
 typedef enum serialize_refusal_t
 {
@@ -413,6 +419,7 @@ typedef enum serialize_refusal_t
     SERIALIZE_REFUSAL_INVALID_UTF8,         /* invalid_utf8: a string payload that is not well formed UTF-8 */
     SERIALIZE_REFUSAL_EMBEDDED_NUL,         /* embedded_nul: a zero byte among a string's transmitted bytes */
     SERIALIZE_REFUSAL_NON_CANONICAL,        /* non_canonical: an encoding a conforming writer never produces for the value it carries */
+    SERIALIZE_REFUSAL_REJECTED,             /* rejected: the bytes were well formed, and the reader's caller refused the value they carry */
     SERIALIZE_REFUSAL_NUM_REASONS
 } serialize_refusal_t;
 
@@ -587,9 +594,57 @@ SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream );
 /* A read stream's failure carries its reason, from the closed list
    (serialize_refusal_t), and the stream keeps the FIRST one: a refusal on a
    stream that has already failed is an echo, latches nothing new, and still
-   returns 0. The reason must not be SERIALIZE_REFUSAL_NONE, asserted. This is
-   the C++ ReadStream::Fail( Refusal ) spelled in C. */
+   returns 0. A reason of SERIALIZE_REFUSAL_NONE, or one outside the list, is
+   the caller refusing without saying why, and latches
+   SERIALIZE_REFUSAL_REJECTED: never an assert or a trap (STANDARD.md 2.1,
+   "Refusal reasons"). This is the C++ ReadStream::Fail( Refusal ) spelled in
+   C. */
 SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream, serialize_refusal_t refusal );
+
+/* The caller's own refusal of the value being read (IMPLEMENTING.md U2): the
+   bytes were well formed and every primitive accepted them, and the caller's
+   validation says no -- an enum value the game does not know, two fields that
+   contradict each other. Fails the stream as SERIALIZE_REFUSAL_REJECTED
+   through the same latch as every wire refusal, so it is terminal and the
+   first reason wins: on a stream that already refused it changes nothing.
+   Returns 0, so `return serialize_read_reject( stream );` reads naturally. The
+   C++ serialize_reject. Read only: there is nothing to refuse on a write or a
+   measure stream, so this port has no write or measure spelling of it. */
+SERIALIZE_INLINE int serialize_read_reject( serialize_read_stream_t * stream );
+
+/*
+    OBJECT COMPOSITION (STANDARD.md, "object"; IMPLEMENTING.md U2). A nested
+    object is the caller's own serialize function, given here as a function
+    pointer plus a context pointer the library passes through untouched. It
+    contributes no bytes of its own: the callback reads, writes or measures
+    against the same stream, at exactly this position, with no framing, length
+    prefix or alignment inserted around it.
+
+    The callback returns nonzero on success and 0 on failure. On READ:
+
+      - a stream that has already refused refuses the object on ENTRY, without
+        calling the callback (an empty object consumes no bits, so without this
+        test it would succeed on a failed stream);
+      - a callback that returns 0 with nothing latched latches
+        SERIALIZE_REFUSAL_REJECTED, so `return 0;` in a callback and
+        serialize_read_reject agree;
+      - a callback that returns 0 after a primitive inside it refused keeps
+        that primitive's reason (the first reason wins), and one that returns
+        nonzero on a stream it failed still refuses.
+
+    On WRITE and MEASURE the object is the callback's result: writes are
+    trusted, so there is no latch to keep (see ERRORS).
+
+    This is the C++ serialize_object macro. Calling a read object with no
+    callback is caller error, asserted.
+*/
+typedef int (*serialize_read_object_function_t)( serialize_read_stream_t * stream, void * context );
+typedef int (*serialize_write_object_function_t)( serialize_write_stream_t * stream, void * context );
+typedef int (*serialize_measure_object_function_t)( serialize_measure_stream_t * stream, void * context );
+
+SERIALIZE_INLINE int serialize_read_object( serialize_read_stream_t * stream, serialize_read_object_function_t function, void * context );
+SERIALIZE_INLINE int serialize_write_object( serialize_write_stream_t * stream, serialize_write_object_function_t function, void * context );
+SERIALIZE_INLINE int serialize_measure_object( serialize_measure_stream_t * stream, serialize_measure_object_function_t function, void * context );
 
 SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stream, const void * buffer, int bytes );
 
@@ -1196,11 +1251,17 @@ SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream )
 */
 SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream, serialize_refusal_t refusal )
 {
-    serialize_assert( refusal != SERIALIZE_REFUSAL_NONE );
     /* the FIRST reason is the cause; a refusal on a stream that has already
-       failed is its echo and keeps it (STANDARD.md, Refusal reasons) */
+       failed is its echo and keeps it (STANDARD.md, Refusal reasons). No
+       reason, or one outside the list, is the caller refusing without saying
+       why: rejected, so a failed stream never reports none. Only the refusal
+       path pays for the test. */
     if ( stream->refusal == SERIALIZE_REFUSAL_NONE )
     {
+        if ( refusal <= SERIALIZE_REFUSAL_NONE || refusal >= SERIALIZE_REFUSAL_NUM_REASONS )
+        {
+            refusal = SERIALIZE_REFUSAL_REJECTED;
+        }
         stream->refusal = refusal;
     }
     stream->error = 1;
@@ -1542,9 +1603,44 @@ SERIALIZE_INLINE const char * serialize_refusal_name( serialize_refusal_t refusa
         case SERIALIZE_REFUSAL_INVALID_UTF8:        return "invalid_utf8";
         case SERIALIZE_REFUSAL_EMBEDDED_NUL:        return "embedded_nul";
         case SERIALIZE_REFUSAL_NON_CANONICAL:       return "non_canonical";
+        case SERIALIZE_REFUSAL_REJECTED:            return "rejected";
         case SERIALIZE_REFUSAL_NUM_REASONS:
         default:                                    return "unknown";
     }
+}
+
+SERIALIZE_INLINE int serialize_read_reject( serialize_read_stream_t * stream )
+{
+    return serialize_read_fail( stream, SERIALIZE_REFUSAL_REJECTED ); /* the caller's refusal */
+}
+
+SERIALIZE_INLINE int serialize_read_object( serialize_read_stream_t * stream, serialize_read_object_function_t function, void * context )
+{
+    serialize_assert( function != NULL );
+    /* a failed stream refuses the object on entry, without calling it */
+    if ( serialize_read_error( stream ) )
+    {
+        return 0;
+    }
+    /* a callback that fails, or that returns success on a stream it failed,
+       refuses; the latch keeps a primitive's reason if one refused first */
+    if ( !function( stream, context ) || stream->error )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_REJECTED ); /* the object latch */
+    }
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_write_object( serialize_write_stream_t * stream, serialize_write_object_function_t function, void * context )
+{
+    serialize_assert( function != NULL );
+    return function( stream, context ) != 0;
+}
+
+SERIALIZE_INLINE int serialize_measure_object( serialize_measure_stream_t * stream, serialize_measure_object_function_t function, void * context )
+{
+    serialize_assert( function != NULL );
+    return function( stream, context ) != 0;
 }
 
 /* ---------------------------------------------------------------------------

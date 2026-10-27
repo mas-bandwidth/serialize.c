@@ -130,6 +130,127 @@ static int degenerate_latched( serialize_read_stream_t * r )
     return ok;
 }
 
+/* U2 object callbacks. A context counts the calls, so a test can see the
+   callback was never reached on a failed stream. */
+typedef struct
+{
+    int calls;
+    int result;                     /* what the callback returns */
+    int read_bits;                  /* bits to read first, 0 for none */
+} object_probe_t;
+
+static int object_probe_read( serialize_read_stream_t * stream, void * context )
+{
+    object_probe_t * probe = (object_probe_t *) context;
+    probe->calls++;
+    if ( probe->read_bits > 0 )
+    {
+        serialize_uint32_t value = 0;
+        (void) serialize_read_bits( stream, &value, probe->read_bits );
+    }
+    return probe->result;
+}
+
+static int object_probe_write( serialize_write_stream_t * stream, void * context )
+{
+    object_probe_t * probe = (object_probe_t *) context;
+    probe->calls++;
+    return serialize_write_bits( stream, 0x5, 4 ) && probe->result;
+}
+
+static int object_probe_measure( serialize_measure_stream_t * stream, void * context )
+{
+    object_probe_t * probe = (object_probe_t *) context;
+    probe->calls++;
+    return serialize_measure_bits( stream, 4 ) && probe->result;
+}
+
+static int test_serialize_reject( void )
+{
+    serialize_uint8_t data[8 + 8] = { 0x05, 0xAB, 0, 0, 0, 0, 0, 0 };   /* + 8: read allocations extend 8 bytes past the data */
+    serialize_read_stream_t r;
+    serialize_uint32_t value;
+    object_probe_t probe;
+    int ok = 1;
+
+    if ( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_REJECTED ), "rejected" ) != 0 ) ok = 0;
+
+    /* the top level reject: well formed bits accepted, then the caller refuses */
+    serialize_read_stream_init( &r, data, 2 );
+    value = 0;
+    if ( !serialize_read_bits( &r, &value, 4 ) || value != 5 ) ok = 0;
+    if ( serialize_read_reject( &r ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+    /* terminal: a readable byte refuses, its destination untouched, and the reason stays */
+    value = 0xFFFFFFFFu;
+    if ( serialize_read_bits( &r, &value, 8 ) || value != 0xFFFFFFFFu ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+
+    /* the first reason wins: a reject on a stream that refused keeps the wire's */
+    serialize_read_stream_init( &r, data, 0 );
+    if ( serialize_read_bits( &r, &value, 1 ) ) ok = 0;
+    if ( serialize_read_reject( &r ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_PAST_END ) ok = 0;
+
+    /* a fail with no reason, or one outside the list, is the caller refusing:
+       rejected, never none, never a trap */
+    serialize_read_stream_init( &r, data, 2 );
+    if ( serialize_read_fail( &r, SERIALIZE_REFUSAL_NONE ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+    serialize_read_stream_init( &r, data, 2 );
+    if ( serialize_read_fail( &r, SERIALIZE_REFUSAL_NUM_REASONS ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+
+    /* an object whose callback reads and accepts is accepted, at no cost in bits */
+    serialize_read_stream_init( &r, data, 2 );
+    probe.calls = 0; probe.result = 1; probe.read_bits = 4;
+    if ( !serialize_read_object( &r, object_probe_read, &probe ) || probe.calls != 1 ) ok = 0;
+    if ( serialize_read_bits_processed( &r ) != 4 ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_NONE ) ok = 0;
+
+    /* a callback that fails with nothing latched latches rejected, terminally */
+    serialize_read_stream_init( &r, data, 2 );
+    probe.calls = 0; probe.result = 0; probe.read_bits = 4;
+    if ( serialize_read_object( &r, object_probe_read, &probe ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+    if ( serialize_read_bits( &r, &value, 8 ) ) ok = 0;
+
+    /* a failed stream refuses the object on entry, without calling it */
+    probe.calls = 0; probe.result = 1; probe.read_bits = 0;
+    if ( serialize_read_object( &r, object_probe_read, &probe ) || probe.calls != 0 ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+
+    /* a primitive inside refused first: its reason is kept whether the callback
+       then fails or swallows the refusal and reports success */
+    serialize_read_stream_init( &r, data, 1 );
+    probe.calls = 0; probe.result = 0; probe.read_bits = 16;
+    if ( serialize_read_object( &r, object_probe_read, &probe ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_PAST_END ) ok = 0;
+    serialize_read_stream_init( &r, data, 1 );
+    probe.calls = 0; probe.result = 1; probe.read_bits = 16;
+    if ( serialize_read_object( &r, object_probe_read, &probe ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_PAST_END ) ok = 0;
+
+    /* write and measure: the object is its callback, and adds no bits of its own */
+    {
+        serialize_uint8_t out[8];
+        serialize_write_stream_t w;
+        serialize_measure_stream_t m;
+        serialize_write_stream_init( &w, out, 8 );
+        probe.calls = 0; probe.result = 1;
+        if ( !serialize_write_object( &w, object_probe_write, &probe ) || probe.calls != 1 ) ok = 0;
+        if ( serialize_write_bits_processed( &w ) != 4 ) ok = 0;
+        probe.result = 0;
+        if ( serialize_write_object( &w, object_probe_write, &probe ) ) ok = 0;
+        serialize_measure_stream_init( &m );
+        probe.calls = 0; probe.result = 1;
+        if ( !serialize_measure_object( &m, object_probe_measure, &probe ) || probe.calls != 1 ) ok = 0;
+        if ( serialize_measure_bits_processed( &m ) != 4 ) ok = 0;
+    }
+
+    return ok;
+}
+
 int main( void )
 {
     static serialize_uint8_t buffer[2048 + 8];      /* + 8: read buffer allocations extend 8 bytes past the data */
@@ -1179,6 +1300,11 @@ int main( void )
         }
 #endif /* NDEBUG */
     }
+
+    /* ---- standard 2.1, IMPLEMENTING.md U2: the caller's refusal latches
+            rejected, through serialize_read_reject and through a nested
+            object whose callback fails with nothing latched ---- */
+    CHECK( test_serialize_reject() );
 
     /* ---- format 2.0: every refusal names its reason, the reader refuses
             non-finite floats and a non-finite compressed decode, the

@@ -60,6 +60,12 @@ value 1.1 could carry keeps its exact bytes. What changed, and what it breaks:
   `serialize_read_refusal` reports the first one, `serialize_refusal_name`
   spells it, and `serialize_read_fail` now takes one.
 
+**2.1** (standard 2.1, wire still format 2.0) adds the caller's own refusal,
+`rejected`: `serialize_read_reject`, and the object composition
+`serialize_read_object` / `serialize_write_object` / `serialize_measure_object`
+(a function pointer plus a context), whose failing callback latches it. No
+byte of the wire changes.
+
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it
@@ -143,6 +149,35 @@ echoes:
 | `SERIALIZE_REFUSAL_INVALID_UTF8` | `invalid_utf8` | a string payload that is not well-formed UTF-8 |
 | `SERIALIZE_REFUSAL_EMBEDDED_NUL` | `embedded_nul` | a zero byte among a string's transmitted bytes |
 | `SERIALIZE_REFUSAL_NON_CANONICAL` | `non_canonical` | the `int_relative` absolute tier carrying a bounded difference |
+| `SERIALIZE_REFUSAL_REJECTED` | `rejected` | the bytes were well formed, and your code refused the value they carry |
+
+**Your own refusal is `rejected`** (standard 2.1). When every primitive
+accepted the bytes and your validation says no, an enum value you do not know,
+two fields that contradict each other, refuse through `serialize_read_reject`.
+It is terminal like every other refusal, and the first reason wins: rejecting a
+stream that already refused keeps the wire's reason. A failed read stream never
+reports `none`; `serialize_read_fail` given no reason latches `rejected`.
+
+**A nested object is a function pointer plus a context.**
+`serialize_read_object( stream, function, context )` calls your
+`int function( serialize_read_stream_t *, void * context )` against the same
+stream, adding no bytes of its own. It refuses on entry on a failed stream
+without calling you, and a function that returns 0 with nothing refused
+latches `rejected`, so `return 0;` and `serialize_read_reject` agree.
+`serialize_write_object` and `serialize_measure_object` are the write and
+measure spellings.
+
+```c
+static int read_player( serialize_read_stream_t * stream, void * context )
+{
+    player_t * player = (player_t *) context;
+    if ( !serialize_read_int( stream, &player->team, 0, 3 ) ) return 0;
+    if ( player->team == TEAM_SPECTATOR && player->is_captain ) return 0;  /* rejected */
+    return 1;
+}
+
+serialize_read_object( &stream, read_player, &player );
+```
 
 ```c
 if ( !serialize_read_end( &stream ) )
@@ -287,10 +322,8 @@ proves only that the port agrees with itself.
 **The negative controls** prove the instrument responds. `conformance-controls/`
 is vendored verbatim beside the corpus. `make controls` (part of `make test`)
 runs the runner over `unknown-operation.txt`, which it must reject, and then,
-for each of the sixteen refusal rules, builds a reader with that one rule
-deleted (`tools/sabotage.c` patches a scratch copy of the header, or for
-`object-terminal` of the runner, whose `object_read` is this port's nested
-object) and requires
+for each of the eighteen refusal rules, builds a reader with that one rule
+deleted (`tools/sabotage.c` patches a scratch copy of the header) and requires
 it to fail **exactly** the vectors `conformance-controls/<rule>.expected`
 names — the reference's own lists — and no others. A needle that stops
 matching is a hard failure: a control that has quietly stopped sabotaging
