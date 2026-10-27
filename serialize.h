@@ -139,8 +139,8 @@
 
 #define SERIALIZE_VERSION_MAJOR 2
 #define SERIALIZE_VERSION_MINOR 0
-#define SERIALIZE_VERSION_PATCH 0
-#define SERIALIZE_VERSION "2.0.0"
+#define SERIALIZE_VERSION_PATCH 1
+#define SERIALIZE_VERSION "2.0.1"
 
 /* ---------------------------------------------------------------------------
    configuration

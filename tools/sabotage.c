@@ -2,7 +2,14 @@
     The negative controls' sabotage: serialize.h with ONE refusal rule
     deleted, for `make controls`.
 
-        sabotage <control> <serialize.h> <out/serialize.h>
+        sabotage <control> <file> <out/file>
+
+    `make controls` passes every file a control's reader is built from
+    (serialize.h and test/conformance.c); the one the control's rule lives in
+    is sabotaged and the others are copied unchanged. Each entry names the
+    file its rule lives in: serialize.h, except object-terminal, which lives
+    in the runner, because this port's nested object is the caller's
+    composition and not a library call.
 
     STANDARD.md, "The conformance corpus": a gate nobody has seen go red is a
     claim, not a measurement. For each refusal rule, a reader with that one
@@ -42,89 +49,100 @@ typedef struct
     int every;
     const char * needle;
     const char * patch;
+    const char * file;              /* the file the rule lives in */
 } sabotage_t;
 
 static const sabotage_t sabotages[] =
 {
     { "align-padding", "a reader verifies that an align's padding bits are zero", 0,
       "        if ( padding != 0 )",
-      "        if ( padding == 0xFFFFFFFFu ) /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "        if ( padding == 0xFFFFFFFFu ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     /* two controls over the ranged int, one per rule: the reconstruction
        decides what an accepted offset means, the range check which offsets
        are accepted at all */
     { "ranged-reconstruction", "a ranged int decodes to its offset plus min", 0,
       "    *value = (serialize_int32_t) ( (serialize_uint32_t) min + offset );",
-      "    *value = (serialize_int32_t) offset; /* NEGATIVE CONTROL: min is dropped on purpose */" },
+      "    *value = (serialize_int32_t) offset; /* NEGATIVE CONTROL: min is dropped on purpose */", "serialize.h" },
 
     /* the widened right hand side is at least 0xFFFFFFFF, and the offset is
        at most 0xFFFFFFFF */
     { "ranged-range", "a ranged int whose offset is past the span is refused", 0,
       "    if ( offset > (serialize_uint32_t) max - (serialize_uint32_t) min )",
-      "    if ( (serialize_uint64_t) offset > (serialize_uint64_t) ( (serialize_uint32_t) max - (serialize_uint32_t) min ) + 0xFFFFFFFFu ) /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "    if ( (serialize_uint64_t) offset > (serialize_uint64_t) ( (serialize_uint32_t) max - (serialize_uint32_t) min ) + 0xFFFFFFFFu ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     /* the degenerate fixed point field consumes no bits and would otherwise
        always succeed; the guard lives in each fixed entry point and in the
        shared core, and all of them go */
     { "fixed-degenerate-terminal", "every read consults the failure state, zero bit reads included", 1,
       "if ( stream->error ) return 0;",
-      "if ( stream->error && stream->num_bits < 0 ) return 0; /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "if ( stream->error && stream->num_bits < 0 ) return 0; /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     /* the finite rule, once per width and once for the compressed float
        decode: zero is finite, so the added conjunct never holds */
     { "float-finite", "a float read refuses NaN and the infinities", 0,
       "    if ( !serialize_float_bits_are_finite( bits ) )",
-      "    if ( !serialize_float_bits_are_finite( bits ) && bits == 0u ) /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "    if ( !serialize_float_bits_are_finite( bits ) && bits == 0u ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     { "double-finite", "a double read refuses NaN and the infinities", 0,
       "    if ( !serialize_double_bits_are_finite( bits ) )",
-      "    if ( !serialize_double_bits_are_finite( bits ) && bits == 0u ) /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "    if ( !serialize_double_bits_are_finite( bits ) && bits == 0u ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     { "compressed-float-finite", "a compressed float decode that is not finite is refused", 0,
       "    if ( !serialize_float_bits_are_finite( decoded_bits ) )",
-      "    if ( !serialize_float_bits_are_finite( decoded_bits ) && decoded_bits == 0u ) /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "    if ( !serialize_float_bits_are_finite( decoded_bits ) && decoded_bits == 0u ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     /* the end's two rules. Without the trailing data rule the end checks only
        the low bits of whatever remains, so whole zero bytes left over pass */
     { "end-trailing-data", "an end refuses a whole byte after the object", 0,
       "    if ( remaining >= 8 )",
-      "    if ( remaining >= 8 && stream->bits_read < 0 ) /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "    if ( remaining >= 8 && stream->bits_read < 0 ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     { "end-padding", "an end refuses non-zero padding in the final byte", 0,
       "        if ( final_padding != 0 )",
-      "        if ( final_padding == 0xFFFFFFFFu ) /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "        if ( final_padding == 0xFFFFFFFFu ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     /* current is above previous here, so it is never zero */
     { "int-relative-canonical", "the absolute tier refuses a difference a bounded tier carries", 0,
       "    if ( absolute && reconstructed - (serialize_uint32_t) previous <= 69914u )",
-      "    if ( absolute && reconstructed - (serialize_uint32_t) previous <= 69914u && reconstructed == 0u ) /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "    if ( absolute && reconstructed - (serialize_uint32_t) previous <= 69914u && reconstructed == 0u ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     { "string-embedded-nul", "a string read refuses a zero byte among its payload", 0,
       "            if ( string[i] == '\\0' )",
-      "            if ( string[i] == '\\0' && i < 0 ) /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "            if ( string[i] == '\\0' && i < 0 ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     { "string-utf8", "a string read refuses a payload that is not well formed UTF-8", 0,
       "        if ( !serialize_string_is_valid_utf8( string, length ) )",
-      "        if ( !serialize_string_is_valid_utf8( string, length ) && length < 0 ) /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "        if ( !serialize_string_is_valid_utf8( string, length ) && length < 0 ) /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     /* one clause of the UTF-8 rule alone: the encoded surrogates, ED A0 80
        through ED BF BF */
     { "string-utf8-surrogate", "a string read refuses an encoded surrogate code point", 0,
       "            if ( lead == 0xED && b1 >= 0xA0 ) return 0;",
-      "            if ( lead == 0xED && b1 >= 0xA0 && b1 > 0xFF ) return 0; /* NEGATIVE CONTROL: this rule is deleted on purpose */" },
+      "            if ( lead == 0xED && b1 >= 0xA0 && b1 > 0xFF ) return 0; /* NEGATIVE CONTROL: this rule is deleted on purpose */", "serialize.h" },
 
     /* a reader whose ranged 64 bit integer passes through a double, as a port
        backed by a double number type would: every integer up to 2^53
        survives, and the wide vectors past it do not */
     { "int64-through-double", "a 64 bit value is carried exactly, never through a double", 0,
       "    *value = (serialize_int64_t) ( (serialize_uint64_t) min + offset );",
-      "    { const double through_double = (double) (serialize_int64_t) ( (serialize_uint64_t) min + offset ); *value = through_double >= 9223372036854775807.0 ? (serialize_int64_t) ( ~(serialize_uint64_t) 0 >> 1 ) : (serialize_int64_t) through_double; } /* NEGATIVE CONTROL: the value goes through a double on purpose */" },
+      "    { const double through_double = (double) (serialize_int64_t) ( (serialize_uint64_t) min + offset ); *value = through_double >= 9223372036854775807.0 ? (serialize_int64_t) ( ~(serialize_uint64_t) 0 >> 1 ) : (serialize_int64_t) through_double; } /* NEGATIVE CONTROL: the value goes through a double on purpose */", "serialize.h" },
 
     /* the refusal reason: this reader refuses every stream the real one
        refuses, and names the wrong rule for one of them */
     { "wrong-reason", "a refusal names the rule that refused it", 0,
       "                return serialize_read_fail( stream, SERIALIZE_REFUSAL_EMBEDDED_NUL );",
-      "                return serialize_read_fail( stream, SERIALIZE_REFUSAL_INVALID_UTF8 ); /* NEGATIVE CONTROL: the wrong reason on purpose */" },
+      "                return serialize_read_fail( stream, SERIALIZE_REFUSAL_INVALID_UTF8 ); /* NEGATIVE CONTROL: the wrong reason on purpose */", "serialize.h" },
+
+    /* this port has no object API: a nested object is the caller's own
+       function, and the runner's object_read is that composition. Both its
+       latch tests go, as the reference's control reverts serialize_object to
+       the macro without them -- the exit test alone would still refuse an
+       empty object on a failed stream */
+    { "object-terminal", "a nested object on a failed stream refuses", 0,
+      "    return !serialize_read_error( r ) && steps_read( r, steps, count, NULL ) && !serialize_read_error( r );",
+      "    return steps_read( r, steps, count, NULL ); /* NEGATIVE CONTROL: this rule is deleted on purpose */",
+      "conformance.c" },
 };
 
 static char * read_file( const char * path, long * size )
@@ -176,7 +194,7 @@ int main( int argc, char ** argv )
 
     if ( argc != 4 )
     {
-        printf( "usage: sabotage <control> <serialize.h> <out/serialize.h>\n" );
+        printf( "usage: sabotage <control> <file> <out/file>\n" );
         return 1;
     }
 
@@ -198,6 +216,35 @@ int main( int argc, char ** argv )
     {
         printf( "sabotage: cannot read %s\n", argv[2] );
         return 1;
+    }
+
+    /* every file the control's reader is built from passes through here; only
+       the one its rule lives in is sabotaged, and the rest are copied as is */
+    {
+        const char * target = sabotage->file;
+        const char * base = argv[2];
+        const char * slash;
+        for ( slash = argv[2]; *slash != '\0'; slash++ )
+        {
+            if ( *slash == '/' || *slash == '\\' )
+            {
+                base = slash + 1;
+            }
+        }
+        if ( strcmp( base, target ) != 0 )
+        {
+            out = fopen( argv[3], "wb" );
+            if ( out == NULL )
+            {
+                printf( "sabotage: cannot write %s\n", argv[3] );
+                free( text );
+                return 1;
+            }
+            fwrite( text, 1, (size_t) size, out );
+            fclose( out );
+            free( text );
+            return 0;
+        }
     }
 
     occurrences = count_occurrences( text, sabotage->needle );

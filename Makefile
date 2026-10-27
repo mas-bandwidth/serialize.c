@@ -91,7 +91,7 @@ test: release-check controls $(TEST_SUITES:%=build/%)
 # variable itself (test/corpus_root.h), so one setting moves both.
 SERIALIZE_CONFORMANCE_ROOT ?= .
 
-CONTROLS = align-padding ranged-reconstruction ranged-range fixed-degenerate-terminal float-finite double-finite compressed-float-finite end-trailing-data end-padding int-relative-canonical string-embedded-nul string-utf8 string-utf8-surrogate int64-through-double wrong-reason
+CONTROLS = align-padding ranged-reconstruction ranged-range fixed-degenerate-terminal float-finite double-finite compressed-float-finite end-trailing-data end-padding int-relative-canonical string-embedded-nul string-utf8 string-utf8-surrogate int64-through-double wrong-reason object-terminal
 
 controls: build/conformance build/sabotage
 	@if ./build/conformance $(SERIALIZE_CONFORMANCE_ROOT)/conformance-controls/unknown-operation.txt > build/control-unknown-operation.log 2>&1; then \
@@ -101,7 +101,8 @@ controls: build/conformance build/sabotage
 	@for control in $(CONTROLS); do \
 		mkdir -p build/controls/$$control/test || exit 1; \
 		./build/sabotage $$control serialize.h build/controls/$$control/serialize.h || exit 1; \
-		cp test/conformance.c test/verbose.h test/corpus_root.h build/controls/$$control/test/ || exit 1; \
+		./build/sabotage $$control test/conformance.c build/controls/$$control/test/conformance.c || exit 1; \
+		cp test/verbose.h test/corpus_root.h build/controls/$$control/test/ || exit 1; \
 		$(CC) $(CFLAGS) -DNDEBUG build/controls/$$control/test/conformance.c -o build/controls/$$control/conformance $(LDLIBS) || exit 1; \
 		printf "control %s: " $$control; \
 		./build/controls/$$control/conformance --expect-failures $(SERIALIZE_CONFORMANCE_ROOT)/conformance-controls/$$control.expected $(SERIALIZE_CONFORMANCE_ROOT)/conformance || exit 1; \
