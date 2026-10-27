@@ -403,10 +403,21 @@ static int steps_read( serialize_read_stream_t * r, step_t * steps, int count, i
     composition and not an encoding -- no framing, no length prefix, no
     alignment inserted around it -- which in C is exactly a call that runs the
     nested steps against the same stream.
+
+    Failure is terminal across the nesting too, as the C++ serialize_object
+    enforces it: a stream that has already refused refuses the object on
+    ENTRY, without running it, and a stream that refused inside it refuses on
+    EXIT. The entry test is the one an empty object needs -- it consumes no
+    bits, so nothing inside it ever meets the poisoned cursor, and without the
+    test it would succeed on a failed stream.
 */
 static int object_read( serialize_read_stream_t * r, step_t * steps, int count )
 {
-    return steps_read( r, steps, count, NULL );
+    if ( serialize_read_error( r ) )
+        return 0;
+    if ( !steps_read( r, steps, count, NULL ) || serialize_read_error( r ) )
+        return 0;
+    return 1;
 }
 
 static int step_read( serialize_read_stream_t * r, step_t * step )
