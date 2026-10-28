@@ -66,6 +66,20 @@ value 1.1 could carry keeps its exact bytes. What changed, and what it breaks:
 (a function pointer plus a context), whose failing callback latches it. No
 byte of the wire changes.
 
+**2.1.1** applies the reference's 2.1.1 rulings, with no wire change. Write
+misuse has one mechanism, the trap — in C, `serialize_assert` (IMPLEMENTING.md
+U9) — and never latches: `serialize_write_fail` sets the write error flag and
+nothing else, so a later write emits exactly what it would have without it. A
+measure makes every check its write makes except room (U6): inverted
+`serialize_measure_int` / `serialize_measure_int64` bounds, a
+`serialize_measure_bits` width outside `[1,32]`, a negative
+`serialize_measure_bytes` count and a compressed float declaration whose top
+decodes to an infinity now assert. The derive-per-call
+`serialize_read_compressed_float` refuses a bad declaration as
+`value_out_of_range` before any bits move instead of asserting (U7, U16).
+`serialize_copy_string` zeroes the rest of the destination, backs off to a
+whole character, and asserts `dest_size >= 1` (U15).
+
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it
@@ -237,14 +251,28 @@ out under `NDEBUG`. Size the buffer with a measure stream if you are not
 certain the message fits: writing past the end of your buffer in a release
 build is undefined behavior, yours.
 
+**Write misuse traps, and never latches** (IMPLEMENTING.md U9). The trap is
+`serialize_assert` — `assert` unless you define it, so an abort — at the
+call, before it returns, and before any bit of the operation is written where
+room is a whole-operation check (U10). No misuse records a reason on a write
+or measure stream or makes a later operation fail; `value_out_of_range`,
+`non_finite_float`, `invalid_utf8`, `embedded_nul` and `past_end` are a
+reader's reasons only. Under `NDEBUG` the checks compile out and the output
+after misuse is unspecified.
+
 That trust is the whole caller-facing surface, not just the write half. The
-**measure stream carries the same contracts the same way**: a string longer
-than its declared buffer, an `int_relative` that does not increase, inverted
-128-bit bounds are debug asserts, and a release-build measure is pure bit
+**measure stream carries the same contracts the same way** (U6): it makes
+every check its write makes except room — a string longer than its declared
+buffer or not UTF-8, an `int_relative` that does not increase, inverted
+bounds at every width, a bit count outside its width, a negative byte count,
+a compressed float or fixed point declaration the write refuses — as debug
+asserts, and a release-build measure is pure bit
 arithmetic with zero checks — like the C++ `MeasureStream`, whose release
 build checks nothing either. A **read** never traps (IMPLEMENTING.md U7 and
 U16, since 2.1): a bad declaration on a read stream (a bit count outside its
-range, inverted bounds, an `int_relative` previous outside its domain,
+range, inverted bounds, an `int_relative` previous outside its domain, a
+compressed float declaration whose min is not below its max, whose
+resolution is not positive, or whose span or step count is not finite,
 precomputed compressed float constants no declaration derives, a fixed point
 declaration that does not fit its Q format, a string buffer below 1, a
 negative byte count) is refused as `value_out_of_range` before any bits move,
@@ -263,14 +291,14 @@ port's answer to a payload that arrives without slack. It takes the
 destination's size as a parameter, so it is the only place the library is
 told how big a caller's allocation is — and where it is told, it checks.
 
-If you need to mark a stream failed yourself, call `serialize_read_fail` (with
-the reason, from the closed list) or `serialize_write_fail`; do not set the
-`error` field by hand, because failure
-is carried by a poisoned position as well as by that flag — the read cursor
-on a read stream, the bit limit on a write stream. On a read stream that
-failure is sticky as above. On a write stream the flag is reported by
-`serialize_write_error`, and continuing to write after failing is caller
-error, caught by the debug assert.
+If you need to mark a read stream failed yourself, call `serialize_read_fail`
+(with the reason, from the closed list); do not set the `error` field by
+hand, because a read stream's failure is carried by its poisoned cursor as
+well as by that flag, and is sticky as above. `serialize_write_fail` sets the
+**write error flag**, the one record a write stream carries (U9): it is
+reported by `serialize_write_error` in every build, and changes nothing else
+— no operation returns 0 or traps because of it, and a later write emits
+exactly what it would have without it.
 
 ## Building
 

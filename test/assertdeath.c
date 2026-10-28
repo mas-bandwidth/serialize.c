@@ -244,13 +244,60 @@ static void violate_read_padded_destination( void )
     serialize_read_stream_init_padded( &r, destination, (int) sizeof( destination ), payload, (int) sizeof( payload ) );
 }
 
-static void violate_write_after_fail( void )
+/* IMPLEMENTING.md U6: a measure makes every check its write makes, except
+   room and buffer size, by the same trap. Each case below is a declaration
+   its write half asserts. */
+
+static void violate_measure_int_bounds( void )
 {
-    serialize_uint8_t buffer[8];
-    serialize_write_stream_t w;
-    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
-    serialize_write_fail( &w );
-    serialize_write_bits( &w, 1, 1 );                   /* the poisoned limit catches this */
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_int( &m, 3, 1 );                  /* min above max */
+}
+
+static void violate_measure_int64_bounds( void )
+{
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_int64( &m, 3, 1 );                /* min above max */
+}
+
+static void violate_measure_bits_zero( void )
+{
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_bits( &m, 0 );                    /* bits is in [1,32] */
+}
+
+static void violate_measure_bits_wide( void )
+{
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_bits( &m, 40 );                   /* bits is in [1,32]; bits64 is the wide form */
+}
+
+static void violate_measure_bytes_negative( void )
+{
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_bytes( &m, -1 );
+}
+
+static void violate_measure_compressed_float_infinite_top( void )
+{
+    /* the write half's top-decode declaration check, on measure */
+    serialize_measure_stream_t m;
+    const float min = 30423614405477505635920876929024.0f;
+    serialize_measure_stream_init( &m );
+    serialize_measure_compressed_float( &m, min, FLT_MAX, 20282409603651670423947251286016.0f );
+}
+
+/* IMPLEMENTING.md U15: serialize_copy_string with dest_size below 1 is write
+   misuse, the trap (U9) */
+static void violate_copy_string_dest_size_zero( void )
+{
+    char dest[8];
+    serialize_copy_string( dest, "abc", 0 );
 }
 
 static void violate_compressed_float_nan_value( void )
@@ -481,7 +528,7 @@ static void must_abort( void (*violation)( void ), const char * name, const char
 
 int main( void )
 {
-    must_abort( violate_capacity, "capacity", "stream->bits_written + bits <= stream->bits_limit" );
+    must_abort( violate_capacity, "capacity", "stream->bits_written + bits <= stream->num_bits" );
     must_abort( violate_write_buffer_multiple_of_8, "write_buffer_multiple_of_8", "( bytes % 8 ) == 0" );
     must_abort( violate_int_range, "int_range", "value <= max" );
     must_abort( violate_int_relative_order, "int_relative_order", "current > previous" );
@@ -501,7 +548,13 @@ int main( void )
     must_abort( violate_measure_int128_bounds, "measure_int128_bounds", "serialize_int128_compare( min, max ) <= 0" );
     must_abort( violate_read_null_buffer, "read_null_buffer", "buffer" );
     must_abort( violate_read_padded_destination, "read_padded_destination", "destination_bytes - 8 >= bytes" );
-    must_abort( violate_write_after_fail, "write_after_fail", "stream->bits_written + bits <= stream->bits_limit" );
+    must_abort( violate_measure_int_bounds, "measure_int_bounds", "min <= max" );
+    must_abort( violate_measure_int64_bounds, "measure_int64_bounds", "min <= max" );
+    must_abort( violate_measure_bits_zero, "measure_bits_zero", "bits > 0" );
+    must_abort( violate_measure_bits_wide, "measure_bits_wide", "bits <= 32" );
+    must_abort( violate_measure_bytes_negative, "measure_bytes_negative", "bytes >= 0" );
+    must_abort( violate_measure_compressed_float_infinite_top, "measure_compressed_float_infinite_top", "serialize_float_is_finite( min + delta )" );
+    must_abort( violate_copy_string_dest_size_zero, "copy_string_dest_size_zero", "dest_size >= 1" );
     must_abort( violate_compressed_float_nan_value, "compressed_float_nan_value", "serialize_float_is_finite( value )" );
     must_abort( violate_compressed_float_inf_value, "compressed_float_inf_value", "serialize_float_is_finite( value )" );
     must_abort( violate_compressed_float_infinite_delta, "compressed_float_infinite_delta", "serialize_float_is_finite( delta )" );
