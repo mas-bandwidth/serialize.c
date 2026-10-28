@@ -121,14 +121,33 @@
     behavior, yours.
 
     The measure stream carries the same contracts the same way — debug
-    asserts, zero release checking.
+    asserts, zero release checking. A measure makes every check its write
+    makes except room and buffer size, which a measure does not have
+    (IMPLEMENTING.md U6).
+
+    WRITE MISUSE TRAPS, AND NEVER LATCHES (IMPLEMENTING.md U9, since 2.1.1).
+    The one write-misuse mechanism is the trap, and in C the trap is
+    serialize_assert (assert by default, so abort): a checked build traps at
+    the call, before the call returns and, where room is a whole-operation
+    check (U10), before any bit of the operation is written. Misuse records
+    nothing on a write or measure stream and makes no later operation fail;
+    an unchecked build (NDEBUG) compiles every check out and its output after
+    misuse is unspecified. The one record a write stream carries is the
+    write error flag, set only by serialize_write_fail, in every build, for
+    the caller to read with serialize_write_error: no operation returns 0 or
+    traps because of it, and a later write emits exactly what it would have
+    without it. A nested object whose callback returns 0 on a write or a
+    measure makes the object operation return 0, and records nothing.
+    serialize_copy_string's dest_size below 1 is write misuse too.
 
     A READER NEVER TRAPS (IMPLEMENTING.md U7, U16, since 2.1). A bad
     DECLARATION on a read stream -- a bit count outside its range, ranged
     bounds the wrong way round, an int_relative previous outside its domain,
-    precomputed compressed_float constants no declaration derives, a fixed
-    point declaration that does not fit its Q format, a string buffer below
-    1 -- is refused as value_out_of_range before any bits move, in every
+    a compressed_float declaration whose min is not below its max, whose
+    resolution is not positive, or whose span or step count is not finite
+    in float32, precomputed compressed_float constants no declaration
+    derives, a fixed point declaration that does not fit its Q format, a
+    string buffer below 1 -- is refused as value_out_of_range before any bits move, in every
     build, exactly as a wire refusal is: never an assert, never wrong data,
     and never a write the wire chooses. With literal declarations, the usual
     call and every generated one, each test folds away. What remains asserted
@@ -147,8 +166,8 @@
 
 #define SERIALIZE_VERSION_MAJOR 2
 #define SERIALIZE_VERSION_MINOR 1
-#define SERIALIZE_VERSION_PATCH 0
-#define SERIALIZE_VERSION "2.1.0"
+#define SERIALIZE_VERSION_PATCH 1
+#define SERIALIZE_VERSION "2.1.1"
 
 /* ---------------------------------------------------------------------------
    configuration
@@ -456,24 +475,15 @@ typedef struct serialize_write_stream_t
     int word_index;
     serialize_uint64_t scratch;
     int scratch_bits;
-    int error;                  /* set only by serialize_write_fail; the write
-                                   path itself cannot fail — see ERRORS */
-
     /*
-        num_bits again, and -1 once serialize_write_fail has been called.
-
-        Bit counts are 64-bit, as the C++ BitWriter and BitReader hold them
-        (serialize README, Limitations) and as the C read path already did. `int bytes * 8` overflows at 256 MiB on LP64.
-
-        The release write path never reads bits_limit: capacity is the writer's
-        contract, asserted in debug only (issue #52 — see ERRORS). The debug
-        assert tests against THIS field rather than num_bits so that writing
-        to a stream you already failed is caught too — the poisoned limit
-        fails the assert for good. The read stream carries the real, release-
-        build latch, and carries it in the CURSOR rather than in a second
-        field; see serialize_read_stream_t.
+        Set only by serialize_write_fail, for the caller to read; the write
+        path never consults it and itself cannot fail (IMPLEMENTING.md U9 —
+        see ERRORS). Bit counts are 64-bit, as the C++ BitWriter and
+        BitReader hold them (serialize README, Limitations): `int bytes * 8`
+        overflows at 256 MiB on LP64. Capacity is the writer's contract,
+        asserted against num_bits in a checked build only (issue #52).
     */
-    serialize_int64_t bits_limit;
+    int error;
 } serialize_write_stream_t;
 
 /*
@@ -584,19 +594,13 @@ SERIALIZE_INLINE serialize_int64_t serialize_write_bytes_processed( const serial
 SERIALIZE_INLINE serialize_int64_t serialize_write_bits_available( const serialize_write_stream_t * stream );
 SERIALIZE_INLINE int serialize_write_error( const serialize_write_stream_t * stream );
 
-/* Fails a stream, and always returns 0 so a caller can `return` it directly.
-   This is the ONLY supported way to fail a stream: setting the error flag by
-   hand leaves the latch unset — the read stream's poisoned cursor, the write
-   stream's poisoned bit limit. See the stream structs.
-
-   On a READ stream failure is sticky: every later read fails without touching
-   the buffer — though each still advances the cursor, so the processed
-   counters on a failed stream are meaningless (see ERRORS at the top of this
-   file). On a WRITE stream the flag is reported by serialize_write_error
-   but the release write path never consults it — writes are trusted and
-   cannot fail (see ERRORS) — so do not keep writing to a stream you have
-   failed: that is caller error, and the poisoned bit limit makes the next
-   write assert in a debug build. */
+/* Sets a write stream's error flag, and always returns 0 so a caller can
+   `return` it directly: the C write error flag, the one record a write
+   stream carries (IMPLEMENTING.md U9, U15). It is reported by
+   serialize_write_error, in every build, and changes nothing else: no
+   operation returns 0 or traps because of it, and a later write emits
+   exactly what it would have without it. A read stream fails through
+   serialize_read_fail, which latches; see the read stream struct. */
 SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream );
 
 /* A read stream's failure carries its reason, from the closed list
@@ -1082,7 +1086,14 @@ SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed128( serialize_measure_stream
 SERIALIZE_INLINE int serialize_bits_required( serialize_uint32_t min, serialize_uint32_t max );
 SERIALIZE_INLINE int serialize_bits_required64( serialize_uint64_t min, serialize_uint64_t max );
 
-/* Bounded copy that always null-terminates. */
+/* The reference helper (IMPLEMENTING.md U15), defined on the source's bytes:
+   the bytes before the first NUL; if there are more than dest_size - 1, the
+   first dest_size - 1 of them, then bytes dropped from the end while the
+   first byte left out is a continuation byte (10xxxxxx). For well-formed
+   UTF-8 that is the longest prefix that fits and does not end inside a
+   character, and serialize_write_string with buffer_size = dest_size
+   accepts it. The rest of dest is zeroed, so it is NUL terminated.
+   dest_size below 1 is write misuse, the trap (U9). */
 SERIALIZE_INLINE void serialize_copy_string( char * dest, const char * source, unsigned long dest_size );
 
 /* ===========================================================================
@@ -1229,13 +1240,13 @@ SERIALIZE_INLINE void serialize_write_stream_init( serialize_write_stream_t * st
     stream->scratch = 0;
     stream->scratch_bits = 0;
     stream->error = 0;
-    stream->bits_limit = (serialize_int64_t) bytes * 8;
 }
 
 SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream )
 {
+    /* the flag and nothing else: misuse never latches on a write stream, and
+       a later write emits exactly what it would have without the flag (U9) */
     stream->error = 1;
-    stream->bits_limit = -1;    /* the bounds test every write already makes now fails for good */
     return 0;
 }
 
@@ -1304,11 +1315,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_bits( serialize_write_stream_t * SER
         measured write residual against C++ — it made every write fallible, so
         the compiler kept the scratch word and bit counts correct in memory at
         every field boundary instead of coalescing them in registers across a
-        message. Asserted against bits_limit rather than num_bits so a stream
-        failed by serialize_write_fail is also caught in a debug build: the
-        poisoned limit fails this assert for good.
+        message. serialize_write_fail does not move this bound: the error
+        flag never makes a later write trap (IMPLEMENTING.md U9).
     */
-    serialize_assert( stream->bits_written + bits <= stream->bits_limit );
+    serialize_assert( stream->bits_written + bits <= stream->num_bits );
 
     /* a value wider than its declared bits is caller error, asserted exactly
        where the C++ BitWriter asserts it — and, like the C++ BitWriter, not
@@ -2181,6 +2191,9 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERI
 
 SERIALIZE_INLINE int serialize_measure_bits( serialize_measure_stream_t * stream, int bits )
 {
+    /* every check the write makes except room (IMPLEMENTING.md U6) */
+    serialize_assert( bits > 0 );
+    serialize_assert( bits <= 32 );
     stream->bits_written += bits;
     return 1;
 }
@@ -2228,12 +2241,14 @@ SERIALIZE_INLINE int serialize_measure_align( serialize_measure_stream_t * strea
 
 SERIALIZE_INLINE int serialize_measure_int( serialize_measure_stream_t * stream, serialize_int32_t min, serialize_int32_t max )
 {
+    serialize_assert( min <= max );     /* U6: the write's declaration check */
     stream->bits_written += serialize_bits_required( (serialize_uint32_t) min, (serialize_uint32_t) max );
     return 1;
 }
 
 SERIALIZE_INLINE int serialize_measure_int64( serialize_measure_stream_t * stream, serialize_int64_t min, serialize_int64_t max )
 {
+    serialize_assert( min <= max );     /* U6: the write's declaration check */
     stream->bits_written += serialize_bits_required64( (serialize_uint64_t) min, (serialize_uint64_t) max );
     return 1;
 }
@@ -2276,6 +2291,7 @@ SERIALIZE_INLINE int serialize_measure_double( serialize_measure_stream_t * stre
 
 SERIALIZE_INLINE int serialize_measure_bytes( serialize_measure_stream_t * stream, int bytes )
 {
+    serialize_assert( bytes >= 0 );     /* U6: the write's check */
     serialize_measure_align( stream );
     stream->bits_written += (serialize_int64_t) bytes * 8;
     return 1;
@@ -2300,8 +2316,8 @@ SERIALIZE_INLINE int serialize_measure_bytes( serialize_measure_stream_t * strea
     Finite, spelled so the C89 floor holds: isfinite is C99. Through the bit
     pattern, the same test the float read refuses on, so no floating point
     environment, contraction setting or fast math flag can change the answer.
-    Referenced only from serialize_assert, so it compiles to nothing under
-    NDEBUG.
+    The write side calls it from serialize_assert only; the compressed float
+    reads call it to refuse a bad declaration in every build.
 */
 SERIALIZE_INLINE int serialize_float_is_finite( float value )
 {
@@ -2580,6 +2596,23 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float( serialize_read_stre
     serialize_uint32_t max_integer_value;
     int bits;
     float delta;
+
+    /* a declaration the write half traps on is refused as value_out_of_range
+       before any bits move, in every build (IMPLEMENTING.md U7, U16): min
+       below max, a positive resolution, and a span and step count finite in
+       float32 -- the checks serialize_compressed_float_params asserts, made
+       here first so the reader never reaches them. The !( < ) and !( > )
+       forms refuse a NaN bound or resolution too, and with both of those
+       holding, a span that is not finite makes the step count not finite,
+       so one finiteness test covers both. With a literal declaration, every
+       generated call, the test folds away. The top decode is not a
+       declaration check on read: a non-finite decode is refused as
+       non_finite_float by the precomputed read below. */
+    if ( !( min < max ) || !( res > 0.0f ) || !serialize_float_is_finite( ( max - min ) / res ) )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
+
     serialize_compressed_float_params( min, max, res, &max_integer_value, &bits, &delta );
     return serialize_read_compressed_float_precomputed( stream, value, max_integer_value, bits, delta, min );
 }
@@ -2590,6 +2623,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_measure_compressed_float( serialize_measur
     int bits;
     float delta;
     serialize_compressed_float_params( min, max, res, &max_integer_value, &bits, &delta );
+    /* U6: the write's declaration checks, the top decode included -- the
+       measure has the declaration here, which its precomputed twin does not */
+    serialize_assert( serialize_float_is_finite( min + delta ) );
+    (void) max_integer_value;
     return serialize_measure_compressed_float_precomputed( stream, bits );
 }
 
@@ -2831,8 +2868,8 @@ SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stre
     Is there room for a field of field_bits, then an align, then bytes of
     payload, on this write stream? IMPLEMENTING.md U10: a write checks room
     for the whole operation before it writes any of it, so no length or align
-    bits land ahead of a payload that does not fit. Tested against bits_limit
-    so a failed stream has room for nothing. Used by the write side asserts
+    bits land ahead of a payload that does not fit. Tested against num_bits:
+    the write error flag changes no room (U9). Used by the write side asserts
     only, as the C++ serialize_write_has_room is: release builds check nothing
     on write (issue #52).
 */
@@ -2840,7 +2877,7 @@ SERIALIZE_INLINE int serialize_write_has_room( const serialize_write_stream_t * 
 {
     serialize_int64_t index = stream->bits_written + field_bits;
     serialize_int64_t align = ( 8 - ( index % 8 ) ) % 8;
-    return bytes >= 0 && field_bits >= 0 && field_bits + align + bytes * 8 <= stream->bits_limit - stream->bits_written;
+    return bytes >= 0 && field_bits >= 0 && field_bits + align + bytes * 8 <= stream->num_bits - stream->bits_written;
 }
 
 SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, const serialize_uint8_t * data, int bytes )
@@ -2859,10 +2896,8 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
 
     /* capacity is the writer's contract, asserted exactly where the C++
        WriteBytes asserts it (issue #52). Divided rather than multiplied so
-       the comparison cannot overflow int on a block larger than 256MB, and
-       against bits_limit so a stream failed by serialize_write_fail is
-       caught too. */
-    serialize_assert( bytes <= ( stream->bits_limit - stream->bits_written ) / 8 );
+       the comparison cannot overflow int on a block larger than 256MB. */
+    serialize_assert( bytes <= ( stream->num_bits - stream->bits_written ) / 8 );
 
     /* byte aligned by the align above, and mid-stream the scratch tracks the
        cursor: scratch_bits == bits_written % 64 */
@@ -3119,19 +3154,37 @@ SERIALIZE_INLINE int serialize_read_string( serialize_read_stream_t * stream, ch
 
 SERIALIZE_INLINE void serialize_copy_string( char * dest, const char * source, unsigned long dest_size )
 {
-    unsigned long i;
+    unsigned long length = 0;
 
-    if ( dest_size == 0 )
+    /* dest_size below 1 is write misuse, the trap (IMPLEMENTING.md U9, U15).
+       An unchecked build copies nothing rather than write before dest. */
+    serialize_assert( dest_size >= 1 );
+    if ( dest_size < 1 )
     {
         return;
     }
 
-    for ( i = 0; i < dest_size - 1 && source[i] != '\0'; i++ )
+    /* the bytes before the first NUL, at most dest_size - 1 of them */
+    while ( length < dest_size - 1 && source[length] != '\0' )
     {
-        dest[i] = source[i];
+        length++;
     }
 
-    dest[i] = '\0';
+    /* cut short: drop bytes from the end while the first byte left out is a
+       continuation byte (10xxxxxx), so a well-formed source is never cut
+       inside a character and serialize_write_string at buffer_size =
+       dest_size accepts the result. Defined on bytes, ill-formed ones too. */
+    if ( source[length] != '\0' )
+    {
+        while ( length > 0 && ( (unsigned char) source[length] & 0xC0 ) == 0x80 )
+        {
+            length--;
+        }
+    }
+
+    /* the prefix, then zeros to the end of dest, so it is NUL terminated */
+    memcpy( dest, source, (size_t) length );
+    memset( dest + length, 0, (size_t) ( dest_size - length ) );
 }
 
 /* ---------------------------------------------------------------------------

@@ -351,6 +351,43 @@ static int test_uniform_read_rules( void )
         if ( !serialize_read_compressed_float_precomputed( &r, &f, 1000, 10, 10.0f, 0.0f ) || f != 0.0f ) ok = 0;
     }
 
+    /* U7 and U16: the derive-per-call compressed_float read refuses a bad
+       declaration as value_out_of_range before any bits move, in every
+       build: min not below max, a resolution that is not positive, and a
+       span or step count that is not finite in float32. The last is the
+       declaration the write half traps on and the old read accepted in a
+       release build, reading 32 bits through a clamped step count. */
+    {
+        static const serialize_uint32_t nan_pattern = 0x7FC00000UL;
+        float nan_value;
+        float mins[7];
+        float maxs[7];
+        float ress[7];
+        int i;
+        memcpy( &nan_value, &nan_pattern, 4 );
+        mins[0] = 0.0f;       maxs[0] = 1.0e38f;   ress[0] = 1.0e-38f;     /* step count overflows */
+        mins[1] = -3.0e38f;   maxs[1] = 3.0e38f;   ress[1] = 1.0f;         /* span overflows */
+        mins[2] = 10.0f;      maxs[2] = 0.0f;      ress[2] = 0.01f;        /* min above max */
+        mins[3] = 5.0f;       maxs[3] = 5.0f;      ress[3] = 0.01f;        /* min equals max */
+        mins[4] = 0.0f;       maxs[4] = 10.0f;     ress[4] = 0.0f;         /* resolution zero */
+        mins[5] = 0.0f;       maxs[5] = 10.0f;     ress[5] = -0.01f;       /* resolution negative */
+        mins[6] = nan_value;  maxs[6] = 10.0f;     ress[6] = 0.01f;        /* min NaN */
+        for ( i = 0; i < 7; i++ )
+        {
+            f = 42.0f;
+            serialize_read_stream_init( &r, data, 16 );
+            if ( serialize_read_compressed_float( &r, &f, mins[i], maxs[i], ress[i] ) || f != 42.0f || !refused_out_of_range( &r ) ) ok = 0;
+        }
+        /* the failure state first: a stream that already refused keeps its reason */
+        serialize_read_stream_init( &r, data, 16 );
+        if ( serialize_read_reject( &r ) ) ok = 0;
+        if ( serialize_read_compressed_float( &r, &f, 0.0f, 1.0e38f, 1.0e-38f ) ) ok = 0;
+        if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+        /* a conforming declaration still reads */
+        serialize_read_stream_init( &r, data, 16 );
+        if ( !serialize_read_compressed_float( &r, &f, 0.0f, 10.0f, 0.01f ) || f != 0.0f ) ok = 0;
+    }
+
     /* U16, the audit's fixed_qformat reproducer: a Q16.16 declared over
        [-40000, 40000] whole units does not fit Q16.16 ([-32768, 32767]). The
        wire offset below carries the raw value 2^31, which the old reader
@@ -443,6 +480,106 @@ static int test_uniform_read_rules( void )
     if ( serialize_read_string( &r, (char *) data, 0 ) ) ok = 0;
     if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_PAST_END ) ok = 0;
 
+    return ok;
+}
+
+/*
+    IMPLEMENTING.md U9: the C write error flag is the one record a write
+    stream carries. serialize_write_fail sets it, in every build, for the
+    caller to read, and it changes nothing else: no operation returns 0 or
+    traps because of it, and a later write emits exactly what it would have
+    without it. The same sequence is written twice, once with a fail in the
+    middle, and the bytes and bit counts must match.
+*/
+static int write_after_fail_sequence( serialize_uint8_t * buffer, int bytes, int fail_midway, serialize_int64_t * bits, int * error )
+{
+    serialize_write_stream_t w;
+    int ok = 1;
+    serialize_write_stream_init( &w, buffer, bytes );
+    if ( !serialize_write_bits( &w, 5, 3 ) ) ok = 0;
+    if ( !serialize_write_int( &w, 42, 0, 1000 ) ) ok = 0;
+    if ( fail_midway && serialize_write_fail( &w ) != 0 ) ok = 0;
+    if ( !serialize_write_uint32( &w, 0xDEADBEEFu ) ) ok = 0;
+    if ( !serialize_write_compressed_float( &w, 0.75f, 0.0f, 1.0f, 0.01f ) ) ok = 0;
+    if ( !serialize_write_string( &w, "after the fail", 32 ) ) ok = 0;
+    if ( !serialize_write_bytes( &w, (const serialize_uint8_t *) "\x01\x02\x03", 3 ) ) ok = 0;
+    if ( !serialize_write_end( &w ) ) ok = 0;
+    serialize_write_flush( &w );
+    *bits = serialize_write_bits_processed( &w );
+    *error = serialize_write_error( &w );
+    return ok;
+}
+
+static int test_write_fail_changes_no_write( void )
+{
+    serialize_uint8_t clean[64];
+    serialize_uint8_t failed_midway[64];
+    serialize_int64_t clean_bits = 0;
+    serialize_int64_t failed_bits = 0;
+    int clean_error = -1;
+    int failed_error = -1;
+    int ok = 1;
+    memset( clean, 0, sizeof( clean ) );
+    memset( failed_midway, 0, sizeof( failed_midway ) );
+    if ( !write_after_fail_sequence( clean, (int) sizeof( clean ), 0, &clean_bits, &clean_error ) ) ok = 0;
+    if ( !write_after_fail_sequence( failed_midway, (int) sizeof( failed_midway ), 1, &failed_bits, &failed_error ) ) ok = 0;
+    if ( clean_error != 0 || failed_error != 1 ) ok = 0;
+    if ( clean_bits != failed_bits ) ok = 0;
+    if ( memcmp( clean, failed_midway, sizeof( clean ) ) != 0 ) ok = 0;
+    return ok;
+}
+
+/*
+    IMPLEMENTING.md U15, serialize_copy_string: the bytes before the first
+    NUL; if more than dest_size - 1, the first dest_size - 1 of them, then
+    bytes dropped from the end while the first byte left out is a
+    continuation byte (10xxxxxx). The rest of dest is zeroed, and nothing past
+    dest_size is touched. The vectors are the reference's test_copy_string,
+    ill-formed ones included: the rule is defined on bytes.
+*/
+static int copy_string_case( const char * source, unsigned long dest_size, const char * expected )
+{
+    char dest[16 + 8];
+    size_t expected_length = strlen( expected );
+    unsigned long i;
+    memset( dest, 'G', sizeof( dest ) );
+    serialize_copy_string( dest, source, dest_size );
+    if ( memcmp( dest, expected, expected_length ) != 0 ) return 0;
+    for ( i = (unsigned long) expected_length; i < dest_size; i++ )
+    {
+        if ( dest[i] != '\0' ) return 0;
+    }
+    for ( i = dest_size; i < (unsigned long) sizeof( dest ); i++ )
+    {
+        if ( dest[i] != 'G' ) return 0;
+    }
+    return 1;
+}
+
+static int test_copy_string( void )
+{
+    int ok = 1;
+    if ( !copy_string_case( "abc", 8, "abc" ) ) ok = 0;
+    if ( !copy_string_case( "a\0bc", 8, "a" ) ) ok = 0;
+    if ( !copy_string_case( "abcdefghij", 4, "abc" ) ) ok = 0;
+    if ( !copy_string_case( "\xC3\xA9\xC3\xA9", 4, "\xC3\xA9" ) ) ok = 0;
+    if ( !copy_string_case( "\xC3\xA9\xC3\xA9", 3, "\xC3\xA9" ) ) ok = 0;
+    if ( !copy_string_case( "a\xF0\x9F\x98\x80", 3, "a" ) ) ok = 0;
+    if ( !copy_string_case( "a\xF0\x9F\x98\x80", 4, "a" ) ) ok = 0;
+    if ( !copy_string_case( "a\xF0\x9F\x98\x80", 5, "a" ) ) ok = 0;
+    if ( !copy_string_case( "a\xF0\x9F\x98\x80", 6, "a\xF0\x9F\x98\x80" ) ) ok = 0;
+    if ( !copy_string_case( "ab\x80\x80", 4, "a" ) ) ok = 0;
+    if ( !copy_string_case( "\xC3\xA9\xA9\xA9", 4, "" ) ) ok = 0;
+    if ( !copy_string_case( "abc", 1, "" ) ) ok = 0;
+    /* the result is what serialize_write_string accepts at buffer_size = dest_size */
+    {
+        char dest[4];
+        serialize_uint8_t buffer[16];
+        serialize_write_stream_t w;
+        serialize_copy_string( dest, "\xC3\xA9\xC3\xA9", sizeof( dest ) );
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        if ( !serialize_write_string( &w, dest, (int) sizeof( dest ) ) ) ok = 0;
+    }
     return ok;
 }
 
@@ -1501,6 +1638,8 @@ int main( void )
             object whose callback fails with nothing latched ---- */
     CHECK( test_serialize_reject() );
     CHECK( test_uniform_read_rules() );
+    CHECK( test_write_fail_changes_no_write() );
+    CHECK( test_copy_string() );
 
     /* ---- format 2.0: every refusal names its reason, the reader refuses
             non-finite floats and a non-finite compressed decode, the
