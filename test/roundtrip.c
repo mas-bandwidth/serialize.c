@@ -379,10 +379,10 @@ static int test_uniform_read_rules( void )
             if ( serialize_read_compressed_float( &r, &f, mins[i], maxs[i], ress[i] ) || f != 42.0f || !refused_out_of_range( &r ) ) ok = 0;
         }
         /* the failure state first: a stream that already refused keeps its reason */
-        serialize_read_stream_init( &r, data, 0 );
-        if ( serialize_read_bits( &r, &u32, 1 ) ) ok = 0;
+        serialize_read_stream_init( &r, data, 16 );
+        if ( serialize_read_reject( &r ) ) ok = 0;
         if ( serialize_read_compressed_float( &r, &f, 0.0f, 1.0e38f, 1.0e-38f ) ) ok = 0;
-        if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_PAST_END ) ok = 0;
+        if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
         /* a conforming declaration still reads */
         serialize_read_stream_init( &r, data, 16 );
         if ( !serialize_read_compressed_float( &r, &f, 0.0f, 10.0f, 0.01f ) || f != 0.0f ) ok = 0;
