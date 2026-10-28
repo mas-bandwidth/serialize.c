@@ -242,10 +242,14 @@ That trust is the whole caller-facing surface, not just the write half. The
 than its declared buffer, an `int_relative` that does not increase, inverted
 128-bit bounds are debug asserts, and a release-build measure is pure bit
 arithmetic with zero checks — like the C++ `MeasureStream`, whose release
-build checks nothing either. The parameters you pass a **read** are yours
-too: inverted bounds on a ranged read are caller error, asserted in debug
-and never checked in release, exactly as the C++ `ReadStream` asserts them.
-What a reader checks for real — in every build mode — is the **data**: a
+build checks nothing either. A **read** never traps (IMPLEMENTING.md U7 and
+U16, since 2.1): a bad declaration on a read stream (a bit count outside its
+range, inverted bounds, an `int_relative` previous outside its domain,
+precomputed compressed float constants no declaration derives, a fixed point
+declaration that does not fit its Q format, a string buffer below 1, a
+negative byte count) is refused as `value_out_of_range` before any bits move,
+in every build, exactly as the C++ `ReadStream` refuses them since 2.1. With
+literal declarations each test folds away. What a reader checks for real — in every build mode — is the **data**: a
 value outside its declared range, a read past the end of the buffer, nonzero
 padding, trailing data, a non-finite float, a non-canonical tier and
 malformed string content are refused, the same refusals the C++ reader keeps
@@ -457,7 +461,8 @@ the language can target C:
 - `end`, which a packet reader reads after the last field
 - `int_relative`, all seven tiers, over the domain `0` to `2^31 - 1`. Both
   `previous` and `current` live in it. `previous` is your own state and never
-  arrives off the wire, so one outside the domain is caller error, asserted;
+  arrives off the wire, so one outside the domain is caller error, asserted on
+  write and refused as `value_out_of_range` on read;
   `current` is reconstructed in a width that cannot wrap and then refused
   unless it lands in the domain and above `previous` — in **every** tier,
   including the absolute one, whose 32 raw bits are read unsigned. There is no
