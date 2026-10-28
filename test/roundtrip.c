@@ -130,6 +130,322 @@ static int degenerate_latched( serialize_read_stream_t * r )
     return ok;
 }
 
+/* U2 object callbacks. A context counts the calls, so a test can see the
+   callback was never reached on a failed stream. */
+typedef struct
+{
+    int calls;
+    int result;                     /* what the callback returns */
+    int read_bits;                  /* bits to read first, 0 for none */
+} object_probe_t;
+
+static int object_probe_read( serialize_read_stream_t * stream, void * context )
+{
+    object_probe_t * probe = (object_probe_t *) context;
+    probe->calls++;
+    if ( probe->read_bits > 0 )
+    {
+        serialize_uint32_t value = 0;
+        (void) serialize_read_bits( stream, &value, probe->read_bits );
+    }
+    return probe->result;
+}
+
+static int object_probe_write( serialize_write_stream_t * stream, void * context )
+{
+    object_probe_t * probe = (object_probe_t *) context;
+    probe->calls++;
+    return serialize_write_bits( stream, 0x5, 4 ) && probe->result;
+}
+
+static int object_probe_measure( serialize_measure_stream_t * stream, void * context )
+{
+    object_probe_t * probe = (object_probe_t *) context;
+    probe->calls++;
+    return serialize_measure_bits( stream, 4 ) && probe->result;
+}
+
+static int test_serialize_reject( void )
+{
+    serialize_uint8_t data[8 + 8] = { 0x05, 0xAB, 0, 0, 0, 0, 0, 0 };   /* + 8: read allocations extend 8 bytes past the data */
+    serialize_read_stream_t r;
+    serialize_uint32_t value;
+    object_probe_t probe;
+    int ok = 1;
+
+    if ( strcmp( serialize_refusal_name( SERIALIZE_REFUSAL_REJECTED ), "rejected" ) != 0 ) ok = 0;
+
+    /* the top level reject: well formed bits accepted, then the caller refuses */
+    serialize_read_stream_init( &r, data, 2 );
+    value = 0;
+    if ( !serialize_read_bits( &r, &value, 4 ) || value != 5 ) ok = 0;
+    if ( serialize_read_reject( &r ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+    /* terminal: a readable byte refuses, its destination untouched, and the reason stays */
+    value = 0xFFFFFFFFu;
+    if ( serialize_read_bits( &r, &value, 8 ) || value != 0xFFFFFFFFu ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+
+    /* the first reason wins: a reject on a stream that refused keeps the wire's */
+    serialize_read_stream_init( &r, data, 0 );
+    if ( serialize_read_bits( &r, &value, 1 ) ) ok = 0;
+    if ( serialize_read_reject( &r ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_PAST_END ) ok = 0;
+
+    /* a fail with no reason, or one outside the list, is the caller refusing:
+       rejected, never none, never a trap */
+    serialize_read_stream_init( &r, data, 2 );
+    if ( serialize_read_fail( &r, SERIALIZE_REFUSAL_NONE ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+    serialize_read_stream_init( &r, data, 2 );
+    if ( serialize_read_fail( &r, SERIALIZE_REFUSAL_NUM_REASONS ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+
+    /* an object whose callback reads and accepts is accepted, at no cost in bits */
+    serialize_read_stream_init( &r, data, 2 );
+    probe.calls = 0; probe.result = 1; probe.read_bits = 4;
+    if ( !serialize_read_object( &r, object_probe_read, &probe ) || probe.calls != 1 ) ok = 0;
+    if ( serialize_read_bits_processed( &r ) != 4 ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_NONE ) ok = 0;
+
+    /* a callback that fails with nothing latched latches rejected, terminally */
+    serialize_read_stream_init( &r, data, 2 );
+    probe.calls = 0; probe.result = 0; probe.read_bits = 4;
+    if ( serialize_read_object( &r, object_probe_read, &probe ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+    if ( serialize_read_bits( &r, &value, 8 ) ) ok = 0;
+
+    /* a failed stream refuses the object on entry, without calling it */
+    probe.calls = 0; probe.result = 1; probe.read_bits = 0;
+    if ( serialize_read_object( &r, object_probe_read, &probe ) || probe.calls != 0 ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_REJECTED ) ok = 0;
+
+    /* a primitive inside refused first: its reason is kept whether the callback
+       then fails or swallows the refusal and reports success */
+    serialize_read_stream_init( &r, data, 1 );
+    probe.calls = 0; probe.result = 0; probe.read_bits = 16;
+    if ( serialize_read_object( &r, object_probe_read, &probe ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_PAST_END ) ok = 0;
+    serialize_read_stream_init( &r, data, 1 );
+    probe.calls = 0; probe.result = 1; probe.read_bits = 16;
+    if ( serialize_read_object( &r, object_probe_read, &probe ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_PAST_END ) ok = 0;
+
+    /* write and measure: the object is its callback, and adds no bits of its own */
+    {
+        serialize_uint8_t out[8];
+        serialize_write_stream_t w;
+        serialize_measure_stream_t m;
+        serialize_write_stream_init( &w, out, 8 );
+        probe.calls = 0; probe.result = 1;
+        if ( !serialize_write_object( &w, object_probe_write, &probe ) || probe.calls != 1 ) ok = 0;
+        if ( serialize_write_bits_processed( &w ) != 4 ) ok = 0;
+        probe.result = 0;
+        if ( serialize_write_object( &w, object_probe_write, &probe ) ) ok = 0;
+        serialize_measure_stream_init( &m );
+        probe.calls = 0; probe.result = 1;
+        if ( !serialize_measure_object( &m, object_probe_measure, &probe ) || probe.calls != 1 ) ok = 0;
+        if ( serialize_measure_bits_processed( &m ) != 4 ) ok = 0;
+    }
+
+    return ok;
+}
+
+/*
+    IMPLEMENTING.md U7 and U16: a reader never traps. A bad declaration on a
+    READ stream -- a bit count outside its range, ranged bounds the wrong way
+    round, a previous outside the int_relative domain, precomputed
+    compressed_float constants no declaration derives, a fixed point
+    declaration that does not fit its Q format, a string buffer below 1, a
+    negative byte count -- refuses as value_out_of_range before any bits
+    move, in every build: no assert, no abort, never wrong data, and never a
+    write the wire chooses. The destination is left unwritten, the stream is
+    terminal, and a stream that already refused keeps its first reason. The
+    C++ reference's test_uniform_rules, spelled in C.
+*/
+static int refused_out_of_range( serialize_read_stream_t * r )
+{
+    return serialize_read_error( r ) && serialize_read_refusal( r ) == SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE;
+}
+
+static int test_uniform_read_rules( void )
+{
+    serialize_uint8_t data[16 + 8];                 /* + 8: read allocations extend 8 bytes past the data */
+    serialize_read_stream_t r;
+    serialize_uint32_t u32;
+    serialize_uint64_t u64;
+    serialize_int32_t i32;
+    serialize_int64_t i64;
+    serialize_int128_t i128;
+    float f;
+    int ok = 1;
+
+    memset( data, 0, sizeof( data ) );
+
+    /* U7: a negative byte count latches value_out_of_range at init */
+    serialize_read_stream_init( &r, data, -1 );
+    if ( !refused_out_of_range( &r ) ) ok = 0;
+    u32 = 0xFFFFFFFFu;
+    if ( serialize_read_bits( &r, &u32, 1 ) || u32 != 0xFFFFFFFFu ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE ) ok = 0;
+
+    /* U16: a bit count outside [1,32], and outside [1,64] for bits64 */
+    serialize_read_stream_init( &r, data, 16 );
+    u32 = 0xFFFFFFFFu;
+    if ( serialize_read_bits( &r, &u32, 0 ) || u32 != 0xFFFFFFFFu || !refused_out_of_range( &r ) ) ok = 0;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_bits( &r, &u32, 33 ) || u32 != 0xFFFFFFFFu || !refused_out_of_range( &r ) ) ok = 0;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_bits( &r, &u32, -1 ) || u32 != 0xFFFFFFFFu || !refused_out_of_range( &r ) ) ok = 0;
+    u64 = 7;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_bits64( &r, &u64, 0 ) || u64 != 7 || !refused_out_of_range( &r ) ) ok = 0;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_bits64( &r, &u64, 65 ) || u64 != 7 || !refused_out_of_range( &r ) ) ok = 0;
+
+    /* U16: ranged bounds the wrong way round refuse rather than decode */
+    i32 = -77;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_int( &r, &i32, 5, 4 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_int( &r, &i32, 0x7FFFFFFF, -0x7FFFFFFF - 1 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    i64 = -77;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_int64( &r, &i64, 1, -1 ) || i64 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    i128 = serialize_int128_from_int64( -77 );
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_int128( &r, &i128, serialize_int128_from_int64( 1 ), serialize_int128_from_int64( -1 ) ) ) ok = 0;
+    if ( !serialize_int128_equal( i128, serialize_int128_from_int64( -77 ) ) || !refused_out_of_range( &r ) ) ok = 0;
+
+    /* U16: an int_relative previous outside the domain 0 to 2^31 - 1 */
+    i32 = -77;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_int_relative( &r, -1, &i32 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+
+    /* U16: precomputed compressed_float constants no declaration derives.
+       [0,10] at 0.01 derives 1000, 10 bits, delta 10. */
+    {
+        static const serialize_uint32_t infinity_pattern = 0x7F800000UL;
+        static const serialize_uint32_t nan_pattern = 0x7FC00000UL;
+        float infinity_delta;
+        float nan_delta;
+        memcpy( &infinity_delta, &infinity_pattern, 4 );
+        memcpy( &nan_delta, &nan_pattern, 4 );
+        f = 42.0f;
+        serialize_read_stream_init( &r, data, 16 );
+        if ( serialize_read_compressed_float_precomputed( &r, &f, 1000, 11, 10.0f, 0.0f ) || f != 42.0f || !refused_out_of_range( &r ) ) ok = 0;
+        serialize_read_stream_init( &r, data, 16 );
+        if ( serialize_read_compressed_float_precomputed( &r, &f, 0, 0, 10.0f, 0.0f ) || f != 42.0f || !refused_out_of_range( &r ) ) ok = 0;
+        serialize_read_stream_init( &r, data, 16 );     /* above the 4294967040 clamp, though bits agree */
+        if ( serialize_read_compressed_float_precomputed( &r, &f, 0xFFFFFFFFu, 32, 10.0f, 0.0f ) || f != 42.0f || !refused_out_of_range( &r ) ) ok = 0;
+        serialize_read_stream_init( &r, data, 16 );
+        if ( serialize_read_compressed_float_precomputed( &r, &f, 1000, 10, 0.0f, 0.0f ) || f != 42.0f || !refused_out_of_range( &r ) ) ok = 0;
+        serialize_read_stream_init( &r, data, 16 );
+        if ( serialize_read_compressed_float_precomputed( &r, &f, 1000, 10, -10.0f, 0.0f ) || f != 42.0f || !refused_out_of_range( &r ) ) ok = 0;
+        serialize_read_stream_init( &r, data, 16 );
+        if ( serialize_read_compressed_float_precomputed( &r, &f, 1000, 10, infinity_delta, 0.0f ) || f != 42.0f || !refused_out_of_range( &r ) ) ok = 0;
+        serialize_read_stream_init( &r, data, 16 );
+        if ( serialize_read_compressed_float_precomputed( &r, &f, 1000, 10, nan_delta, 0.0f ) || f != 42.0f || !refused_out_of_range( &r ) ) ok = 0;
+        /* the conforming constants still read */
+        serialize_read_stream_init( &r, data, 16 );
+        if ( !serialize_read_compressed_float_precomputed( &r, &f, 1000, 10, 10.0f, 0.0f ) || f != 0.0f ) ok = 0;
+    }
+
+    /* U16, the audit's fixed_qformat reproducer: a Q16.16 declared over
+       [-40000, 40000] whole units does not fit Q16.16 ([-32768, 32767]). The
+       wire offset below carries the raw value 2^31, which the old reader
+       accepted and handed back sign flipped, as -32768.0. */
+    {
+        serialize_uint8_t wire[16];
+        serialize_write_stream_t w;
+        serialize_uint64_t raw_min = (serialize_uint64_t) ( (serialize_int64_t) -40000 * 65536 );
+        serialize_uint64_t offset = ( (serialize_uint64_t) 1 << 31 ) - raw_min;
+        memset( wire, 0, sizeof( wire ) );
+        serialize_write_stream_init( &w, wire, 8 );
+        serialize_write_bits64( &w, offset, 33 );
+        serialize_write_flush( &w );
+        memcpy( data, wire, 8 );
+        i32 = -77;
+        serialize_read_stream_init( &r, data, (int) serialize_write_bytes_processed( &w ) );
+        if ( serialize_read_fixed32( &r, &i32, 16, 16, -40000, 40000 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+        memset( data, 0, sizeof( data ) );
+    }
+
+    /* U16: the rest of the fixed point declaration */
+    i32 = -77;
+    serialize_read_stream_init( &r, data, 16 );     /* integer + fraction bits must fit the storage width */
+    if ( serialize_read_fixed32( &r, &i32, 24, 16, 0, 200 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    serialize_read_stream_init( &r, data, 16 );     /* at least one integer bit: the sign bit counts */
+    if ( serialize_read_fixed32( &r, &i32, 0, 32, 0, 0 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_fixed32( &r, &i32, 33, -1, 0, 1 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    serialize_read_stream_init( &r, data, 16 );     /* min above max */
+    if ( serialize_read_fixed32( &r, &i32, 16, 16, 1, 0 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    serialize_read_stream_init( &r, data, 16 );     /* Q16.16 max is 32767 whole units */
+    if ( serialize_read_fixed32( &r, &i32, 16, 16, 0, 32768 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    i64 = -77;
+    serialize_read_stream_init( &r, data, 16 );     /* Q32.32 min is -2^31 whole units */
+    if ( serialize_read_fixed64( &r, &i64, 32, 32, -2147483647 - (serialize_int64_t) 2, 0 ) || i64 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_fixed64( &r, &i64, 48, 32, 0, 1 ) || i64 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    i128 = serialize_int128_from_int64( -77 );
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_fixed128( &r, &i128, 100, 40, 0, 1 ) || !refused_out_of_range( &r ) ) ok = 0;
+    if ( !serialize_int128_equal( i128, serialize_int128_from_int64( -77 ) ) ) ok = 0;
+    /* the edges of a conforming declaration still read */
+    i32 = -77;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( !serialize_read_fixed32( &r, &i32, 16, 16, -32768, 32767 ) || i32 != (serialize_int32_t) ( -2147483647 - 1 ) ) ok = 0;
+    i64 = -77;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( !serialize_read_fixed64( &r, &i64, 64, 0, -9223372036854775807LL - 1, 9223372036854775807LL ) ) ok = 0;
+    i32 = -77;
+    serialize_read_stream_init( &r, data, 16 );     /* a Q8.8, narrower than its fixed32 storage, is legal */
+    if ( !serialize_read_fixed32( &r, &i32, 8, 8, -128, 127 ) || i32 != -128 * 256 ) ok = 0;
+
+    /* U7 and U16, the audit's string_bufsize0 reproducer: a string buffer
+       below 1 refuses before the length field is read. The old reader let a
+       length field of all ones decode to -1 and store string[-1] = 0 one
+       byte before the caller's buffer, and copied a length of 12 into a
+       buffer declared as size 0. */
+    {
+        struct { char guard_before[8]; char buffer[8]; char guard_after[8]; } m;
+        serialize_uint8_t packet[16 + 8];
+        int sizes[3];
+        int i;
+        sizes[0] = 0; sizes[1] = -1; sizes[2] = -2147483647 - 1;
+        for ( i = 0; i < 3; i++ )
+        {
+            memset( &m, 'G', sizeof( m ) );
+            memset( packet, 0, sizeof( packet ) );
+            packet[0] = 0xFF; packet[1] = 0xFF; packet[2] = 0xFF; packet[3] = 0xFF;
+            serialize_read_stream_init( &r, packet, 4 );
+            if ( serialize_read_string( &r, m.buffer, sizes[i] ) || !refused_out_of_range( &r ) ) ok = 0;
+            if ( m.guard_before[7] != 'G' || m.buffer[0] != 'G' ) ok = 0;
+
+            memset( &m, 'G', sizeof( m ) );
+            memset( packet, 0, sizeof( packet ) );
+            packet[0] = 12;
+            memcpy( packet + 4, "AAAAAAAAAAAA", 12 );
+            serialize_read_stream_init( &r, packet, 16 );
+            if ( serialize_read_string( &r, m.buffer, sizes[i] ) || !refused_out_of_range( &r ) ) ok = 0;
+            if ( memcmp( m.guard_after, "GGGGGGGG", 8 ) != 0 || m.buffer[0] != 'G' ) ok = 0;
+        }
+    }
+
+    /* the failure state first: a stream that already refused keeps its
+       reason when a bad declaration follows */
+    serialize_read_stream_init( &r, data, 0 );
+    if ( serialize_read_bits( &r, &u32, 1 ) ) ok = 0;
+    if ( serialize_read_int( &r, &i32, 5, 4 ) ) ok = 0;
+    if ( serialize_read_bits( &r, &u32, 0 ) ) ok = 0;
+    if ( serialize_read_fixed32( &r, &i32, 24, 16, 0, 1 ) ) ok = 0;
+    if ( serialize_read_string( &r, (char *) data, 0 ) ) ok = 0;
+    if ( serialize_read_refusal( &r ) != SERIALIZE_REFUSAL_PAST_END ) ok = 0;
+
+    return ok;
+}
+
 int main( void )
 {
     static serialize_uint8_t buffer[2048 + 8];      /* + 8: read buffer allocations extend 8 bytes past the data */
@@ -1179,6 +1495,12 @@ int main( void )
         }
 #endif /* NDEBUG */
     }
+
+    /* ---- standard 2.1, IMPLEMENTING.md U2: the caller's refusal latches
+            rejected, through serialize_read_reject and through a nested
+            object whose callback fails with nothing latched ---- */
+    CHECK( test_serialize_reject() );
+    CHECK( test_uniform_read_rules() );
 
     /* ---- format 2.0: every refusal names its reason, the reader refuses
             non-finite floats and a non-finite compressed decode, the

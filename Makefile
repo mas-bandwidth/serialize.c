@@ -91,7 +91,7 @@ test: release-check controls $(TEST_SUITES:%=build/%)
 # variable itself (test/corpus_root.h), so one setting moves both.
 SERIALIZE_CONFORMANCE_ROOT ?= .
 
-CONTROLS = align-padding ranged-reconstruction ranged-range fixed-degenerate-terminal float-finite double-finite compressed-float-finite end-trailing-data end-padding int-relative-canonical string-embedded-nul string-utf8 string-utf8-surrogate int64-through-double wrong-reason object-terminal
+CONTROLS = align-padding ranged-reconstruction ranged-range fixed-degenerate-terminal float-finite double-finite compressed-float-finite end-trailing-data end-padding int-relative-canonical string-embedded-nul string-utf8 string-utf8-surrogate int64-through-double wrong-reason object-terminal object-latch-rejected reject-reason
 
 controls: build/conformance build/sabotage
 	@if ./build/conformance $(SERIALIZE_CONFORMANCE_ROOT)/conformance-controls/unknown-operation.txt > build/control-unknown-operation.log 2>&1; then \

@@ -91,8 +91,8 @@
     got the size wrong decodes nothing instead of over-reading. It is the one
     caller size in this library that is a runtime refusal rather than an
     assert alone, because it is the one the library is actually given: see
-    the function's own comment. Everything else about the caller is asserted
-    and nothing more, as below.
+    the function's own comment. A NEGATIVE byte count starts the stream
+    failed too, as value_out_of_range (IMPLEMENTING.md U7).
 
     A REFUSED READ WRITES NOTHING TO A SCALAR DESTINATION. When a read of a
     scalar fails, the caller's value is exactly what it was before the call:
@@ -121,11 +121,19 @@
     behavior, yours.
 
     The measure stream carries the same contracts the same way — debug
-    asserts, zero release checking — and so do the caller-owned parameters
-    of a READ: bounds the wrong way round on a ranged read are your bug,
-    asserted, never a read failure. What a read checks for real, in every
-    build mode, is the data. A read validates the network; it does not
-    validate you.
+    asserts, zero release checking.
+
+    A READER NEVER TRAPS (IMPLEMENTING.md U7, U16, since 2.1). A bad
+    DECLARATION on a read stream -- a bit count outside its range, ranged
+    bounds the wrong way round, an int_relative previous outside its domain,
+    precomputed compressed_float constants no declaration derives, a fixed
+    point declaration that does not fit its Q format, a string buffer below
+    1 -- is refused as value_out_of_range before any bits move, in every
+    build, exactly as a wire refusal is: never an assert, never wrong data,
+    and never a write the wire chooses. With literal declarations, the usual
+    call and every generated one, each test folds away. What remains asserted
+    on read is the pointers: a NULL buffer, a NULL object callback, and the
+    padded destination's size alongside its refusal.
 */
 
 #ifndef SERIALIZE_H
@@ -138,9 +146,9 @@
    --------------------------------------------------------------------------- */
 
 #define SERIALIZE_VERSION_MAJOR 2
-#define SERIALIZE_VERSION_MINOR 0
-#define SERIALIZE_VERSION_PATCH 2
-#define SERIALIZE_VERSION "2.0.2"
+#define SERIALIZE_VERSION_MINOR 1
+#define SERIALIZE_VERSION_PATCH 0
+#define SERIALIZE_VERSION "2.1.0"
 
 /* ---------------------------------------------------------------------------
    configuration
@@ -400,7 +408,13 @@ extern "C" {
 
     A read stream latches the FIRST refusal and keeps reporting it: every
     later read on the failed stream fails too, but the reason is the cause,
-    not the echo. SERIALIZE_REFUSAL_NONE means the stream has refused nothing.
+    not the echo. SERIALIZE_REFUSAL_NONE means the stream has refused nothing:
+    a failed read stream never reports it (STANDARD.md 2.1, `rejected`).
+
+    SERIALIZE_REFUSAL_REJECTED is the caller's own refusal, not the wire's:
+    serialize_read_reject, a nested object whose callback fails with nothing
+    latched (serialize_read_object), or serialize_read_fail given NONE or a
+    value outside the list. It changes no byte of the wire.
 */
 typedef enum serialize_refusal_t
 {
@@ -413,6 +427,7 @@ typedef enum serialize_refusal_t
     SERIALIZE_REFUSAL_INVALID_UTF8,         /* invalid_utf8: a string payload that is not well formed UTF-8 */
     SERIALIZE_REFUSAL_EMBEDDED_NUL,         /* embedded_nul: a zero byte among a string's transmitted bytes */
     SERIALIZE_REFUSAL_NON_CANONICAL,        /* non_canonical: an encoding a conforming writer never produces for the value it carries */
+    SERIALIZE_REFUSAL_REJECTED,             /* rejected: the bytes were well formed, and the reader's caller refused the value they carry */
     SERIALIZE_REFUSAL_NUM_REASONS
 } serialize_refusal_t;
 
@@ -587,9 +602,57 @@ SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream );
 /* A read stream's failure carries its reason, from the closed list
    (serialize_refusal_t), and the stream keeps the FIRST one: a refusal on a
    stream that has already failed is an echo, latches nothing new, and still
-   returns 0. The reason must not be SERIALIZE_REFUSAL_NONE, asserted. This is
-   the C++ ReadStream::Fail( Refusal ) spelled in C. */
+   returns 0. A reason of SERIALIZE_REFUSAL_NONE, or one outside the list, is
+   the caller refusing without saying why, and latches
+   SERIALIZE_REFUSAL_REJECTED: never an assert or a trap (STANDARD.md 2.1,
+   "Refusal reasons"). This is the C++ ReadStream::Fail( Refusal ) spelled in
+   C. */
 SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream, serialize_refusal_t refusal );
+
+/* The caller's own refusal of the value being read (IMPLEMENTING.md U2): the
+   bytes were well formed and every primitive accepted them, and the caller's
+   validation says no -- an enum value the game does not know, two fields that
+   contradict each other. Fails the stream as SERIALIZE_REFUSAL_REJECTED
+   through the same latch as every wire refusal, so it is terminal and the
+   first reason wins: on a stream that already refused it changes nothing.
+   Returns 0, so `return serialize_read_reject( stream );` reads naturally. The
+   C++ serialize_reject. Read only: there is nothing to refuse on a write or a
+   measure stream, so this port has no write or measure spelling of it. */
+SERIALIZE_INLINE int serialize_read_reject( serialize_read_stream_t * stream );
+
+/*
+    OBJECT COMPOSITION (STANDARD.md, "object"; IMPLEMENTING.md U2). A nested
+    object is the caller's own serialize function, given here as a function
+    pointer plus a context pointer the library passes through untouched. It
+    contributes no bytes of its own: the callback reads, writes or measures
+    against the same stream, at exactly this position, with no framing, length
+    prefix or alignment inserted around it.
+
+    The callback returns nonzero on success and 0 on failure. On READ:
+
+      - a stream that has already refused refuses the object on ENTRY, without
+        calling the callback (an empty object consumes no bits, so without this
+        test it would succeed on a failed stream);
+      - a callback that returns 0 with nothing latched latches
+        SERIALIZE_REFUSAL_REJECTED, so `return 0;` in a callback and
+        serialize_read_reject agree;
+      - a callback that returns 0 after a primitive inside it refused keeps
+        that primitive's reason (the first reason wins), and one that returns
+        nonzero on a stream it failed still refuses.
+
+    On WRITE and MEASURE the object is the callback's result: writes are
+    trusted, so there is no latch to keep (see ERRORS).
+
+    This is the C++ serialize_object macro. Calling a read object with no
+    callback is caller error, asserted.
+*/
+typedef int (*serialize_read_object_function_t)( serialize_read_stream_t * stream, void * context );
+typedef int (*serialize_write_object_function_t)( serialize_write_stream_t * stream, void * context );
+typedef int (*serialize_measure_object_function_t)( serialize_measure_stream_t * stream, void * context );
+
+SERIALIZE_INLINE int serialize_read_object( serialize_read_stream_t * stream, serialize_read_object_function_t function, void * context );
+SERIALIZE_INLINE int serialize_write_object( serialize_write_stream_t * stream, serialize_write_object_function_t function, void * context );
+SERIALIZE_INLINE int serialize_measure_object( serialize_measure_stream_t * stream, serialize_measure_object_function_t function, void * context );
 
 SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stream, const void * buffer, int bytes );
 
@@ -660,11 +723,12 @@ SERIALIZE_INLINE serialize_int64_t serialize_measure_bytes_processed( const seri
    bit-level primitives
    --------------------------------------------------------------------------- */
 
-/* bits must be in [1,32] and value must be less than 2^bits. Both are caller
-   error, so both are asserted rather than checked, exactly as the C++
-   BitWriter asserts them — and nothing else: no mask, no fallback. So is
-   capacity, on the write side: the write path performs no release-build
-   checks at all (issue #52 — see ERRORS). */
+/* On write, bits must be in [1,32] and value must be less than 2^bits. Both
+   are caller error, so both are asserted rather than checked, exactly as the
+   C++ BitWriter asserts them — and nothing else: no mask, no fallback. So is
+   capacity: the write path performs no release-build checks at all (issue
+   #52 — see ERRORS). On read, a bits outside [1,32] is refused as
+   value_out_of_range (U16). */
 SERIALIZE_ALWAYS_INLINE int serialize_write_bits( serialize_write_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t value, int bits );
 SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits );
 
@@ -721,9 +785,10 @@ SERIALIZE_INLINE int serialize_read_end( serialize_read_stream_t * stream );
     Both sides must pass identical bounds — the wire carries no description
     of itself.
 
-    min <= max is asserted, not checked: bounds are the caller's, not the
-    network's. On READ the decoded value is range checked for real, always,
-    because that is where untrusted data arrives.
+    min <= max is the caller's contract, not the network's: asserted on
+    write, and refused as value_out_of_range on read (U16). On READ the
+    decoded value is range checked for real, always, because that is where
+    untrusted data arrives.
 */
 SERIALIZE_ALWAYS_INLINE int serialize_write_int( serialize_write_stream_t * stream, serialize_int32_t value, serialize_int32_t min, serialize_int32_t max );
 SERIALIZE_ALWAYS_INLINE int serialize_read_int( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_int32_t * SERIALIZE_RESTRICT value, serialize_int32_t min, serialize_int32_t max );
@@ -755,8 +820,8 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_uint64( serialize_read_stream_t * SER
 
    THE DOMAIN IS 0 to 2^31 - 1, and both ends live in it. previous is the
    caller's own state and never arrives off the wire, so one outside the
-   domain is caller error, asserted in a checked build and defined by nothing.
-   current is the network's: the reader reconstructs it in a width that cannot
+   domain is caller error: asserted on write and measure, and refused as
+   value_out_of_range on read (U16). current is the network's: the reader reconstructs it in a width that cannot
    wrap and then refuses it unless it lands in the domain and above previous,
    in EVERY tier — the absolute tier's 32 raw bits included, which are read
    UNSIGNED so a group with the top bit set is a value above the domain rather
@@ -911,7 +976,15 @@ SERIALIZE_INLINE int serialize_read_int128( serialize_read_stream_t * stream, se
    the value from the range alone -- the raw value min << fraction_bits.
 
    Three widths because C has no overloading; pick the one matching your
-   storage. integer_bits + fraction_bits must equal the storage width.
+   storage, and fixed32 for storage narrower than 32 bits.
+
+   THE DECLARATION (IMPLEMENTING.md U16): integer_bits counts the sign bit
+   and is at least 1, fraction_bits is not negative, integer_bits +
+   fraction_bits fits the storage width, min <= max, and both whole-unit
+   bounds fit the Q format, [-2^(integer_bits - 1), 2^(integer_bits - 1) - 1].
+   A bad declaration is asserted on write and measure, and refused as
+   value_out_of_range on read: a reader never traps and never hands back
+   wrong data. See serialize_fixed_declaration_is_valid.
    --------------------------------------------------------------------------- */
 
 SERIALIZE_ALWAYS_INLINE int serialize_write_fixed32( serialize_write_stream_t * stream, serialize_int32_t value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max );
@@ -1196,11 +1269,17 @@ SERIALIZE_INLINE int serialize_write_fail( serialize_write_stream_t * stream )
 */
 SERIALIZE_INLINE int serialize_read_fail( serialize_read_stream_t * stream, serialize_refusal_t refusal )
 {
-    serialize_assert( refusal != SERIALIZE_REFUSAL_NONE );
     /* the FIRST reason is the cause; a refusal on a stream that has already
-       failed is its echo and keeps it (STANDARD.md, Refusal reasons) */
+       failed is its echo and keeps it (STANDARD.md, Refusal reasons). No
+       reason, or one outside the list, is the caller refusing without saying
+       why: rejected, so a failed stream never reports none. Only the refusal
+       path pays for the test. */
     if ( stream->refusal == SERIALIZE_REFUSAL_NONE )
     {
+        if ( refusal <= SERIALIZE_REFUSAL_NONE || refusal >= SERIALIZE_REFUSAL_NUM_REASONS )
+        {
+            refusal = SERIALIZE_REFUSAL_REJECTED;
+        }
         stream->refusal = refusal;
     }
     stream->error = 1;
@@ -1315,6 +1394,15 @@ SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stre
     stream->bits_read = 0;
     stream->error = 0;
     stream->refusal = SERIALIZE_REFUSAL_NONE;
+
+    /* a negative byte count is caller misuse on read, refused as
+       value_out_of_range at init rather than left to surface as past_end on
+       the first read (IMPLEMENTING.md U7, the C++ ReadStream constructor) */
+    if ( bytes < 0 )
+    {
+        stream->num_bits = 0;
+        serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
 }
 
 /* The padded copy for an exactly sized payload: see the declaration above
@@ -1364,12 +1452,20 @@ SERIALIZE_INLINE void serialize_read_stream_init_padded( serialize_read_stream_t
     serialize_read_stream_init( stream, destination, bytes );
 }
 
-SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits )
+/*
+    The read primitive every operation in this header is built on, with bits
+    already known to lie in [1,32]: each caller here passes a literal or a
+    width it derived itself, so the range is the library's own invariant and
+    stays an assert, exactly where the C++ BitReader asserts it. The public
+    serialize_read_bits below is the caller's spelling, and refuses a bad
+    width instead (U16).
+*/
+SERIALIZE_ALWAYS_INLINE int serialize_read_bits_internal( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits )
 {
     serialize_uint64_t window;
     serialize_int64_t begin;
 
-    /* caller error, asserted exactly where the C++ BitReader asserts it */
+    /* the library's invariant, asserted exactly where the C++ BitReader asserts it */
     serialize_assert( bits > 0 );
     serialize_assert( bits <= 32 );
 
@@ -1433,6 +1529,19 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIA
     return 1;
 }
 
+/* The caller's bits read. A width outside [1,32] is a bad declaration, and a
+   reader never traps (IMPLEMENTING.md U7, U16): it refuses as
+   value_out_of_range before any bits move, as the C++ ReadStream::SerializeBits
+   does. With a literal width, the usual call, the test folds away. */
+SERIALIZE_ALWAYS_INLINE int serialize_read_bits( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value, int bits )
+{
+    if ( bits <= 0 || bits > 32 )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
+    return serialize_read_bits_internal( stream, value, bits );
+}
+
 /*
     bits over the whole width STANDARD.md gives the operation, [1,64].
 
@@ -1471,12 +1580,16 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bits64( serialize_read_stream_t * str
     serialize_uint32_t lo = 0;
     serialize_uint32_t hi = 0;
 
-    serialize_assert( bits > 0 );
-    serialize_assert( bits <= 64 );
+    /* a width outside [1,64] is a bad declaration: refused, never trapped
+       (IMPLEMENTING.md U7, U16), as serialize_read_bits refuses */
+    if ( bits <= 0 || bits > 64 )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
 
     if ( bits <= 32 )
     {
-        if ( !serialize_read_bits( stream, &lo, bits ) )
+        if ( !serialize_read_bits_internal( stream, &lo, bits ) )
         {
             return 0;
         }
@@ -1484,11 +1597,11 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bits64( serialize_read_stream_t * str
         return 1;
     }
 
-    if ( !serialize_read_bits( stream, &lo, 32 ) )
+    if ( !serialize_read_bits_internal( stream, &lo, 32 ) )
     {
         return 0;
     }
-    if ( !serialize_read_bits( stream, &hi, bits - 32 ) )
+    if ( !serialize_read_bits_internal( stream, &hi, bits - 32 ) )
     {
         return 0;
     }
@@ -1542,9 +1655,44 @@ SERIALIZE_INLINE const char * serialize_refusal_name( serialize_refusal_t refusa
         case SERIALIZE_REFUSAL_INVALID_UTF8:        return "invalid_utf8";
         case SERIALIZE_REFUSAL_EMBEDDED_NUL:        return "embedded_nul";
         case SERIALIZE_REFUSAL_NON_CANONICAL:       return "non_canonical";
+        case SERIALIZE_REFUSAL_REJECTED:            return "rejected";
         case SERIALIZE_REFUSAL_NUM_REASONS:
         default:                                    return "unknown";
     }
+}
+
+SERIALIZE_INLINE int serialize_read_reject( serialize_read_stream_t * stream )
+{
+    return serialize_read_fail( stream, SERIALIZE_REFUSAL_REJECTED ); /* the caller's refusal */
+}
+
+SERIALIZE_INLINE int serialize_read_object( serialize_read_stream_t * stream, serialize_read_object_function_t function, void * context )
+{
+    serialize_assert( function != NULL );
+    /* a failed stream refuses the object on entry, without calling it */
+    if ( serialize_read_error( stream ) )
+    {
+        return 0;
+    }
+    /* a callback that fails, or that returns success on a stream it failed,
+       refuses; the latch keeps a primitive's reason if one refused first */
+    if ( !function( stream, context ) || stream->error )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_REJECTED ); /* the object latch */
+    }
+    return 1;
+}
+
+SERIALIZE_INLINE int serialize_write_object( serialize_write_stream_t * stream, serialize_write_object_function_t function, void * context )
+{
+    serialize_assert( function != NULL );
+    return function( stream, context ) != 0;
+}
+
+SERIALIZE_INLINE int serialize_measure_object( serialize_measure_stream_t * stream, serialize_measure_object_function_t function, void * context )
+{
+    serialize_assert( function != NULL );
+    return function( stream, context ) != 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1578,7 +1726,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_bool( serialize_write_stream_t * str
 SERIALIZE_ALWAYS_INLINE int serialize_read_bool( serialize_read_stream_t * SERIALIZE_RESTRICT stream, int * SERIALIZE_RESTRICT value )
 {
     serialize_uint32_t raw = 0;
-    if ( !serialize_read_bits( stream, &raw, 1 ) )
+    if ( !serialize_read_bits_internal( stream, &raw, 1 ) )
     {
         return 0;
     }
@@ -1616,7 +1764,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_align( serialize_read_stream_t * stre
     if ( remainder != 0 )
     {
         serialize_uint32_t padding = 0;
-        if ( !serialize_read_bits( stream, &padding, 8 - remainder ) )
+        if ( !serialize_read_bits_internal( stream, &padding, 8 - remainder ) )
         {
             return 0;
         }
@@ -1672,7 +1820,7 @@ SERIALIZE_INLINE int serialize_read_end( serialize_read_stream_t * stream )
     if ( remaining > 0 )
     {
         serialize_uint32_t final_padding = 0;
-        if ( !serialize_read_bits( stream, &final_padding, (int) remaining ) )
+        if ( !serialize_read_bits_internal( stream, &final_padding, (int) remaining ) )
         {
             return 0;
         }
@@ -1690,8 +1838,9 @@ SERIALIZE_INLINE int serialize_read_end( serialize_read_stream_t * stream )
 
    min > max, and a value outside [min,max] on WRITE, are caller error and are
    asserted rather than checked — the same split the C++ serialize_int macro
-   and SerializeInteger make. What survives into a release build is the READ
-   side range check, because that one is about the network.
+   and SerializeInteger make. On READ, min > max is refused as
+   value_out_of_range (U7, U16), and the decoded value is range checked,
+   because that one is about the network.
    --------------------------------------------------------------------------- */
 
 SERIALIZE_ALWAYS_INLINE int serialize_write_int( serialize_write_stream_t * stream, serialize_int32_t value, serialize_int32_t min, serialize_int32_t max )
@@ -1720,7 +1869,13 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_int( serialize_read_stream_t * SERIAL
     int bits;
     serialize_uint32_t offset = 0;
 
-    serialize_assert( min <= max );
+    /* bounds the wrong way round are a bad declaration: refused before any
+       bits move, never decoded as a wrapped span (IMPLEMENTING.md U7, U16).
+       With literal bounds, the usual call, the test folds away. */
+    if ( min > max )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
 
     bits = serialize_bits_required( (serialize_uint32_t) min, (serialize_uint32_t) max );
     if ( bits == 0 )
@@ -1733,7 +1888,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_int( serialize_read_stream_t * SERIAL
         return 1;
     }
 
-    if ( !serialize_read_bits( stream, &offset, bits ) )
+    if ( !serialize_read_bits_internal( stream, &offset, bits ) )
     {
         return 0;
     }
@@ -1789,7 +1944,11 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_int64( serialize_read_stream_t * SERI
     serialize_uint32_t lo = 0;
     serialize_uint32_t hi = 0;
 
-    serialize_assert( min <= max );
+    /* U7, U16: see serialize_read_int */
+    if ( min > max )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
 
     bits = serialize_bits_required64( (serialize_uint64_t) min, (serialize_uint64_t) max );
     if ( bits == 0 )
@@ -1804,7 +1963,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_int64( serialize_read_stream_t * SERI
 
     if ( bits <= 32 )
     {
-        if ( !serialize_read_bits( stream, &lo, bits ) )
+        if ( !serialize_read_bits_internal( stream, &lo, bits ) )
         {
             return 0;
         }
@@ -1812,11 +1971,11 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_int64( serialize_read_stream_t * SERI
     }
     else
     {
-        if ( !serialize_read_bits( stream, &lo, 32 ) )
+        if ( !serialize_read_bits_internal( stream, &lo, 32 ) )
         {
             return 0;
         }
-        if ( !serialize_read_bits( stream, &hi, bits - 32 ) )
+        if ( !serialize_read_bits_internal( stream, &hi, bits - 32 ) )
         {
             return 0;
         }
@@ -1846,7 +2005,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_uint8( serialize_write_stream_t * st
 SERIALIZE_ALWAYS_INLINE int serialize_read_uint8( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT value )
 {
     serialize_uint32_t raw = 0;
-    if ( !serialize_read_bits( stream, &raw, 8 ) )
+    if ( !serialize_read_bits_internal( stream, &raw, 8 ) )
     {
         return 0;
     }
@@ -1862,7 +2021,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_uint16( serialize_write_stream_t * s
 SERIALIZE_ALWAYS_INLINE int serialize_read_uint16( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint16_t * SERIALIZE_RESTRICT value )
 {
     serialize_uint32_t raw = 0;
-    if ( !serialize_read_bits( stream, &raw, 16 ) )
+    if ( !serialize_read_bits_internal( stream, &raw, 16 ) )
     {
         return 0;
     }
@@ -1877,7 +2036,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_uint32( serialize_write_stream_t * s
 
 SERIALIZE_ALWAYS_INLINE int serialize_read_uint32( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint32_t * SERIALIZE_RESTRICT value )
 {
-    return serialize_read_bits( stream, value, 32 );
+    return serialize_read_bits_internal( stream, value, 32 );
 }
 
 SERIALIZE_ALWAYS_INLINE int serialize_write_uint64( serialize_write_stream_t * stream, serialize_uint64_t value )
@@ -1893,11 +2052,11 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_uint64( serialize_read_stream_t * SER
 {
     serialize_uint32_t lo = 0;
     serialize_uint32_t hi = 0;
-    if ( !serialize_read_bits( stream, &lo, 32 ) )
+    if ( !serialize_read_bits_internal( stream, &lo, 32 ) )
     {
         return 0;
     }
-    if ( !serialize_read_bits( stream, &hi, 32 ) )
+    if ( !serialize_read_bits_internal( stream, &hi, 32 ) )
     {
         return 0;
     }
@@ -1937,7 +2096,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_float( serialize_write_stream_t * st
 SERIALIZE_ALWAYS_INLINE int serialize_read_float( serialize_read_stream_t * SERIALIZE_RESTRICT stream, float * SERIALIZE_RESTRICT value )
 {
     serialize_uint32_t bits = 0;
-    if ( !serialize_read_bits( stream, &bits, 32 ) )
+    if ( !serialize_read_bits_internal( stream, &bits, 32 ) )
     {
         return 0;
     }
@@ -2249,6 +2408,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serial
     serialize_uint32_t integer_value;
 
     serialize_assert( max_integer_value >= 1 );
+    serialize_assert( max_integer_value <= 4294967040u );   /* the ceiling the derivation clamps to (U16) */
     serialize_assert( bits == serialize_bits_required( 0, max_integer_value ) );
     serialize_assert( delta > 0.0f );
     serialize_assert( serialize_float_is_finite( delta ) );
@@ -2315,8 +2475,9 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serial
     The read half of the audited home. What a read checks for real, in every
     build mode, is the data: an integer above max_integer_value smuggled into
     the bit headroom is refused, the same refusal the derive-per-call read
-    makes. The constants are the CALLER's, asserted like every other
-    caller-owned read parameter and never checked in release.
+    makes. The constants are the CALLER's, and constants no declaration
+    derives are refused as value_out_of_range in every build: a reader never
+    traps (IMPLEMENTING.md U7, U16).
 */
 SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float_precomputed( serialize_read_stream_t * stream, float * value, serialize_uint32_t max_integer_value, int bits, float delta, float min )
 {
@@ -2326,17 +2487,24 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float_precomputed( seriali
     float scaled;
     float decoded;
 
-    serialize_assert( max_integer_value >= 1 );
-    serialize_assert( bits == serialize_bits_required( 0, max_integer_value ) );
-    serialize_assert( delta > 0.0f );
-    serialize_assert( serialize_float_is_finite( delta ) );
-
     if ( stream->error )
     {
         return 0;
     }
 
-    if ( !serialize_read_bits( stream, &integer_value, bits ) )
+    /* constants no declaration derives are a bad declaration, refused as
+       value_out_of_range before any bits move (IMPLEMENTING.md U7, U16): the
+       step count lies in [1, 4294967040], the ceiling the derivation clamps
+       to; bits is its width; delta is positive and finite. With literal
+       constants, the generated path's call, the test folds away. */
+    if ( max_integer_value < 1 || max_integer_value > 4294967040u ||
+         bits != serialize_bits_required( 0, max_integer_value ) ||
+         !( delta > 0.0f ) || !serialize_float_is_finite( delta ) )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
+
+    if ( !serialize_read_bits_internal( stream, &integer_value, bits ) )
     {
         return 0;
     }
@@ -2521,15 +2689,18 @@ SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stre
 
     /* The domain is 0 to 2^31 - 1 and BOTH ends of the operation live in it
        (STANDARD.md, int_relative). previous is the caller's own state and
-       never arrives off the wire, so a previous outside the domain is caller
-       error — asserted here and checked by nothing in a release build, like
-       every other caller-owned read parameter (see ERRORS). current is the
-       network's, and is checked for real below. */
-    serialize_assert( previous >= 0 );
-
+       never arrives off the wire, so a previous outside the domain is a bad
+       declaration, refused as value_out_of_range in every build: a reader
+       never traps (IMPLEMENTING.md U7, U16). current is the network's, and is
+       checked for real below. */
     if ( stream->error )
     {
         return 0;
+    }
+
+    if ( previous < 0 )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
 
     /*
@@ -2597,7 +2768,7 @@ SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stre
             destination first would make it a negative number instead, and the
             two readings disagree about the same bytes.
         */
-        if ( !serialize_read_bits( stream, &reconstructed, 32 ) ) return 0;
+        if ( !serialize_read_bits_internal( stream, &reconstructed, 32 ) ) return 0;
         absolute = 1;
     }
     while ( 0 );
@@ -2656,11 +2827,30 @@ SERIALIZE_INLINE int serialize_read_int_relative( serialize_read_stream_t * stre
     loads. The golden vectors pin that, and CI runs them on s390x.
 */
 
+/*
+    Is there room for a field of field_bits, then an align, then bytes of
+    payload, on this write stream? IMPLEMENTING.md U10: a write checks room
+    for the whole operation before it writes any of it, so no length or align
+    bits land ahead of a payload that does not fit. Tested against bits_limit
+    so a failed stream has room for nothing. Used by the write side asserts
+    only, as the C++ serialize_write_has_room is: release builds check nothing
+    on write (issue #52).
+*/
+SERIALIZE_INLINE int serialize_write_has_room( const serialize_write_stream_t * stream, serialize_int64_t field_bits, serialize_int64_t bytes )
+{
+    serialize_int64_t index = stream->bits_written + field_bits;
+    serialize_int64_t align = ( 8 - ( index % 8 ) ) % 8;
+    return bytes >= 0 && field_bits >= 0 && field_bits + align + bytes * 8 <= stream->bits_limit - stream->bits_written;
+}
+
 SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, const serialize_uint8_t * data, int bytes )
 {
     int tail_bits;
 
     serialize_assert( bytes >= 0 );
+
+    /* U10: the whole operation's room, align included, before the align */
+    serialize_assert( serialize_write_has_room( stream, 0, bytes ) );
 
     if ( !serialize_write_align( stream ) )
     {
@@ -2828,6 +3018,10 @@ SERIALIZE_INLINE int serialize_write_string( serialize_write_stream_t * stream, 
     /* the writer's contract, debug only. See serialize_string_is_valid_utf8. */
     serialize_assert( serialize_string_is_valid_utf8( string, length ) );
 
+    /* U10: room for the length field, the align and the payload, before the
+       length field is written */
+    serialize_assert( serialize_write_has_room( stream, serialize_bits_required( 0, (serialize_uint32_t) ( buffer_size - 1 ) ), length ) );
+
     if ( !serialize_write_int( stream, length, 0, buffer_size - 1 ) )
     {
         return 0;
@@ -2853,6 +3047,17 @@ SERIALIZE_INLINE int serialize_read_string( serialize_read_stream_t * stream, ch
     if ( stream->error )
     {
         return 0;
+    }
+
+    /* a buffer below 1 has no room even for the terminator, and is a bad
+       declaration: refused as value_out_of_range before the length field is
+       read (IMPLEMENTING.md U7, U16). Without this the length range is
+       [0, -1], and the wire chose the write: a length field of all ones
+       stored the terminator one byte before the caller's buffer, and any
+       other length copied that many bytes into a buffer of size 0. */
+    if ( buffer_size < 1 )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
 
     if ( !serialize_read_int( stream, &length, 0, buffer_size - 1 ) )
@@ -3120,7 +3325,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_u128_bits( serialize_read_stream_t * 
         {
             chunk = 32;
         }
-        if ( !serialize_read_bits( stream, &g, chunk ) )
+        if ( !serialize_read_bits_internal( stream, &g, chunk ) )
         {
             return 0;
         }
@@ -3209,11 +3414,15 @@ SERIALIZE_INLINE int serialize_read_int128( serialize_read_stream_t * stream, se
         return 0;
     }
 
-    /* bounds are the caller's, not the network's: asserted exactly as the
-       C++ ReadStream::SerializeInteger128 asserts them, never checked in a
-       release build. What IS checked for real, below, is the decoded offset
-       against the span — that is where untrusted data arrives. */
-    serialize_assert( serialize_int128_compare( min, max ) <= 0 );
+    /* bounds are the caller's, not the network's, and bounds the wrong way
+       round are a bad declaration: refused as value_out_of_range before any
+       bits move, as the C++ ReadStream::SerializeInteger128 refuses them since
+       2.1 (IMPLEMENTING.md U7, U16). What is checked below is the decoded
+       offset against the span, where untrusted data arrives. */
+    if ( serialize_int128_compare( min, max ) > 0 )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
 
     umin = serialize_uint128_make( min.hi, min.lo );
     umax = serialize_uint128_make( max.hi, max.lo );
@@ -3336,10 +3545,41 @@ SERIALIZE_ALWAYS_INLINE serialize_uint128_t serialize_raw_bound( serialize_int64
     return u;
 }
 
+/*
+    Is a fixed point declaration one the Q format can carry (IMPLEMENTING.md
+    U16)? integer_bits counts the sign bit and is at least 1, fraction_bits is
+    not negative, the two together fit the storage width, min does not exceed
+    max, and both whole-unit bounds fit the integer part: [-2^(integer_bits -
+    1), 2^(integer_bits - 1) - 1]. Fit, not equal: C has no 8 or 16 bit fixed
+    entry point, so a Q8.8 is carried in fixed32 storage, and its raw values
+    fit there exactly. A declaration whose bounds do not fit its own Q format
+    is what produced wrong data (Q16.16 over [-40000, 40000] accepted a raw
+    2^31 and handed back -32768.0). The C++ reference refuses each of these at
+    compile time; C has no template to hang that on, so the write and measure
+    halves assert it and the read half refuses it as value_out_of_range,
+    because a reader never traps. Every argument is a literal at a generated
+    call site, so this folds to a constant.
+*/
+SERIALIZE_ALWAYS_INLINE int serialize_fixed_declaration_is_valid( int storage_bits, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
+{
+    serialize_int64_t half;
+    if ( integer_bits < 1 || fraction_bits < 0 || fraction_bits > storage_bits - integer_bits || min > max )
+    {
+        return 0;
+    }
+    if ( integer_bits >= 64 )
+    {
+        return 1;                                   /* every int64 whole-unit bound fits */
+    }
+    half = (serialize_int64_t) 1 << ( integer_bits - 1 );
+    return min >= -half && max <= half - 1;
+}
+
 SERIALIZE_ALWAYS_INLINE int serialize_write_fixed32( serialize_write_stream_t * stream, serialize_int32_t value, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
 {
     serialize_int128_t wide;
     (void) integer_bits;
+    serialize_assert( serialize_fixed_declaration_is_valid( 32, integer_bits, fraction_bits, (serialize_int64_t) min, (serialize_int64_t) max ) );
     wide = serialize_int128_from_int64( (serialize_int64_t) value );
     return serialize_write_fixed_core( stream, serialize_uint128_make( wide.hi, wide.lo ),
                                        serialize_raw_bound( (serialize_int64_t) min, fraction_bits ),
@@ -3351,6 +3591,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_fixed32( serialize_read_stream_t * st
     serialize_uint128_t raw = { 0, 0 };     /* written on every accepted path; initialized so gcc 13 can see it (-Wmaybe-uninitialized) */
     (void) integer_bits;
     if ( stream->error ) return 0;
+    if ( !serialize_fixed_declaration_is_valid( 32, integer_bits, fraction_bits, (serialize_int64_t) min, (serialize_int64_t) max ) )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
     if ( !serialize_read_fixed_core( stream, &raw,
                                      serialize_raw_bound( (serialize_int64_t) min, fraction_bits ),
                                      serialize_raw_bound( (serialize_int64_t) max, fraction_bits ) ) )
@@ -3365,6 +3609,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_fixed64( serialize_write_stream_t * 
 {
     serialize_int128_t wide;
     (void) integer_bits;
+    serialize_assert( serialize_fixed_declaration_is_valid( 64, integer_bits, fraction_bits, min, max ) );
     wide = serialize_int128_from_int64( value );
     return serialize_write_fixed_core( stream, serialize_uint128_make( wide.hi, wide.lo ),
                                        serialize_raw_bound( min, fraction_bits ),
@@ -3376,6 +3621,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_fixed64( serialize_read_stream_t * st
     serialize_uint128_t raw = { 0, 0 };     /* written on every accepted path; initialized so gcc 13 can see it (-Wmaybe-uninitialized) */
     (void) integer_bits;
     if ( stream->error ) return 0;
+    if ( !serialize_fixed_declaration_is_valid( 64, integer_bits, fraction_bits, min, max ) )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
     if ( !serialize_read_fixed_core( stream, &raw,
                                      serialize_raw_bound( min, fraction_bits ),
                                      serialize_raw_bound( max, fraction_bits ) ) )
@@ -3389,6 +3638,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_fixed64( serialize_read_stream_t * st
 SERIALIZE_ALWAYS_INLINE int serialize_write_fixed128( serialize_write_stream_t * stream, serialize_int128_t value, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     (void) integer_bits;
+    serialize_assert( serialize_fixed_declaration_is_valid( 128, integer_bits, fraction_bits, min, max ) );
     return serialize_write_fixed_core( stream, serialize_uint128_make( value.hi, value.lo ),
                                        serialize_raw_bound( min, fraction_bits ),
                                        serialize_raw_bound( max, fraction_bits ) );
@@ -3399,6 +3649,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_fixed128( serialize_read_stream_t * s
     serialize_uint128_t raw = { 0, 0 };     /* written on every accepted path; initialized so gcc 13 can see it (-Wmaybe-uninitialized) */
     (void) integer_bits;
     if ( stream->error ) return 0;
+    if ( !serialize_fixed_declaration_is_valid( 128, integer_bits, fraction_bits, min, max ) )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
     if ( !serialize_read_fixed_core( stream, &raw,
                                      serialize_raw_bound( min, fraction_bits ),
                                      serialize_raw_bound( max, fraction_bits ) ) )
@@ -3513,6 +3767,10 @@ SERIALIZE_INLINE int serialize_measure_string( serialize_measure_stream_t * stre
 
     length = (int) string_length;
 
+    /* the payload is UTF-8 on measure exactly as on write (IMPLEMENTING.md
+       U3, U4): a measure follows the writer's rules, debug-asserted */
+    serialize_assert( serialize_string_is_valid_utf8( string, length ) );
+
     serialize_measure_int( stream, 0, buffer_size - 1 );
     serialize_measure_bytes( stream, length );
 
@@ -3559,18 +3817,21 @@ SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed_core( serialize_measure_stre
 SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed32( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int32_t min, serialize_int32_t max )
 {
     (void) integer_bits;
+    serialize_assert( serialize_fixed_declaration_is_valid( 32, integer_bits, fraction_bits, (serialize_int64_t) min, (serialize_int64_t) max ) );
     return serialize_measure_fixed_core( stream, fraction_bits, (serialize_int64_t) min, (serialize_int64_t) max );
 }
 
 SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed64( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     (void) integer_bits;
+    serialize_assert( serialize_fixed_declaration_is_valid( 64, integer_bits, fraction_bits, min, max ) );
     return serialize_measure_fixed_core( stream, fraction_bits, min, max );
 }
 
 SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed128( serialize_measure_stream_t * stream, int integer_bits, int fraction_bits, serialize_int64_t min, serialize_int64_t max )
 {
     (void) integer_bits;
+    serialize_assert( serialize_fixed_declaration_is_valid( 128, integer_bits, fraction_bits, min, max ) );
     return serialize_measure_fixed_core( stream, fraction_bits, min, max );
 }
 

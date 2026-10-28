@@ -218,32 +218,14 @@ static void violate_measure_int128_bounds( void )
                               serialize_int128_from_int64( -1 ) );  /* min > max */
 }
 
-/* the read path's caller-owned parameters are contracts too — the bounds
-   are the caller's, not the network's, asserted exactly as the C++
-   ReadStream asserts them. The DATA is still checked for real: those
-   refusals live in roundtrip.c, in every build mode. */
-
-static void violate_read_int128_bounds( void )
-{
-    serialize_uint8_t buffer[16 + 8];                   /* + 8: read buffer allocations extend 8 bytes past the data */
-    serialize_read_stream_t r;
-    serialize_int128_t out;
-    memset( buffer, 0, sizeof( buffer ) );
-    serialize_read_stream_init( &r, buffer, 16 );
-    serialize_read_int128( &r, &out,
-                           serialize_int128_from_int64( 1 ),
-                           serialize_int128_from_int64( -1 ) );     /* min > max */
-}
-
-static void violate_read_int_relative_previous_domain( void )
-{
-    serialize_uint8_t buffer[8 + 8];                    /* + 8: read buffer allocations extend 8 bytes past the data */
-    serialize_read_stream_t r;
-    serialize_int32_t out = 0;
-    memset( buffer, 0, sizeof( buffer ) );
-    serialize_read_stream_init( &r, buffer, 8 );
-    serialize_read_int_relative( &r, -1, &out );        /* previous is the caller's, not the network's */
-}
+/* the read path's caller-owned parameters that remain contracts: the
+   buffer pointer and the padded destination, asserted exactly as the C++
+   BitReader and ReadStream::InitializePadded assert them. A bad DECLARATION
+   on read -- bounds the wrong way round, a previous outside the int_relative
+   domain, a bit count, a fixed point or precomputed declaration, a string
+   buffer below 1 -- is no longer one of them: a reader never traps
+   (IMPLEMENTING.md U7, U16), and roundtrip.c's test_uniform_read_rules proves
+   each refuses as value_out_of_range in both build modes. */
 
 static void violate_read_null_buffer( void )
 {
@@ -340,33 +322,146 @@ static void violate_compressed_float_precomputed_bits_mismatch( void )
     serialize_write_compressed_float_precomputed( &w, 5.0f, 1000, 11, 10.0f, 0.0f );
 }
 
-/*
-    Forks, runs the violation in the child with stderr pointed at /dev/null
-    so the expected assert message does not read as a failing test, and
-    requires death by SIGABRT — anything else (a clean exit most of all)
-    means the contract did not fire.
-*/
-static void must_abort( void (*violation)( void ), const char * name )
+/* IMPLEMENTING.md U3 and U4: a string write is UTF-8, checked on write AND
+   on measure. 0xC0 0xAF is an overlong '/'. */
+static void violate_write_string_invalid_utf8( void )
 {
-    pid_t pid = fork();
+    serialize_uint8_t buffer[64];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_string( &w, "a\xC0\xAF", 16 );
+}
+
+static void violate_measure_string_invalid_utf8( void )
+{
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_string( &m, "a\xC0\xAF", 16 );
+}
+
+/* IMPLEMENTING.md U16 on write and measure: a fixed point declaration the Q
+   format cannot carry is caller error, asserted (the C++ reference refuses
+   it at compile time). The audit's fixed_qformat reproducer, Q16.16 over
+   [-40000, 40000] whole units, and a Q24.16 that does not fit 32 bit
+   storage. (A Q8.8 in fixed32 storage is legal: C has no 16 bit form.) */
+
+static void violate_write_fixed_qformat_bounds( void )
+{
+    serialize_uint8_t buffer[16];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_fixed32( &w, 0, 16, 16, -40000, 40000 );
+}
+
+static void violate_write_fixed_storage_width( void )
+{
+    serialize_uint8_t buffer[16];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_fixed32( &w, 100 * 65536, 24, 16, 0, 200 );
+}
+
+static void violate_measure_fixed_qformat_bounds( void )
+{
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_fixed64( &m, 32, 32, 0, 2147483648LL );   /* Q32.32 max is 2^31 - 1 whole units */
+}
+
+/* U16: a step count above the 4294967040 ceiling the derivation clamps to,
+   with a bit count that agrees with it */
+static void violate_compressed_float_precomputed_ceiling( void )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_compressed_float_precomputed( &w, 5.0f, 0xFFFFFFFFu, 32, 10.0f, 0.0f );
+}
+
+/* U10: a write checks room for the whole operation before it writes any of
+   it. The length field fits and the payload does not, so the assert that
+   must fire is the whole-operation one, before the length is written --
+   never the payload's own capacity assert after the length and align bits
+   are already in the buffer. */
+static void violate_string_whole_operation_room( void )
+{
+    serialize_uint8_t buffer[8];                        /* 64 bits: room for a 6 bit length, not 13 bytes */
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_string( &w, "hello, world!", 64 );
+}
+
+static void violate_bytes_whole_operation_room( void )
+{
+    static const serialize_uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_bits( &w, 1, 1 );                   /* the align takes 7 bits, then 64 do not fit in 56 */
+    serialize_write_bytes( &w, payload, 8 );
+}
+
+/*
+    Forks, runs the violation in the child with its stderr captured through a
+    pipe, and requires death by SIGABRT AND that the assert message names the
+    expected expression. A bare SIGABRT is not enough: the audit's
+    which_assert reproducer showed a case passing on an assert other than the
+    one it was written for (the U1 buffer assert firing ahead of the capacity
+    assert it meant to prove). The C standard requires an assert's message to
+    carry the text of its expression, so the expected text is that
+    expression, or a distinctive part of it.
+*/
+static void must_abort( void (*violation)( void ), const char * name, const char * expected )
+{
+    int fds[2];
+    pid_t pid;
+    char message[4096];
+    size_t length = 0;
+
+    if ( pipe( fds ) != 0 )
+    {
+        printf( "FAILED %s: pipe\n", name );
+        failed = 1;
+        return;
+    }
+
+    fflush( stdout );                                   /* or the child's abort replays the parent's buffered output */
+    pid = fork();
 
     if ( pid < 0 )
     {
         printf( "FAILED %s: fork\n", name );
         failed = 1;
+        close( fds[0] );
+        close( fds[1] );
         return;
     }
 
     if ( pid == 0 )
     {
-        int devnull = open( "/dev/null", O_WRONLY );
-        if ( devnull >= 0 )
-        {
-            dup2( devnull, 2 );
-        }
+        close( fds[0] );
+        dup2( fds[1], 2 );
         violation();
         _exit( 0 );                                     /* survived: the parent treats this as failure */
     }
+
+    close( fds[1] );
+    for ( ;; )
+    {
+        ssize_t n;
+        if ( length >= sizeof( message ) - 1 )
+        {
+            break;
+        }
+        n = read( fds[0], message + length, sizeof( message ) - 1 - length );
+        if ( n <= 0 )
+        {
+            break;
+        }
+        length += (size_t) n;
+    }
+    message[length] = '\0';
+    close( fds[0] );
 
     {
         int status = 0;
@@ -376,40 +471,51 @@ static void must_abort( void (*violation)( void ), const char * name )
             printf( "FAILED %s: expected SIGABRT, child did not assert\n", name );
             failed = 1;
         }
+        else if ( strstr( message, expected ) == NULL )
+        {
+            printf( "FAILED %s: the wrong assert fired. expected \"%s\", got: %s\n", name, expected, message );
+            failed = 1;
+        }
     }
 }
 
 int main( void )
 {
-    must_abort( violate_capacity,                        "capacity" );
-    must_abort( violate_write_buffer_multiple_of_8,      "write_buffer_multiple_of_8" );
-    must_abort( violate_int_range,                       "int_range" );
-    must_abort( violate_int_relative_order,              "int_relative_order" );
-    must_abort( violate_int_relative_previous_domain,    "int_relative_previous_domain" );
-    must_abort( violate_string_length,                   "string_length" );
-    must_abort( violate_bits_width,                      "bits_width" );
-    must_abort( violate_measure_string_length,           "measure_string_length" );
-    must_abort( violate_write_float_nan,                 "write_float_nan" );
-    must_abort( violate_write_float_signaling_nan,       "write_float_signaling_nan" );
-    must_abort( violate_write_float_infinity,            "write_float_infinity" );
-    must_abort( violate_write_double_nan,                "write_double_nan" );
-    must_abort( violate_write_double_infinity,           "write_double_infinity" );
-    must_abort( violate_write_double_low_payload,        "write_double_low_payload" );
-    must_abort( violate_compressed_float_infinite_top,   "compressed_float_infinite_top" );
-    must_abort( violate_measure_int_relative_order,      "measure_int_relative_order" );
-    must_abort( violate_measure_int_relative_previous_domain, "measure_int_relative_previous_domain" );
-    must_abort( violate_measure_int128_bounds,           "measure_int128_bounds" );
-    must_abort( violate_read_int128_bounds,              "read_int128_bounds" );
-    must_abort( violate_read_int_relative_previous_domain, "read_int_relative_previous_domain" );
-    must_abort( violate_read_null_buffer,                "read_null_buffer" );
-    must_abort( violate_read_padded_destination,         "read_padded_destination" );
-    must_abort( violate_write_after_fail,                "write_after_fail" );
-    must_abort( violate_compressed_float_nan_value,      "compressed_float_nan_value" );
-    must_abort( violate_compressed_float_inf_value,      "compressed_float_inf_value" );
-    must_abort( violate_compressed_float_infinite_delta, "compressed_float_infinite_delta" );
-    must_abort( violate_compressed_float_infinite_values, "compressed_float_infinite_values" );
-    must_abort( violate_compressed_float_precomputed_nan_value, "compressed_float_precomputed_nan_value" );
-    must_abort( violate_compressed_float_precomputed_bits_mismatch, "compressed_float_precomputed_bits_mismatch" );
+    must_abort( violate_capacity, "capacity", "stream->bits_written + bits <= stream->bits_limit" );
+    must_abort( violate_write_buffer_multiple_of_8, "write_buffer_multiple_of_8", "( bytes % 8 ) == 0" );
+    must_abort( violate_int_range, "int_range", "value <= max" );
+    must_abort( violate_int_relative_order, "int_relative_order", "current > previous" );
+    must_abort( violate_int_relative_previous_domain, "int_relative_previous_domain", "previous >= 0" );
+    must_abort( violate_string_length, "string_length", "serialize_length_fits_buffer( string_length, buffer_size )" );
+    must_abort( violate_bits_width, "bits_width", "value <= (serialize_uint32_t) ( ( 1UL << bits ) - 1 )" );
+    must_abort( violate_measure_string_length, "measure_string_length", "serialize_length_fits_buffer( string_length, buffer_size )" );
+    must_abort( violate_write_float_nan, "write_float_nan", "serialize_float_bits_are_finite( bits )" );
+    must_abort( violate_write_float_signaling_nan, "write_float_signaling_nan", "serialize_float_bits_are_finite( bits )" );
+    must_abort( violate_write_float_infinity, "write_float_infinity", "serialize_float_bits_are_finite( bits )" );
+    must_abort( violate_write_double_nan, "write_double_nan", "serialize_double_bits_are_finite( bits )" );
+    must_abort( violate_write_double_infinity, "write_double_infinity", "serialize_double_bits_are_finite( bits )" );
+    must_abort( violate_write_double_low_payload, "write_double_low_payload", "serialize_double_bits_are_finite( bits )" );
+    must_abort( violate_compressed_float_infinite_top, "compressed_float_infinite_top", "serialize_float_is_finite( min + delta )" );
+    must_abort( violate_measure_int_relative_order, "measure_int_relative_order", "current > previous" );
+    must_abort( violate_measure_int_relative_previous_domain, "measure_int_relative_previous_domain", "previous >= 0" );
+    must_abort( violate_measure_int128_bounds, "measure_int128_bounds", "serialize_int128_compare( min, max ) <= 0" );
+    must_abort( violate_read_null_buffer, "read_null_buffer", "buffer" );
+    must_abort( violate_read_padded_destination, "read_padded_destination", "destination_bytes - 8 >= bytes" );
+    must_abort( violate_write_after_fail, "write_after_fail", "stream->bits_written + bits <= stream->bits_limit" );
+    must_abort( violate_compressed_float_nan_value, "compressed_float_nan_value", "serialize_float_is_finite( value )" );
+    must_abort( violate_compressed_float_inf_value, "compressed_float_inf_value", "serialize_float_is_finite( value )" );
+    must_abort( violate_compressed_float_infinite_delta, "compressed_float_infinite_delta", "serialize_float_is_finite( delta )" );
+    must_abort( violate_compressed_float_infinite_values, "compressed_float_infinite_values", "serialize_float_is_finite( values )" );
+    must_abort( violate_compressed_float_precomputed_nan_value, "compressed_float_precomputed_nan_value", "serialize_float_is_finite( value )" );
+    must_abort( violate_compressed_float_precomputed_bits_mismatch, "compressed_float_precomputed_bits_mismatch", "bits == serialize_bits_required( 0, max_integer_value )" );
+    must_abort( violate_compressed_float_precomputed_ceiling, "compressed_float_precomputed_ceiling", "max_integer_value <= 4294967040u" );
+    must_abort( violate_write_string_invalid_utf8, "write_string_invalid_utf8", "serialize_string_is_valid_utf8( string, length )" );
+    must_abort( violate_measure_string_invalid_utf8, "measure_string_invalid_utf8", "serialize_string_is_valid_utf8( string, length )" );
+    must_abort( violate_write_fixed_qformat_bounds, "write_fixed_qformat_bounds", "serialize_fixed_declaration_is_valid( 32," );
+    must_abort( violate_write_fixed_storage_width, "write_fixed_storage_width", "serialize_fixed_declaration_is_valid( 32," );
+    must_abort( violate_measure_fixed_qformat_bounds, "measure_fixed_qformat_bounds", "serialize_fixed_declaration_is_valid( 64," );
+    must_abort( violate_string_whole_operation_room, "string_whole_operation_room", "serialize_write_has_room( stream, serialize_bits_required" );
+    must_abort( violate_bytes_whole_operation_room, "bytes_whole_operation_room", "serialize_write_has_room( stream, 0, bytes )" );
 
     printf( failed ? "FAILED\n" : "OK\n" );
     return failed;
