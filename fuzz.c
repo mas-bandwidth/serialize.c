@@ -1,7 +1,7 @@
 /*
     libFuzzer harness for serialize.c, ported from the C++ library's fuzz.cpp.
 
-    Every input runs three passes:
+    Every input runs four passes:
 
     1. Hostile read (fuzz_read). The read stream is the trust boundary of this
        library: it must survive arbitrary hostile bytes, failing reads by
@@ -14,44 +14,93 @@
        (see the read stream struct in serialize.h) covers that load, and the
        bytes it reaches are loaded but never interpreted. Allocating exactly
        the contract and no more puts an asan fence on the contract's own
-       edge: a read past data + 8 traps on every run.
+       edge: a read past data + 8 traps on every run. The slack is filled with
+       0xFF rather than 0x00 so a reader that leaked slack bits into a value or
+       decision cannot pass by accident.
 
     2. The same hostile bytes through the padded-copy wrapper
        (serialize_read_stream_init_padded), from a source allocation with no
        slack at all. That wrapper is what a caller holding an exactly sized
        payload uses, so the source is heap allocated at exactly payload
        length and asan fences the byte right after it: a wrapper that read
-       its source the way the reader reads a buffer would trap here. The
-       destination is left uninitialized on purpose, so any byte the reader
-       can touch that the wrapper failed to write is a ubsan/asan finding
-       rather than a silent zero.
+       past its source allocation would trap under asan here. The destination
+       buffer is pre-filled with 0xFF before the copy so any payload or slack
+       byte the wrapper failed to write is deterministically non-zero (while
+       pass 3's 0x5A/0xA5 sentinel pass is what deterministically catches
+       unwritten or clobbered scalar read destinations).
 
-    3. Differential round trip (fuzz_round_trip). Values generated from the
-       input are written with a write stream, measured with a measure stream
-       (which must never measure fewer bits than were written), then read back
-       and compared. Any write/read asymmetry traps.
+    3. Hostile read with sentinel destinations (fuzz_read_sentinel). The same
+       hostile bytes, checking every scalar read so a refusal must leave its
+       destination byte-for-byte as the caller left it (STANDARD.md), and
+       checking that failure is terminal: every later read refuses, preserves
+       the first refusal reason, leaves the poisoned cursor unchanged, and
+       writes nothing. Run twice per input with two bit-complementary sentinels
+       (0x5A and 0xA5), so a write that happens to match one sentinel is caught
+       by the other.
+
+    4. Differential round trip (fuzz_round_trip). Values generated from the
+       input are written with a write stream, re-written into a tight multiple
+       of 8 buffer followed by a 16-byte 0xAA canary, measured with a measure
+       stream (which must never measure fewer bits than were written), then
+       read back and compared. Any write/read asymmetry or canary overrun traps.
 
     The first bytes of the fuzz input are an op program selecting which
     serialize_* calls run and with what parameters; the rest are the hostile
-    bitstream for passes 1 and 2 and the value pool for pass 3. The op table matches
+    bitstream for passes 1-3 and the value pool for pass 4. The op table matches
     fuzz.cpp case for case so the two harnesses explore the same interleavings.
     One adaptation: C has no native 128-bit arithmetic, so where the C++
     harness draws uniform 128-bit values, this one drives the wide lanes with
     an exact endpoint, its negation, or a 64-bit draw -- the endpoints reach
     the high lane on every configuration, which is what the emulation needs
     proven.
-
-    Clang only: libFuzzer is clang's. See the fuzz target in the Makefile.
 */
 
 #include "serialize.h"
 
-#include <stdint.h>
-#include <stdlib.h>     /* malloc/free: the pass 1 and pass 2 buffers carry the allocation contract exactly */
+#include <stdio.h>
+#include <stdlib.h>     /* malloc/free: the pass 1-3 and tight buffers carry the allocation contract exactly */
 #include <string.h>
 #include <math.h>
 
-#define fuzz_check( condition ) do { if ( !(condition) ) { __builtin_trap(); } } while (0)
+#ifndef INT32_MIN
+#define INT32_MIN ( -2147483647 - 1 )
+#endif
+#ifndef INT32_MAX
+#define INT32_MAX 2147483647
+#endif
+#ifndef INT64_MIN
+#define INT64_MIN ( -9223372036854775807LL - 1 )
+#endif
+#ifndef INT64_MAX
+#define INT64_MAX 9223372036854775807LL
+#endif
+
+/* the pass running now, so a failed check names the pass that caught it (the replay controls match on it) */
+static const char * fuzz_pass = "none";
+
+/* the replay driver exits with a status so make/ctest can match the message; libFuzzer wants the trap */
+#ifdef SERIALIZE_FUZZ_REPLAY
+#define fuzz_trap() exit( 86 )
+#else
+#define fuzz_trap() __builtin_trap()
+#endif
+
+#define fuzz_check( condition ) do { if ( !(condition) ) { fprintf( stderr, "fuzz_check failed: pass %s, line %d\n", fuzz_pass, __LINE__ ); fflush( stderr ); fuzz_trap(); } } while (0)
+
+/* NEGATIVE CONTROLS. Built with SERIALIZE_FUZZ_CONTROL=n, exactly one check of
+   this harness is sabotaged, and the replay driver below must then trap in the
+   pass that owns that check (the Makefile's controls target runs each and
+   passes only when the output names that pass). A harness that has never been
+   seen to fail is a claim, not a measurement. 0 is the real harness.
+     1 sentinel   a refused read is made to write its destination
+     2 hostile    a range check is tightened below the range the reader accepts
+     3 padded     serialize_read_stream_init_padded's success is expected to fail
+     4 roundtrip  a round trip value is expected to differ from what was written
+     5 canary     a byte past the tight write buffer is overwritten
+     6 trailing   the trailing data refusal is expected to be an accept */
+#ifndef SERIALIZE_FUZZ_CONTROL
+#define SERIALIZE_FUZZ_CONTROL 0
+#endif
 
 #define FUZZ_NUM_OPS 32
 #define FUZZ_MAX_PAYLOAD 4096
@@ -230,7 +279,11 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
             {
                 serialize_int32_t value = 0;
                 if ( !serialize_read_int( stream, &value, -100, +100 ) ) return;
+#if SERIALIZE_FUZZ_CONTROL == 2
+                fuzz_check( value >= -100 && value <= +50 );                /* NEGATIVE CONTROL */
+#else
                 fuzz_check( value >= -100 && value <= +100 );
+#endif
             }
             break;
 
@@ -420,7 +473,224 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
 }
 
 /* ---------------------------------------------------------------------------
-   pass 3: differential round trip
+   pass 3: hostile read with sentinel destinations
+
+   STANDARD.md, "A refused read must leave its destination unwritten": when a
+   read of a scalar fails, the caller's value is exactly what it was before
+   the call, and failure is terminal: every later read refuses, preserves the
+   first refusal reason, keeps the poisoned cursor fixed, and writes nothing.
+   Pass 1 stops at the first refusal; this pass keeps reading through the
+   entire op program to prove terminality holds for every operation, and runs
+   twice per input with two bit-complementary sentinels (0x5A and 0xA5).
+   bytes and string leave their buffer unspecified after a refusal, so they
+   are driven for the terminality check only.
+   --------------------------------------------------------------------------- */
+
+typedef struct fuzz_sentinel_run_t
+{
+    serialize_read_stream_t * stream;
+    serialize_refusal_t refusal;        /* the first reason, once the stream has refused */
+    serialize_int64_t bits;             /* poisoned cursor at the first refusal */
+    int pattern;                        /* the sentinel byte pattern */
+} fuzz_sentinel_run_t;
+
+static void fuzz_sentinel_check( fuzz_sentinel_run_t * run, int ok, int unchanged )
+{
+    if ( run->refusal != SERIALIZE_REFUSAL_NONE )
+    {
+        fuzz_check( !ok );                                                  /* terminal: refused, whatever the operation */
+        fuzz_check( serialize_read_refusal( run->stream ) == run->refusal );/* the first reason wins */
+        fuzz_check( serialize_read_bits_processed( run->stream ) == run->bits ); /* and the cursor stays at the poison */
+        fuzz_check( unchanged );
+        return;
+    }
+    if ( ok )
+    {
+        fuzz_check( serialize_read_refusal( run->stream ) == SERIALIZE_REFUSAL_NONE );
+        return;
+    }
+    fuzz_check( serialize_read_refusal( run->stream ) != SERIALIZE_REFUSAL_NONE ); /* a refused read stream never reports none */
+    fuzz_check( unchanged );                                                /* and the destination is exactly what it was */
+    run->refusal = serialize_read_refusal( run->stream );
+    run->bits = serialize_read_bits_processed( run->stream );
+}
+
+static int fuzz_sentinel_untouched( const void * value, size_t size, int pattern )
+{
+    const serialize_uint8_t * raw = (const serialize_uint8_t *) value;
+    size_t i;
+    for ( i = 0; i < size; i++ )
+    {
+        if ( raw[i] != (serialize_uint8_t) pattern )
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+#if SERIALIZE_FUZZ_CONTROL == 1
+#define fuzz_sentinel_sabotage( ok, dest, pattern )                         \
+    do                                                                      \
+    {                                                                       \
+        if ( !( ok ) )                                                      \
+        {                                                                   \
+            memset( &( dest ), ( pattern ) ^ 0xFF, sizeof( dest ) );        \
+        }                                                                   \
+    } while ( 0 )
+#else
+#define fuzz_sentinel_sabotage( ok, dest, pattern ) do { (void) ( ok ); (void) ( dest ); (void) ( pattern ); } while ( 0 )
+#endif
+
+#define sentinel_read( run, type, call )                                    \
+    do                                                                      \
+    {                                                                       \
+        type destination;                                                   \
+        int ok;                                                             \
+        memset( &destination, ( run ).pattern, sizeof( destination ) );     \
+        ok = ( call );                                                      \
+        fuzz_sentinel_sabotage( ok, destination, ( run ).pattern );         \
+        fuzz_sentinel_check( &( run ), ok, fuzz_sentinel_untouched( &destination, sizeof( destination ), ( run ).pattern ) ); \
+    } while ( 0 )
+
+static void fuzz_read_sentinel( serialize_read_stream_t * stream, const serialize_uint8_t * ops, int num_ops, int pattern )
+{
+    fuzz_sentinel_run_t run;
+    serialize_uint8_t bytes[256];
+    char string[256];
+    int i;
+
+    run.stream = stream;
+    run.refusal = SERIALIZE_REFUSAL_NONE;
+    run.bits = 0;
+    run.pattern = pattern;
+
+    for ( i = 0; i < num_ops; i++ )
+    {
+        const int op = ops[i] & 15;
+        const int param = ops[i] >> 4;
+
+        switch ( op )
+        {
+            case 0:
+            {
+                sentinel_read( run, serialize_uint32_t, serialize_read_bits( stream, &destination, param + 1 ) );
+            }
+            break;
+
+            case 1:
+            {
+                sentinel_read( run, serialize_uint32_t, serialize_read_bits( stream, &destination, param + 17 ) );
+            }
+            break;
+
+            case 2:
+            {
+                sentinel_read( run, serialize_int32_t, serialize_read_int( stream, &destination, -100, +100 ) );
+            }
+            break;
+
+            case 3:
+            {
+                const serialize_int64_t bound = (serialize_int64_t) ( param + 1 ) << 35;
+                const serialize_int128_t bound128 = fuzz_int128_pow2( 20 + ( param % 100 ) );
+                sentinel_read( run, serialize_int32_t, serialize_read_int( stream, &destination, INT32_MIN, INT32_MAX ) );
+                sentinel_read( run, serialize_int64_t, serialize_read_int64( stream, &destination, INT64_MIN, INT64_MAX ) );
+                sentinel_read( run, serialize_int64_t, serialize_read_int64( stream, &destination, -bound, +bound ) );
+                sentinel_read( run, serialize_int32_t, serialize_read_fixed32( stream, &destination, 16, 16, -1000, +1000 ) );
+                sentinel_read( run, serialize_int64_t, serialize_read_fixed64( stream, &destination, 48, 16, -100000000000LL, +100000000000LL ) );
+                sentinel_read( run, serialize_int128_t, serialize_read_fixed128( stream, &destination, 112, 16, -1152921504606846976LL, +1152921504606846976LL ) );
+                sentinel_read( run, serialize_int128_t, serialize_read_int128( stream, &destination, fuzz_int128_neg( bound128 ), bound128 ) );
+                sentinel_read( run, serialize_int128_t, serialize_read_int128( stream, &destination,
+                                                                               serialize_int128_make( 0x8000000000000000ULL, 0 ),
+                                                                               serialize_int128_make( 0x7FFFFFFFFFFFFFFFULL, ~ (serialize_uint64_t) 0 ) ) );
+            }
+            break;
+
+            case 4:
+            {
+                sentinel_read( run, int, serialize_read_bool( stream, &destination ) );
+            }
+            break;
+
+            case 5:
+            {
+                sentinel_read( run, float, serialize_read_float( stream, &destination ) );
+            }
+            break;
+
+            case 6:
+            {
+                sentinel_read( run, double, serialize_read_double( stream, &destination ) );
+            }
+            break;
+
+            case 7:
+            {
+                sentinel_read( run, float, serialize_read_compressed_float( stream, &destination, -10.0f, +10.0f, 0.01f ) );
+            }
+            break;
+
+            case 8:
+            {
+                sentinel_read( run, serialize_uint64_t, serialize_read_uint64( stream, &destination ) );
+                sentinel_read( run, serialize_uint128_t, serialize_read_uint128( stream, &destination ) );
+            }
+            break;
+
+            case 9:
+            {
+                const int ok = serialize_read_bytes( stream, bytes, param * 16 + 1 );
+                fuzz_sentinel_check( &run, ok, 1 );                         /* the buffer is unspecified after a refusal */
+            }
+            break;
+
+            case 10:
+            {
+                const int ok = serialize_read_string( stream, string, (int) sizeof( string ) );
+                fuzz_sentinel_check( &run, ok, 1 );
+            }
+            break;
+
+            case 11:
+            {
+                const int ok = serialize_read_end( stream );
+                fuzz_sentinel_check( &run, ok, 1 );
+            }
+            break;
+
+            case 12:
+            {
+                const int ok = serialize_read_align( stream );
+                fuzz_sentinel_check( &run, ok, 1 );
+            }
+            break;
+
+            case 13:
+            {
+                sentinel_read( run, serialize_int32_t, serialize_read_int_relative( stream, param * 1000, &destination ) );
+            }
+            break;
+
+            case 14:
+            {
+                sentinel_read( run, serialize_int32_t, serialize_read_int( stream, &destination, 0, ( param + 1 ) * 1000 ) );
+            }
+            break;
+
+            case 15:
+            {
+                sentinel_read( run, serialize_uint8_t, serialize_read_uint8( stream, &destination ) );
+                sentinel_read( run, serialize_uint16_t, serialize_read_uint16( stream, &destination ) );
+                sentinel_read( run, serialize_uint32_t, serialize_read_uint32( stream, &destination ) );
+            }
+            break;
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   pass 4: differential round trip
 
    One function, three modes, because C has no stream template: every case
    generates its expected value from the pool FIRST, identically in all three
@@ -470,7 +740,15 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                 serialize_int32_t value = 0;
                 if ( mode == FUZZ_WRITE )        { fuzz_check( serialize_write_int( w, expected, -100, +100 ) ); }
                 else if ( mode == FUZZ_MEASURE ) { fuzz_check( serialize_measure_int( m, -100, +100 ) ); }
-                else                             { fuzz_check( serialize_read_int( r, &value, -100, +100 ) ); fuzz_check( value == expected ); }
+                else
+                {
+                    fuzz_check( serialize_read_int( r, &value, -100, +100 ) );
+#if SERIALIZE_FUZZ_CONTROL == 4
+                    fuzz_check( value == expected + 1 );                    /* NEGATIVE CONTROL */
+#else
+                    fuzz_check( value == expected );
+#endif
+                }
             }
             break;
 
@@ -628,7 +906,7 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                 /* arbitrary bit patterns, FORCED FINITE before the write: a
                    non-finite value through compressed float is non-conforming
                    and asserts out on write (serialize fork #6), and this
-                   pass's job is to generate CONFORMING writer input — so a
+                   pass's job is to generate CONFORMING writer input -- so a
                    NaN or Inf pattern has one exponent bit cleared, which
                    keeps every pattern finite while preserving hugely
                    out-of-range values. Those must still clamp into [min,max]
@@ -710,15 +988,18 @@ static void fuzz_round_trip( fuzz_mode_t mode,
             {
                 char expected[32];
                 char value[32];
-                const int length = fuzz_pool_byte( pool ) % ( sizeof( expected ) - 1 );
+                const int length = (int) ( fuzz_pool_byte( pool ) % ( sizeof( expected ) - 1 ) );
                 int j;
                 for ( j = 0; j < length; j++ )
                 {
                     /* masked to ASCII: the string payload is well-formed UTF-8
-                       by the writer's contract, debug-asserted, and asserts
-                       are live in this harness. Arbitrary bytes still reach
-                       the READ path through the hostile pass. */
-                    const serialize_uint8_t c = fuzz_pool_byte( pool ) & 0x7F;
+                       by the writer's contract (debug-asserted, and asserts
+                       are live in this harness), and the reader REFUSES
+                       malformed payloads (ruling #8, 2026-08-15), so the
+                       differential round trip must generate conforming
+                       content. Arbitrary bytes still reach the READ path via
+                       fuzz_read. */
+                    const serialize_uint8_t c = fuzz_pool_byte( pool ) & 0x7Fu;
                     expected[j] = ( c != 0 ) ? (char) c : ' ';
                 }
                 expected[length] = '\0';
@@ -734,15 +1015,14 @@ static void fuzz_round_trip( fuzz_mode_t mode,
 
             case 11:
             {
-                /* a string of real text: random Unicode scalar values,
-                   encoded as UTF-8 here, so every length of sequence and
-                   every plane reaches the writer and must come back byte for
-                   byte. NUL and the surrogate block are not scalar text and
-                   are replaced. The C++ fuzz.cpp's case 11, case for case. */
-                char expected[40];          /* seven four byte characters at most, and the terminator */
+                /* a string of real text: random Unicode scalar values, encoded
+                   as UTF-8 here, so every length of sequence and every plane
+                   reaches the writer and must come back byte for byte. NUL and
+                   the surrogate block are not scalar text and are skipped */
+                char expected[40];                                          /* seven four-byte characters at most, and the terminator */
                 char value[40];
                 int length = 0;
-                const int characters = fuzz_pool_byte( pool ) % 8;
+                const int characters = (int) ( fuzz_pool_byte( pool ) % 8 );
                 int j;
                 for ( j = 0; j < characters; j++ )
                 {
@@ -854,6 +1134,7 @@ static void fuzz_round_trip( fuzz_mode_t mode,
     }
 }
 
+int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size );
 int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
 {
     const serialize_uint8_t * ops;
@@ -875,7 +1156,10 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
        and the allocation must extend at least 8 bytes past it (the C++
        harness allocates the same slack for the same reason). Allocating the
        contract exactly puts an asan fence on its edge, so any read past the
-       slack traps */
+       slack traps. The slack is all ones, not zeros: bytes past the end are
+       loaded and never interpreted, so a reader that leaked them into a value
+       or decision would pass on zeros (end's padding check included). */
+    fuzz_pass = "hostile";
     {
         serialize_uint8_t * read_buffer = (serialize_uint8_t *) malloc( payload_bytes + 8 );
         serialize_read_stream_t stream;
@@ -883,7 +1167,7 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
         {
             return 0;
         }
-        memset( read_buffer, 0, payload_bytes + 8 );
+        memset( read_buffer, 0xFF, payload_bytes + 8 );
         memcpy( read_buffer, payload, payload_bytes );
         serialize_read_stream_init( &stream, read_buffer, (int) payload_bytes );
         fuzz_read( &stream, ops, FUZZ_NUM_OPS );
@@ -893,10 +1177,12 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
     /* pass 2: the same hostile bytes, read through the padded-copy wrapper
        from a source allocation with no slack. The source is heap allocated
        at exactly payload_bytes, so asan fences the byte right after the
-       payload: a wrapper that read its source the way the reader reads a
-       buffer traps here. The destination is deliberately not zeroed first,
-       so a byte the reader can touch that the wrapper failed to write shows
-       up as a finding rather than a silent zero */
+       payload: a wrapper that read past its source allocation traps under
+       asan here. The destination buffer is pre-filled with 0xFF before the
+       wrapper runs so any payload or slack byte the wrapper failed to write
+       is deterministically non-zero (while pass 3's 0x5A/0xA5 sentinel pass
+       is what deterministically catches unwritten or clobbered scalar read
+       destinations). */
     {
         serialize_uint8_t * exact = (serialize_uint8_t *) malloc( payload_bytes );
         serialize_uint8_t * padded = (serialize_uint8_t *) malloc( payload_bytes + 8 );
@@ -908,15 +1194,44 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
             return 0;
         }
         memcpy( exact, payload, payload_bytes );
+        memset( padded, 0xFF, payload_bytes + 8 );
+        fuzz_pass = "padded";
         serialize_read_stream_init_padded( &stream, padded, (int) ( payload_bytes + 8 ), exact, (int) payload_bytes );
+#if SERIALIZE_FUZZ_CONTROL == 3
+        fuzz_check( serialize_read_error( &stream ) != 0 );                 /* NEGATIVE CONTROL */
+#else
+        fuzz_check( serialize_read_error( &stream ) == 0 );
+#endif
+        fuzz_pass = "hostile";
         fuzz_read( &stream, ops, FUZZ_NUM_OPS );
         free( exact );
         free( padded );
     }
 
-    /* pass 3: differential round trip of values generated from the same bytes.
+    /* pass 3: hostile read with sentinel destinations, twice with different sentinels */
+    fuzz_pass = "sentinel";
+    {
+        int pattern;
+        for ( pattern = 0x5A; pattern != 0; pattern = ( pattern == 0x5A ) ? 0xA5 : 0 )
+        {
+            serialize_uint8_t * read_buffer = (serialize_uint8_t *) malloc( payload_bytes + 8 );
+            serialize_read_stream_t stream;
+            if ( read_buffer == NULL )
+            {
+                return 0;
+            }
+            memset( read_buffer, 0xFF, payload_bytes + 8 );
+            memcpy( read_buffer, payload, payload_bytes );
+            serialize_read_stream_init( &stream, read_buffer, (int) payload_bytes );
+            fuzz_read_sentinel( &stream, ops, FUZZ_NUM_OPS, pattern );
+            free( read_buffer );
+        }
+    }
+
+    /* pass 4: differential round trip of values generated from the same bytes.
        worst case is ~260 bytes per op (a 241 byte serialize_bytes plus
        alignment), so 32 ops fit comfortably in 16KB */
+    fuzz_pass = "roundtrip";
     {
         /* the 16KB write_buffer extends well past the written bytes (worst
            case ~8KB), satisfying the reader's 8-bytes-past allocation
@@ -936,6 +1251,50 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
         serialize_write_flush( &write_stream );
         fuzz_check( !serialize_write_error( &write_stream ) );          /* writing in-range values must always succeed */
 
+        /* the same writes into a buffer that is exactly the smallest multiple
+           of 8 holding them, followed by a canary. The word flush must stay
+           inside the buffer and produce the same bytes. ASan cannot see a
+           partial-granule overrun past a tight allocation, so the canary is
+           the check */
+        {
+            const serialize_int64_t written = serialize_write_bytes_processed( &write_stream );
+            serialize_int64_t tight_bytes = ( ( written + 7 ) / 8 ) * 8;
+            const int canary_bytes = 16;
+            serialize_uint8_t * tight;
+            serialize_write_stream_t tight_stream;
+            fuzz_pool_t tight_pool;
+            int c;
+
+            if ( tight_bytes == 0 )
+            {
+                tight_bytes = 8;
+            }
+            tight = (serialize_uint8_t *) malloc( (size_t) ( tight_bytes + canary_bytes ) );
+            if ( tight == NULL )
+            {
+                return 0;
+            }
+            memset( tight, 0xA5, (size_t) tight_bytes );
+            memset( tight + tight_bytes, 0xAA, (size_t) canary_bytes );
+            serialize_write_stream_init( &tight_stream, tight, (int) tight_bytes );
+            fuzz_pool_init( &tight_pool, payload, payload_bytes );
+            fuzz_round_trip( FUZZ_WRITE, &tight_stream, NULL, NULL, ops, FUZZ_NUM_OPS, &tight_pool );
+            serialize_write_flush( &tight_stream );
+            fuzz_check( !serialize_write_error( &tight_stream ) );
+            fuzz_check( serialize_write_bytes_processed( &tight_stream ) == written );
+            fuzz_check( written == 0 || memcmp( tight, write_buffer, (size_t) written ) == 0 );
+#if SERIALIZE_FUZZ_CONTROL == 5
+            tight[tight_bytes] = 0;                                         /* NEGATIVE CONTROL */
+#endif
+            fuzz_pass = "canary";
+            for ( c = 0; c < canary_bytes; c++ )
+            {
+                fuzz_check( tight[tight_bytes + c] == 0xAA );
+            }
+            free( tight );
+        }
+
+        fuzz_pass = "roundtrip";
         serialize_measure_stream_init( &measure_stream );
         fuzz_pool_init( &pool, payload, payload_bytes );
         fuzz_round_trip( FUZZ_MEASURE, NULL, &measure_stream, NULL, ops, FUZZ_NUM_OPS, &pool );
@@ -953,9 +1312,81 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
         fuzz_pool_init( &pool, payload, payload_bytes );
         fuzz_round_trip( FUZZ_READ, NULL, NULL, &read_stream, ops, FUZZ_NUM_OPS, &pool );
         fuzz_check( !serialize_read_error( &read_stream ) );
+        fuzz_pass = "trailing";
+#if SERIALIZE_FUZZ_CONTROL == 6
+        fuzz_check( serialize_read_end( &read_stream ) != 0 );          /* NEGATIVE CONTROL */
+#else
         fuzz_check( !serialize_read_end( &read_stream ) );
+#endif
         fuzz_check( serialize_read_refusal( &read_stream ) == SERIALIZE_REFUSAL_TRAILING_DATA );
     }
 
     return 0;
 }
+
+#ifdef SERIALIZE_FUZZ_REPLAY
+
+/* The replay driver: the same target, run over a fixed set of generated inputs
+   with no libFuzzer, so `make test` and the MSVC leg can run it on every
+   platform, C standard and compiler in the matrix, and so the negative
+   controls above have a deterministic input to fail on. The generator is a
+   fixed xorshift (no clock, no files). The first inputs are the edge shapes
+   (all zero, all ones), the rest are random bytes of varying length, and
+   every input is also run with each op byte cycled through the sixteen
+   operations so that every operation is reached whatever the generator drew. */
+
+static serialize_uint64_t replay_state = 0x9E3779B97F4A7C15ULL;
+
+static serialize_uint32_t replay_next( void )
+{
+    replay_state ^= replay_state << 13;
+    replay_state ^= replay_state >> 7;
+    replay_state ^= replay_state << 17;
+    return (serialize_uint32_t) ( replay_state >> 16 );
+}
+
+int main( int argc, char ** argv )
+{
+    int count = 3000;
+    int n;
+    serialize_uint8_t input[FUZZ_NUM_OPS + 600];
+
+    if ( argc > 1 )
+    {
+        count = atoi( argv[1] );
+    }
+
+    for ( n = 0; n < count; n++ )
+    {
+        const int payload = ( n % 7 == 0 ) ? 1 + (int) ( replay_next() % 8 ) : 1 + (int) ( replay_next() % 600 );
+        const size_t total = (size_t) ( FUZZ_NUM_OPS + payload );
+        size_t i;
+        int j;
+
+        for ( i = 0; i < total; i++ )
+        {
+            input[i] = (serialize_uint8_t) replay_next();
+        }
+        if ( n % 11 == 0 )
+        {
+            for ( j = 0; j < payload; j++ )
+            {
+                input[FUZZ_NUM_OPS + j] = (serialize_uint8_t) ( ( n % 2 ) ? 0xFF : 0x00 );
+            }
+        }
+        /* cycle the op selectors so every operation appears, the parameters stay random */
+        for ( j = 0; j < FUZZ_NUM_OPS; j++ )
+        {
+            if ( n % 3 == 0 )
+            {
+                input[j] = (serialize_uint8_t) ( ( input[j] & 0xF0 ) | ( ( j + n ) & 15 ) );
+            }
+        }
+        LLVMFuzzerTestOneInput( input, total );
+    }
+
+    printf( "replayed %d inputs\n", count );
+    return 0;
+}
+
+#endif /* SERIALIZE_FUZZ_REPLAY */
