@@ -23,10 +23,11 @@
        slack at all. That wrapper is what a caller holding an exactly sized
        payload uses, so the source is heap allocated at exactly payload
        length and asan fences the byte right after it: a wrapper that read
-       its source the way the reader reads a buffer would trap here. The
-       destination is left uninitialized on purpose, so any byte the reader
-       can touch that the wrapper failed to write is a ubsan/asan finding
-       rather than a silent zero.
+       past its source allocation would trap under asan here. The destination
+       buffer is pre-filled with 0xFF before the copy so any payload or slack
+       byte the wrapper failed to write is deterministically non-zero (while
+       pass 3's 0x5A/0xA5 sentinel pass is what deterministically catches
+       unwritten or clobbered scalar read destinations).
 
     3. Hostile read with sentinel destinations (fuzz_read_sentinel). The same
        hostile bytes, checking every scalar read so a refusal must leave its
@@ -1176,10 +1177,12 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
     /* pass 2: the same hostile bytes, read through the padded-copy wrapper
        from a source allocation with no slack. The source is heap allocated
        at exactly payload_bytes, so asan fences the byte right after the
-       payload: a wrapper that read its source the way the reader reads a
-       buffer traps here. The destination is deliberately not zeroed first,
-       so a byte the reader can touch that the wrapper failed to write shows
-       up as a finding rather than a silent zero */
+       payload: a wrapper that read past its source allocation traps under
+       asan here. The destination buffer is pre-filled with 0xFF before the
+       wrapper runs so any payload or slack byte the wrapper failed to write
+       is deterministically non-zero (while pass 3's 0x5A/0xA5 sentinel pass
+       is what deterministically catches unwritten or clobbered scalar read
+       destinations). */
     {
         serialize_uint8_t * exact = (serialize_uint8_t *) malloc( payload_bytes );
         serialize_uint8_t * padded = (serialize_uint8_t *) malloc( payload_bytes + 8 );
@@ -1191,6 +1194,7 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
             return 0;
         }
         memcpy( exact, payload, payload_bytes );
+        memset( padded, 0xFF, payload_bytes + 8 );
         fuzz_pass = "padded";
         serialize_read_stream_init_padded( &stream, padded, (int) ( payload_bytes + 8 ), exact, (int) payload_bytes );
 #if SERIALIZE_FUZZ_CONTROL == 3
