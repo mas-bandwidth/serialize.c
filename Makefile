@@ -179,7 +179,7 @@ release-check: build/release-roundtrip
 		echo "negative control FAILED: a planted unused parameter compiled clean -- this gate is asleep"; exit 1; \
 	fi
 	@echo "negative control: planted unused parameter is RED, as it must be"
-	@sed 's/(float) max_integer_value/max_integer_value/' serialize.h > build/negctl/serialize.h
+	@sed 's/(serialize_uint32_t) ceil/ceil/' serialize.h > build/negctl/serialize.h
 	@if cmp -s serialize.h build/negctl/serialize.h; then \
 		echo "negative control BROKEN: the removed-cast control sabotaged nothing"; exit 1; \
 	fi
