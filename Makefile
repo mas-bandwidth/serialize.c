@@ -42,14 +42,14 @@ SERIALIZE_CPP ?= ../serialize
 # between the two variables into a red `make` on every Makefile-driven leg.
 # Adding a suite therefore reaches every CI leg by construction, or fails
 # loudly; it never skips silently.
-TEST_SUITES = roundtrip conformance corpus_root precomputed precomputed-fma assertdeath
+TEST_SUITES = roundtrip conformance corpus_root precomputed precomputed-fma assertdeath fuzz_replay
 
 # Not on MSVC, with reasons: assertdeath forks (POSIX); precomputed-fma is
 # precomputed rebuilt at -ffp-contract=on, and cl has no contraction flag
 # to vary.
 NOT_ON_MSVC = precomputed-fma assertdeath
 
-MSVC_SUITES = roundtrip conformance corpus_root precomputed golden
+MSVC_SUITES = roundtrip conformance corpus_root precomputed fuzz_replay golden
 
 ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) golden)))
 $(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden minus NOT_ON_MSVC (issue 37))
@@ -93,6 +93,8 @@ SERIALIZE_CONFORMANCE_ROOT ?= .
 
 CONTROLS = align-padding ranged-reconstruction ranged-range fixed-degenerate-terminal float-finite double-finite compressed-float-finite end-trailing-data end-padding int-relative-canonical string-embedded-nul string-utf8 string-utf8-surrogate int64-through-double wrong-reason object-terminal object-latch-rejected reject-reason
 
+FUZZ_CONTROLS = 1:sentinel 2:hostile 3:padded 4:roundtrip 5:canary 6:trailing
+
 controls: build/conformance build/sabotage
 	@if ./build/conformance $(SERIALIZE_CONFORMANCE_ROOT)/conformance-controls/unknown-operation.txt > build/control-unknown-operation.log 2>&1; then \
 		echo "control unknown-operation FAILED: the runner accepted an operation it has no code for"; exit 1; \
@@ -106,6 +108,20 @@ controls: build/conformance build/sabotage
 		$(CC) $(CFLAGS) -DNDEBUG build/controls/$$control/test/conformance.c -o build/controls/$$control/conformance $(LDLIBS) || exit 1; \
 		printf "control %s: " $$control; \
 		./build/controls/$$control/conformance --expect-failures $(SERIALIZE_CONFORMANCE_ROOT)/conformance-controls/$$control.expected $(SERIALIZE_CONFORMANCE_ROOT)/conformance || exit 1; \
+	done
+	@mkdir -p build/controls/fuzz
+	@for entry in $(FUZZ_CONTROLS); do \
+		num=$${entry%%:*}; \
+		pass=$${entry#*:}; \
+		$(CC) $(CFLAGS) -DSERIALIZE_FUZZ_REPLAY=1 -DSERIALIZE_FUZZ_CONTROL=$$num -I. fuzz.c -o build/controls/fuzz/control-$$pass $(LDLIBS) || exit 1; \
+		if ./build/controls/fuzz/control-$$pass > build/controls/fuzz/control-$$pass.log 2>&1; then \
+			echo "fuzz control $$pass FAILED: replay exited 0 with check $$num sabotaged"; exit 1; \
+		fi; \
+		if ! grep -q "fuzz_check failed: pass $$pass," build/controls/fuzz/control-$$pass.log; then \
+			echo "fuzz control $$pass FAILED: trapped outside pass $$pass:"; \
+			cat build/controls/fuzz/control-$$pass.log; exit 1; \
+		fi; \
+		echo "fuzz control $$pass: red in pass $$pass, as it must be"; \
 	done
 
 build/sabotage: tools/sabotage.c
@@ -163,6 +179,18 @@ release-check: build/release-roundtrip
 		echo "negative control FAILED: a planted unused parameter compiled clean -- this gate is asleep"; exit 1; \
 	fi
 	@echo "negative control: planted unused parameter is RED, as it must be"
+	@sed 's/(float) max_integer_value/max_integer_value/' serialize.h > build/negctl/serialize.h
+	@if cmp -s serialize.h build/negctl/serialize.h; then \
+		echo "negative control BROKEN: the removed-cast control sabotaged nothing"; exit 1; \
+	fi
+	@if ! $(CC) $(RELEASE_WARN_CFLAGS) -Wno-conversion -c build/negctl/serialize.c -o build/negctl/cast-plain.o 2> build/negctl/cast-plain.log; then \
+		echo "negative control BROKEN: the removed-cast header does not compile without -Wconversion"; \
+		cat build/negctl/cast-plain.log; exit 1; \
+	fi
+	@if $(CC) $(RELEASE_WARN_CFLAGS) -Werror -c build/negctl/serialize.c -o build/negctl/cast-werror.o 2> /dev/null; then \
+		echo "negative control FAILED: a removed cast compiled clean -- -Wconversion is asleep"; exit 1; \
+	fi
+	@echo "negative control: removed cast is RED, as it must be"
 	./build/release-roundtrip
 
 # roundtrip with the asserts compiled out. Same suite, the other build mode.
@@ -263,6 +291,14 @@ build/precomputed-fma: test/precomputed.c serialize.c serialize.h
 build/assertdeath: test/assertdeath.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/assertdeath.c serialize.c -o $@ $(LDLIBS)
+
+# The fuzz target's four passes (hostile read, padded read, sentinel read,
+# differential round trip) replayed over 3000 deterministic xorshift inputs on
+# every platform, C standard and compiler in the matrix, without clang or
+# libFuzzer.
+build/fuzz_replay: test/fuzz_replay.c fuzz.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -I. test/fuzz_replay.c serialize.c -o $@ $(LDLIBS)
 
 # Builds the same sequences with this library and with the C++ one and
 # compares the bytes. This is the test that matters: the port exists to be wire
