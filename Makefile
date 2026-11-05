@@ -55,7 +55,7 @@ ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) 
 $(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden minus NOT_ON_MSVC (issue 37))
 endif
 
-.PHONY: all test release-check controls golden test-all-standards diff fuzz clean
+.PHONY: all test release-check controls golden test-all-standards diff fuzz fuzz-controls clean
 
 all: test
 
@@ -345,10 +345,30 @@ FUZZ_CLANGXX ?= clang++
 FUZZ_CFLAGS  ?= -std=c99 $(WARNINGS) -g -O1 -ffp-contract=off \
                 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 
-fuzz: build/fuzz
+fuzz: fuzz-controls
 	@mkdir -p build/corpus
 	@cp test/fuzz-corpus/* build/corpus/
 	./build/fuzz build/corpus -max_total_time=60 -timeout=10 -print_final_stats=1
+
+# The hostile-string oracle must notice an accepted interior NUL. Reuse the
+# existing seed and sabotage rule: the real reader refuses the seed cleanly,
+# and deleting only the NUL refusal must trip the counted-length oracle.
+fuzz-controls: build/fuzz build/sabotage
+	@mkdir -p build/fuzz-controls
+	./build/fuzz test/fuzz-corpus/utf8_interior_nul -runs=1 -timeout=10 > build/fuzz-controls/clean.log 2>&1
+	./build/sabotage string-embedded-nul serialize.h build/fuzz-controls/serialize.h
+	@cp fuzz.c serialize.c build/fuzz-controls/
+	$(FUZZ_CLANG) $(FUZZ_CFLAGS) -Ibuild/fuzz-controls -c build/fuzz-controls/fuzz.c -o build/fuzz-controls/fuzz.o
+	$(FUZZ_CLANG) $(FUZZ_CFLAGS) -Ibuild/fuzz-controls -c build/fuzz-controls/serialize.c -o build/fuzz-controls/serialize.o
+	$(FUZZ_CLANGXX) -fsanitize=fuzzer,address,undefined build/fuzz-controls/fuzz.o build/fuzz-controls/serialize.o -o build/fuzz-controls/fuzz $(LDLIBS)
+	@if ./build/fuzz-controls/fuzz test/fuzz-corpus/utf8_interior_nul -runs=1 -timeout=10 -artifact_prefix=build/fuzz-controls/ > build/fuzz-controls/deleted-nul.log 2>&1; then \
+		echo "fuzz control string-embedded-nul FAILED: the harness missed the deleted refusal"; exit 1; \
+	fi
+	@grep -Fq 'fuzz_check failed: strlen( string ) == (size_t) length' build/fuzz-controls/deleted-nul.log || { \
+		cat build/fuzz-controls/deleted-nul.log; \
+		echo "fuzz control string-embedded-nul FAILED: a different check failed"; exit 1; \
+	}
+	@echo "fuzz control string-embedded-nul: counted-length oracle is red, as it must be"
 
 build/fuzz: fuzz.c serialize.c serialize.h
 	@mkdir -p build
