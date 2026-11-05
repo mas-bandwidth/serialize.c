@@ -47,11 +47,12 @@
 #include "serialize.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>     /* malloc/free: the pass 1 and pass 2 buffers carry the allocation contract exactly */
 #include <string.h>
 #include <math.h>
 
-#define fuzz_check( condition ) do { if ( !(condition) ) { __builtin_trap(); } } while (0)
+#define fuzz_check( condition ) do { if ( !(condition) ) { fprintf( stderr, "fuzz_check failed: %s\n", #condition ); __builtin_trap(); } } while (0)
 
 #define FUZZ_NUM_OPS 32
 #define FUZZ_MAX_PAYLOAD 4096
@@ -348,15 +349,18 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
 
             case 10:
             {
+                serialize_read_stream_t length_stream = *stream;
+                serialize_int32_t length = -1;
+                const int length_ok = serialize_read_int( &length_stream, &length, 0, (int) sizeof( string ) - 1 );
                 if ( !serialize_read_string( stream, string, (int) sizeof( string ) ) ) return;
+                fuzz_check( length_ok );
                 fuzz_check( strlen( string ) < sizeof( string ) );
-                /* ruling #8: an ACCEPTED string is well-formed UTF-8. The
-                   interior-NUL refusal needs no oracle of its own here: had a
-                   NUL been accepted inside the counted payload, strlen would
-                   measure the truncated prefix, and this validates exactly
-                   the strlen-perceived string -- the wire length and the
-                   perceived length must agree for the accept to be sound. */
-                fuzz_check( fuzz_utf8_valid( string, strlen( string ) ) );
+                /* The counted length and the C-string length must agree:
+                   validating only the strlen prefix cannot see an accepted
+                   interior NUL. Read the count independently on a copy of the
+                   incoming state, before the string operation consumes it. */
+                fuzz_check( strlen( string ) == (size_t) length );
+                fuzz_check( fuzz_utf8_valid( string, (size_t) length ) );
             }
             break;
 
