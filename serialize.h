@@ -158,6 +158,10 @@
 #ifndef SERIALIZE_H
 #define SERIALIZE_H
 
+#if defined(__clang__)
+#pragma clang unsafe_buffer_usage begin
+#endif
+
 /* ---------------------------------------------------------------------------
    version
 
@@ -1651,7 +1655,7 @@ SERIALIZE_INLINE serialize_refusal_t serialize_read_refusal( const serialize_rea
 
 SERIALIZE_INLINE const char * serialize_refusal_name( serialize_refusal_t refusal )
 {
-    switch ( refusal )
+    switch ( (int) refusal )
     {
         case SERIALIZE_REFUSAL_NONE:                return "none";
         case SERIALIZE_REFUSAL_PAST_END:            return "past_end";
@@ -1663,7 +1667,6 @@ SERIALIZE_INLINE const char * serialize_refusal_name( serialize_refusal_t refusa
         case SERIALIZE_REFUSAL_EMBEDDED_NUL:        return "embedded_nul";
         case SERIALIZE_REFUSAL_NON_CANONICAL:       return "non_canonical";
         case SERIALIZE_REFUSAL_REJECTED:            return "rejected";
-        case SERIALIZE_REFUSAL_NUM_REASONS:
         default:                                    return "unknown";
     }
 }
@@ -2339,6 +2342,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_compressed_float_bits( float min, float ma
 {
     float delta = max - min;
     float values = delta / res;
+    double ceiling;
     serialize_assert( min < max && res > 0.0f );
     /* a declaration whose span or step count does not compute finite is
        non-conforming (serialize fork #6, the ruling verbatim: "it's
@@ -2360,7 +2364,8 @@ SERIALIZE_ALWAYS_INLINE int serialize_compressed_float_bits( float min, float ma
     {
         values = 4294967040.0f;
     }
-    *max_integer_value = (serialize_uint32_t) ceil( (double) values );
+    ceiling = ceil( (double) values );
+    *max_integer_value = (serialize_uint32_t) ceiling;
     /* the ceiling can reach 4294967040, above INT32_MAX: the helper takes the
        unsigned domain, so the value passes through without narrowing into a
        signed parameter (implementation-defined at the C89 floor) */
@@ -2418,6 +2423,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serial
 {
     float normalized;
     float scaled;
+    double rounded;
     serialize_uint32_t integer_value;
 
     serialize_assert( max_integer_value >= 1 );
@@ -2467,7 +2473,8 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serial
        single FMA and round ONCE, which diverges again. Match the C++
        serialize.h's serialize_compressed_float_precomputed_internal exactly. */
     scaled = normalized * (float) max_integer_value;
-    integer_value = (serialize_uint32_t) floor( (double) ( scaled + 0.5f ) );
+    rounded = floor( (double) ( scaled + 0.5f ) );
+    integer_value = (serialize_uint32_t) rounded;
 
     /* STANDARD.md: the integer clamp is normative (2026-08-23, schema#109).
        Once max_integer_value >= 2^23 the float32 ulp at the top of the range
@@ -3887,6 +3894,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed128( serialize_measure_stream
 
 #ifdef __cplusplus
 }
+#endif
+
+#if defined(__clang__)
+#pragma clang unsafe_buffer_usage end
 #endif
 
 #endif /* SERIALIZE_H */
