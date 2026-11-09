@@ -143,6 +143,20 @@ static void violate_bits_width( void )
                                                            so this assert is the whole guard */
 }
 
+/* a flush commits the scratch word and clears scratch_bits while bits_written
+   stays put, so the next write must find scratch_bits tracking the cursor:
+   scratch_bits == bits_written % 64 */
+static void violate_scratch_bits_after_flush( void )
+{
+    serialize_uint8_t buffer[16];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_bits( &w, 0xAB, 8 );
+    serialize_write_flush( &w );
+    serialize_write_bits( &w, 0xCD, 8 );
+    serialize_write_flush( &w );
+}
+
 /* the measure stream carries the writer's contracts, as asserts, exactly
    like the write half (issue #52) — each must fire the same way */
 
@@ -524,6 +538,7 @@ int main( void )
     must_abort( violate_int_relative_previous_domain, "int_relative_previous_domain", "previous >= 0" );
     must_abort( violate_string_length, "string_length", "serialize_length_fits_buffer( string_length, buffer_size )" );
     must_abort( violate_bits_width, "bits_width", "value <= (serialize_uint32_t) ( ( 1UL << bits ) - 1 )" );
+    must_abort( violate_scratch_bits_after_flush, "scratch_bits_after_flush", "stream->scratch_bits == stream->bits_written % 64" );
     must_abort( violate_measure_string_length, "measure_string_length", "serialize_length_fits_buffer( string_length, buffer_size )" );
     must_abort( violate_write_float_nan, "write_float_nan", "serialize_float_bits_are_finite( bits )" );
     must_abort( violate_write_float_signaling_nan, "write_float_signaling_nan", "serialize_float_bits_are_finite( bits )" );

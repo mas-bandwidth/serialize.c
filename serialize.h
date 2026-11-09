@@ -1305,6 +1305,9 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_bits( serialize_write_stream_t * SER
     serialize_assert( bits > 0 );
     serialize_assert( bits <= 32 );
 
+    /* mid-stream the scratch tracks the cursor: scratch_bits == bits_written % 64 */
+    serialize_assert( stream->scratch_bits == stream->bits_written % 64 );
+
     /*
         Capacity is the writer's contract, not a runtime check (issue #52, the
         ruling: "C should match C++ and have no checks on write at all (except
