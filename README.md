@@ -479,7 +479,11 @@ the language can target C:
   field, not a misuse, and costs zero bits — the writer emits nothing, the
   reader takes the value from `min` and consumes nothing, and a measure adds
   nothing. (`compressed_float` is not a ranged operation and does require
-  `min < max`: a zero span has no quantization to define.)
+  `min < max`: a zero span has no quantization to define.) `int` takes its
+  value and bounds as `serialize_int64_t`, so a 64-bit caller can hand them
+  over whole, and judges the int32 domain `[-2^31, 2^31 - 1]` before
+  narrowing: a value or bound outside it is caller error on write and measure,
+  and is refused as `value_out_of_range` on read.
 - `uint128`, always 128 bits
 - **fixed point** (`serialize_write_fixed32` / `64` / `128`) — the Q-format
   path, exact by construction, which is what makes lockstep simulation and
@@ -488,9 +492,10 @@ the language can target C:
 - bytes and string (UTF-8; format 2.0 removed the wide string)
 - `end`, which a packet reader reads after the last field
 - `int_relative`, all seven tiers, over the domain `0` to `2^31 - 1`. Both
-  `previous` and `current` live in it. `previous` is your own state and never
-  arrives off the wire, so one outside the domain is caller error, asserted on
-  write and refused as `value_out_of_range` on read;
+  `previous` and `current` live in it, are taken as `serialize_int64_t`, and
+  are judged against the domain before they are narrowed. `previous` is your
+  own state and never arrives off the wire, so one outside the domain is
+  caller error, asserted on write and refused as `value_out_of_range` on read;
   `current` is reconstructed in a width that cannot wrap and then refused
   unless it lands in the domain and above `previous` — in **every** tier,
   including the absolute one, whose 32 raw bits are read unsigned. There is no
