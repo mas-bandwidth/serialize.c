@@ -37,6 +37,7 @@ jobs:
       - name: Fuzz
         run: |
           mkdir -p corpus
+          cp test/fuzz-corpus/* corpus/
           ./build/fuzz corpus -max_total_time=${{ github.event.inputs.duration || '3600' }} -timeout=10 -print_final_stats=1
 
       - name: Save corpus
