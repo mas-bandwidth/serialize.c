@@ -20,7 +20,7 @@
     that agrees only with itself.
 
     THESE BYTES ARE THE FORMAT. Changing one means the wire changed, which is
-    a breaking change for every stream ever written by any of the five ports.
+    a breaking change for every stream ever written by any of the nine ports.
     Adding coverage means APPENDING a new sequence, never editing an old one.
 
     Plain #defines and no C++ so both languages can include it.

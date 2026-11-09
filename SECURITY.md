@@ -52,8 +52,9 @@ Especially of interest, in the read path reachable from a hostile buffer:
 - **A failure that is not sticky.** Once a stream fails, every subsequent operation must
   fail without touching the buffer. A path that resumes writing or reading after an
   error can produce a partially-decoded structure that the caller believes is whole.
-- **Divergence from the C++, C#, Go or Rust ports** on the same input. The four are meant to
-  be bit-identical; if this one accepts a stream another refuses, that is a security bug
+- **Divergence from the C++, C#, Dart, Elixir, Go, Java, JavaScript or Rust ports** on the
+  same input. The eight are meant to be bit-identical; if this one accepts a stream another
+  refuses, that is a security bug
   in a deployment that mixes languages across client and server, which is the normal
   case.
 

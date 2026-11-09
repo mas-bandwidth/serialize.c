@@ -99,7 +99,7 @@ jobs:
   # A round trip test cannot catch an endianness bug: if the packer wrote the
   # scratch word in the wrong byte order, the reader would read it back in the
   # same wrong order and every round trip would pass while the bytes were
-  # incompatible with the other four languages. Only a PINNED GOLDEN run on a
+  # incompatible with the other eight languages. Only a PINNED GOLDEN run on a
   # big-endian machine proves the byte order is right, and s390x under qemu is
   # the cheapest big-endian machine there is.
   #
