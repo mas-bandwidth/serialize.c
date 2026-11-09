@@ -230,11 +230,11 @@ terminality costs the read path nothing.
 **A stream can start failed.** `serialize_read_stream_init_padded` refuses a
 destination that cannot hold `bytes + 8` — in every build, not just a debug
 one — by copying nothing and latching the stream, so a caller who got the
-size wrong decodes nothing instead of over-reading; its reason is `past_end`,
-as the C++ `InitializePadded` reports it. It is the one caller size
-here that is a runtime refusal rather than an assert alone, because it is the
-one the library is actually given: see [Reading a packet you did not
-allocate](#reading-a-packet-you-did-not-allocate).
+size wrong decodes nothing instead of over-reading; its reason is
+`value_out_of_range`, as the C++ `InitializePadded` reports it. It is the
+one caller size here that is a runtime refusal rather than an assert alone,
+because it is the one the library is actually given: see
+[Reading a packet you did not allocate](#reading-a-packet-you-did-not-allocate).
 
 **Writes are trusted and always return 1 in a release build.** Under `NDEBUG`
 the write path performs no validation at all — no per-field checks and no
@@ -452,9 +452,9 @@ other size contract here it is **refused in every build** rather than
 asserted and trusted. Nothing is copied, and the stream comes back in its
 **failed state** — the same latch a refused read leaves — so
 `serialize_read_error` is set from the start, the first read fails and writes
-nothing, and the processed counters are meaningless. A debug build asserts as
-well, so the mistake is loud where you can still fix it; a release build turns
-it into a refusal instead of a copy past the end of your destination.
+nothing, and the processed counters are meaningless. Its reason is
+`value_out_of_range`. Every build turns it into a refusal instead of a copy
+past the end of your destination.
 
 This is the one caller size the library can act on: `destination_bytes` is a
 parameter, where every other allocation arrives as a bare pointer with

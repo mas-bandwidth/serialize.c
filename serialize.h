@@ -678,9 +678,8 @@ SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stre
    trusted. Nothing is copied, and the stream is left in its FAILED state —
    the same latch a refused read leaves, so every read on it fails, nothing
    is written to any destination, and the processed counters are meaningless
-   (see ERRORS at the top of this file). Its reason is past_end, as the C++
-   ReadStream::InitializePadded reports it. A checked build asserts as well, so
-   the mistake is loud where a caller can still fix it; a release build turns
+   (see ERRORS at the top of this file). Its reason is value_out_of_range,
+   as the C++ ReadStream::InitializePadded reports it. Every build turns
    it into a refusal instead of a copy past the end of the destination. The
    same check covers a negative bytes.
 
@@ -1396,7 +1395,7 @@ SERIALIZE_INLINE void serialize_read_stream_init( serialize_read_stream_t * stre
        see the read stream struct — is the caller's, like every allocation,
        and is checked by nothing here: there is nothing to test it against.
        serialize_read_stream_init_padded takes the destination size and so
-       does assert it. */
+       does check it. */
     serialize_assert( buffer );
 
     stream->data = (const serialize_uint8_t *) buffer;
@@ -1423,14 +1422,9 @@ SERIALIZE_INLINE void serialize_read_stream_init_padded( serialize_read_stream_t
 
     serialize_assert( destination );
 
-    /* the sizes, asserted so a checked build is loud about the caller error
-       — and then checked FOR REAL below, in every build. Spelled as a
+    /* the sizes, checked FOR REAL below, in every build. Spelled as a
        subtraction rather than destination_bytes >= bytes + 8 so a huge bytes
        cannot overflow the addition before the test sees it. */
-    serialize_assert( bytes >= 0 );
-    serialize_assert( destination_bytes >= 8 );
-    serialize_assert( destination_bytes - 8 >= bytes );
-
     if ( bytes < 0 || destination_bytes < 8 || destination_bytes - 8 < bytes )
     {
         /* A destination that cannot hold the payload and its slack copies
@@ -1441,10 +1435,10 @@ SERIALIZE_INLINE void serialize_read_stream_init_padded( serialize_read_stream_t
            arrives as a bare pointer with nothing to test it against, but
            destination_bytes is a parameter, and the alternative to acting on
            it is copying past the end of the caller's destination. So it is a
-           refusal in a release build rather than an assert and a trusted
+           refusal in every build rather than an assert and a trusted
            over-read. */
         serialize_read_stream_init( stream, destination, 0 );
-        serialize_read_fail( stream, SERIALIZE_REFUSAL_PAST_END );
+        serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
         return;
     }
 

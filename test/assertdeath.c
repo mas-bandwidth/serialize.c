@@ -218,9 +218,9 @@ static void violate_measure_int128_bounds( void )
                               serialize_int128_from_int64( -1 ) );  /* min > max */
 }
 
-/* the read path's caller-owned parameters that remain contracts: the
-   buffer pointer and the padded destination, asserted exactly as the C++
-   BitReader and ReadStream::InitializePadded assert them. A bad DECLARATION
+/* the read path's caller-owned parameter that remains a contract: the
+   buffer pointer, asserted exactly as the C++ BitReader asserts it.
+   A bad DECLARATION
    on read -- bounds the wrong way round, a previous outside the int_relative
    domain, a bit count, a fixed point or precomputed declaration, a string
    buffer below 1 -- is no longer one of them: a reader never traps
@@ -231,17 +231,6 @@ static void violate_read_null_buffer( void )
 {
     serialize_read_stream_t r;
     serialize_read_stream_init( &r, NULL, 8 );          /* the C++ BitReader asserts data; init asserts the same */
-}
-
-static void violate_read_padded_destination( void )
-{
-    serialize_uint8_t payload[16];
-    serialize_uint8_t destination[16];                  /* room for the payload, none for the slack */
-    serialize_read_stream_t r;
-    memset( payload, 0, sizeof( payload ) );
-    /* the destination must hold bytes + 8, and the size parameter is what
-       lets this one be checked at all */
-    serialize_read_stream_init_padded( &r, destination, (int) sizeof( destination ), payload, (int) sizeof( payload ) );
 }
 
 /* IMPLEMENTING.md U6: a measure makes every check its write makes, except
@@ -547,7 +536,6 @@ int main( void )
     must_abort( violate_measure_int_relative_previous_domain, "measure_int_relative_previous_domain", "previous >= 0" );
     must_abort( violate_measure_int128_bounds, "measure_int128_bounds", "serialize_int128_compare( min, max ) <= 0" );
     must_abort( violate_read_null_buffer, "read_null_buffer", "buffer" );
-    must_abort( violate_read_padded_destination, "read_padded_destination", "destination_bytes - 8 >= bytes" );
     must_abort( violate_measure_int_bounds, "measure_int_bounds", "min <= max" );
     must_abort( violate_measure_int64_bounds, "measure_int64_bounds", "min <= max" );
     must_abort( violate_measure_bits_zero, "measure_bits_zero", "bits > 0" );
