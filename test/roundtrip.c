@@ -1328,6 +1328,23 @@ int main( void )
             CHECK( serialize_read_error( &r ) );
             CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_INVALID_UTF8 );   /* the first reason, not the echo */
         }
+
+        /* a refused string still leaves the caller's buffer NUL-terminated:
+           fifteen 0xFF bytes fill a 16-byte buffer pre-filled with 'X' */
+        {
+            unsigned char ff[15];
+            char name[16];
+            memset( ff, 0xFF, sizeof( ff ) );
+            memset( name, 'X', sizeof( name ) );
+            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+            CHECK( serialize_write_int( &w, 15, 0, 15 ) );
+            CHECK( serialize_write_bytes( &w, ff, 15 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
+            CHECK( !serialize_read_string( &r, name, 16 ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_INVALID_UTF8 );
+            CHECK( name[15] == '\0' );
+        }
     }
 
     /* ---- valid string round trips through the PUBLIC writer are unchanged
