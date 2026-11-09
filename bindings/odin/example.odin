@@ -11,7 +11,7 @@ foreign import serialize "shim.o"
 
 // Opaque stream storage. Sizes are asserted against the C truth at startup.
 Write_Stream :: struct #align (8) {
-	_opaque: [56]u8,
+	_opaque: [48]u8,
 }
 Read_Stream :: struct #align (8) {
 	_opaque: [32]u8,
@@ -23,7 +23,7 @@ foreign serialize {
 	serialize_write_bool :: proc(stream: ^Write_Stream, value: i32) -> i32 ---
 	serialize_write_float :: proc(stream: ^Write_Stream, value: f32) -> i32 ---
 	serialize_write_flush :: proc(stream: ^Write_Stream) ---
-	serialize_write_bytes_processed :: proc(stream: ^Write_Stream) -> i32 ---
+	serialize_write_bytes_processed :: proc(stream: ^Write_Stream) -> i64 ---
 
 	serialize_read_stream_init :: proc(stream: ^Read_Stream, buffer: rawptr, bytes: i32) ---
 	serialize_read_int :: proc(stream: ^Read_Stream, value: ^i32, min: i32, max: i32) -> i32 ---
@@ -55,7 +55,7 @@ main :: proc() {
 
 	// ---- read back ----
 	r: Read_Stream
-	serialize_read_stream_init(&r, &buffer, bytes)
+	serialize_read_stream_init(&r, &buffer, i32(bytes))
 	health, at_rest: i32
 	x: f32
 	serialize_read_int(&r, &health, 0, 1000)
@@ -76,7 +76,7 @@ main :: proc() {
 
 	// ---- refusal: a truncated buffer must fail the read, not fake a value ----
 	t: Read_Stream
-	serialize_read_stream_init(&t, &buffer, bytes - 4)
+	serialize_read_stream_init(&t, &buffer, i32(bytes - 4))
 	serialize_read_int(&t, &health, 0, 1000)
 	serialize_read_bool(&t, &at_rest)
 	if serialize_read_float(&t, &x) != 0 || serialize_read_error(&t) == 0 {

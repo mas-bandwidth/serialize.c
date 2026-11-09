@@ -554,7 +554,7 @@ destination size, which is refused rather than trusted.
 
 There is no native Zig or Odin port, deliberately: both languages import C as
 a first-class act, and a header-only C89 library is exactly the C they import
-best. [bindings/](bindings) holds working, tested examples of each — Zig
+best. [bindings/](bindings) holds working examples of each — Zig
 through `@cImport`, Odin through a `foreign` block — round trip with its end,
 and truncated read refusal.
 

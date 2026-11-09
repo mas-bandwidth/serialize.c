@@ -1,5 +1,5 @@
 /*
-    serialize.c 1.0 — a bitpacking serializer for C
+    serialize.c 2.1.1 — a bitpacking serializer for C
 
     Wire compatible with the C++, C#, Go and Rust ports: the same schema
     produces byte-identical output in all five. The format is specified in
@@ -46,9 +46,10 @@
 
     HISTORICAL AND MODERN C
 
-    The floor is C89. That means: comments are, declarations sit at the top of
-    their block, there is no bool, and nothing assumes stdint.h. Where a
-    modern toolchain is available the library uses it (stdint.h, inline,
+    The floor is C89. That means: comments use slash-star and star-slash delimiters,
+    declarations sit at the top of their block, there is no bool, and nothing
+    assumes stdint.h. Where a modern toolchain is available the library uses it
+    (stdint.h, inline,
     static assertions); where it is not, it falls back without changing the
     wire. See the configuration block below.
 
@@ -161,7 +162,7 @@
 /* ---------------------------------------------------------------------------
    version
 
-   Kept in step with the tag by CI, the same contract the C++ library uses.
+   CI checks that SERIALIZE_VERSION matches its major.minor.patch parts.
    --------------------------------------------------------------------------- */
 
 #define SERIALIZE_VERSION_MAJOR 2
@@ -3103,6 +3104,10 @@ SERIALIZE_INLINE int serialize_read_string( serialize_read_stream_t * stream, ch
         {
             return 0;
         }
+
+        /* terminated before the content checks, so a refused read still
+           leaves the caller's buffer a valid C string */
+        string[length] = '\0';
 
         /*
             Content refusals (ruling #8, adopted 2026-08-15). The reader
