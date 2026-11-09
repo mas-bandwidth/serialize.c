@@ -400,6 +400,26 @@ typedef long long serialize_int64_t;
     costing nothing in a release one. Data arriving from the network is never
     checked this way. See ERRORS at the top of this file.
 */
+/*
+    SERIALIZE_FLOAT_FORCE_ROUND( x ) — rounds x to float32 before the next
+    operation. The same macro as the C++ reference. An empty asm on the
+    architectures whose register class is spelled here, and a volatile store
+    everywhere else, including MSVC.
+*/
+#if ( defined( __GNUC__ ) || defined( __clang__ ) ) && ( defined( __aarch64__ ) || defined( _M_ARM64 ) )
+#define SERIALIZE_FLOAT_FORCE_ROUND( x ) __extension__ ({ __asm__ ( "" : "+w" ( x ) ); })
+#elif ( defined( __GNUC__ ) || defined( __clang__ ) ) && ( defined( __x86_64__ ) || defined( __i386__ ) )
+#define SERIALIZE_FLOAT_FORCE_ROUND( x ) __extension__ ({ __asm__ ( "" : "+x" ( x ) ); })
+#else
+#define SERIALIZE_FLOAT_FORCE_ROUND( x )                                                    \
+    do                                                                                      \
+    {                                                                                       \
+        volatile float serialize_float_force_round_slot = ( x );                            \
+        ( x ) = serialize_float_force_round_slot;                                           \
+    }                                                                                       \
+    while ( 0 )
+#endif
+
 #ifndef serialize_assert
 #include <assert.h>
 #define serialize_assert assert
@@ -2466,6 +2486,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serial
        single FMA and round ONCE, which diverges again. Match the C++
        serialize.h's serialize_compressed_float_precomputed_internal exactly. */
     scaled = normalized * (float) max_integer_value;
+    SERIALIZE_FLOAT_FORCE_ROUND( scaled );
     integer_value = (serialize_uint32_t) floor( (double) ( scaled + 0.5f ) );
 
     /* STANDARD.md: the integer clamp is normative (2026-08-23, schema#109).
@@ -2537,6 +2558,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float_precomputed( seriali
        -ffp-contract=off for the compilers that fuse across statements. */
     normalized = (float) integer_value / (float) max_integer_value;
     scaled = normalized * delta;
+    SERIALIZE_FLOAT_FORCE_ROUND( scaled );
     decoded = scaled + min;
 
     /* The decode must be finite (STANDARD.md, compressed_float, format 2.0).
