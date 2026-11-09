@@ -48,6 +48,9 @@ jobs:
       - name: Test
         if: runner.os != 'Windows'
         run: make test CSTD=${{ matrix.std }}
+      - name: Compressed float at -ffp-contract=fast
+        if: runner.os != 'Windows'
+        run: make fp-fast CSTD=${{ matrix.std }}
       - name: Golden wire
         if: runner.os != 'Windows'
         run: make golden CSTD=${{ matrix.std }}
@@ -140,6 +143,10 @@ jobs:
       - name: Build and run every suite big-endian
         run: |
           make test golden CC=s390x-linux-gnu-gcc \
+            CFLAGS='-std=c99 $(WARNINGS) -O2 -ffp-contract=off -static'
+      - name: Compressed float at -ffp-contract=fast
+        run: |
+          make fp-fast CC=s390x-linux-gnu-gcc \
             CFLAGS='-std=c99 $(WARNINGS) -O2 -ffp-contract=off -static'
 
   # Byte-compares this library against the C++ one over the same sequence.
