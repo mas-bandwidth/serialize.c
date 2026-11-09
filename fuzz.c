@@ -22,9 +22,10 @@
        payload uses, so the source is heap allocated at exactly payload
        length and asan fences the byte right after it: a wrapper that read
        its source the way the reader reads a buffer would trap here. The
-       destination is left uninitialized on purpose, so any byte the reader
-       can touch that the wrapper failed to write is a ubsan/asan finding
-       rather than a silent zero.
+       destination starts with the complement of the payload and nonzero
+       slack. After initialization, every byte must match pass 1: the
+       payload followed by eight zero bytes. An unwritten byte therefore
+       deterministically fails the comparison, independently of sanitizers.
 
     3. Differential round trip (fuzz_round_trip). Values generated from the
        input are written with a write stream, measured with a measure stream
@@ -917,14 +918,15 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
        from a source allocation with no slack. The source is heap allocated
        at exactly payload_bytes, so asan fences the byte right after the
        payload: a wrapper that read its source the way the reader reads a
-       buffer traps here. The destination is deliberately not zeroed first,
-       so a byte the reader can touch that the wrapper failed to write shows
-       up as a finding rather than a silent zero */
+       buffer traps here. Each destination byte starts different from its
+       expected value, so an unwritten payload or slack byte fails the
+       explicit comparison with pass 1's payload and zero slack */
     {
         serialize_uint8_t * exact = (serialize_uint8_t *) malloc( payload_bytes );
         serialize_uint8_t * padded = (serialize_uint8_t *) malloc( payload_bytes + 8 );
         serialize_read_stream_t stream;
         fuzz_pool_t pool;
+        size_t i;
         if ( exact == NULL || padded == NULL )
         {
             free( exact );
@@ -932,7 +934,14 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
             return 0;
         }
         memcpy( exact, payload, payload_bytes );
+        for ( i = 0; i < payload_bytes; ++i )
+            padded[i] = (serialize_uint8_t) ~exact[i];
+        memset( padded + payload_bytes, 0xFF, 8 );
         serialize_read_stream_init_padded( &stream, padded, (int) ( payload_bytes + 8 ), exact, (int) payload_bytes );
+        fuzz_check( !serialize_read_error( &stream ) );
+        fuzz_check( memcmp( padded, exact, payload_bytes ) == 0 );
+        for ( i = payload_bytes; i < payload_bytes + 8; ++i )
+            fuzz_check( padded[i] == 0 );
         fuzz_pool_init( &pool, payload, payload_bytes );
         fuzz_read( &stream, ops, FUZZ_NUM_OPS, &pool );
         free( exact );

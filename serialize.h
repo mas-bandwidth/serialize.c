@@ -1,8 +1,9 @@
 /*
-    serialize.c 1.0 — a bitpacking serializer for C
+    serialize.c 2.1.1 — a bitpacking serializer for C
 
-    Wire compatible with the C++, C#, Go and Rust ports: the same schema
-    produces byte-identical output in all five. The format is specified in
+    Wire compatible with the C++, C#, Dart, Elixir, Go, Java, JavaScript, Rust,
+    Lua, Luau, Squirrel, Goose, Lobster and moo ports: the same schema produces
+    byte-identical output in all fifteen. The format is specified in
     STANDARD.md, which is kept identical across the family.
 
     WHAT IS DIFFERENT ABOUT THIS PORT
@@ -46,9 +47,10 @@
 
     HISTORICAL AND MODERN C
 
-    The floor is C89. That means: comments are, declarations sit at the top of
-    their block, there is no bool, and nothing assumes stdint.h. Where a
-    modern toolchain is available the library uses it (stdint.h, inline,
+    The floor is C89. That means: comments use slash-star and star-slash delimiters,
+    declarations sit at the top of their block, there is no bool, and nothing
+    assumes stdint.h. Where a modern toolchain is available the library uses it
+    (stdint.h, inline,
     static assertions); where it is not, it falls back without changing the
     wire. See the configuration block below.
 
@@ -161,7 +163,7 @@
 /* ---------------------------------------------------------------------------
    version
 
-   Kept in step with the tag by CI, the same contract the C++ library uses.
+   CI checks that SERIALIZE_VERSION matches its major.minor.patch parts.
    --------------------------------------------------------------------------- */
 
 #define SERIALIZE_VERSION_MAJOR 2
@@ -352,7 +354,7 @@ typedef long long serialize_int64_t;
     LLVM's mid-pipeline as an opaque call, and the loop-unroll cost model
     prices it as one — the 16-wide bitpacker write group came out ~24% over
     the full-unroll budget and lost its unroll, measured C at 180% of C++
-    where the airport era had exact parity, and the same opacity sits in
+    where the two legs had exact parity, and the same opacity sits in
     every generated-C write spine. The C++ leg is never fortified (Darwin's
     fortify capture applies only to C), so the two legs were not being
     priced on the same IR: defeating the capture IS check-model parity.
@@ -364,9 +366,7 @@ typedef long long serialize_int64_t;
     there.
 
     Do not "simplify" this back to memcpy: that spelling re-arms the
-    fortify capture and re-loses the unroll. Receipts: the 2026-08-16
-    post-law investigation (r-candidate.txt and the per-SHA remark
-    ledgers).
+    fortify capture and re-loses the unroll.
 */
 #if defined(__clang__) || defined(__GNUC__)
 #define SERIALIZE_WORD_COPY( dst, src ) __builtin_memcpy( ( dst ), ( src ), 8 )
@@ -401,6 +401,26 @@ typedef long long serialize_int64_t;
     costing nothing in a release one. Data arriving from the network is never
     checked this way. See ERRORS at the top of this file.
 */
+/*
+    SERIALIZE_FLOAT_FORCE_ROUND( x ) — rounds x to float32 before the next
+    operation. The same macro as the C++ reference. An empty asm on the
+    architectures whose register class is spelled here, and a volatile store
+    everywhere else, including MSVC.
+*/
+#if ( defined( __GNUC__ ) || defined( __clang__ ) ) && ( defined( __aarch64__ ) || defined( _M_ARM64 ) )
+#define SERIALIZE_FLOAT_FORCE_ROUND( x ) __extension__ ({ __asm__ ( "" : "+w" ( x ) ); })
+#elif ( defined( __GNUC__ ) || defined( __clang__ ) ) && ( defined( __x86_64__ ) || defined( __i386__ ) )
+#define SERIALIZE_FLOAT_FORCE_ROUND( x ) __extension__ ({ __asm__ ( "" : "+x" ( x ) ); })
+#else
+#define SERIALIZE_FLOAT_FORCE_ROUND( x )                                                    \
+    do                                                                                      \
+    {                                                                                       \
+        volatile float serialize_float_force_round_slot = ( x );                            \
+        ( x ) = serialize_float_force_round_slot;                                           \
+    }                                                                                       \
+    while ( 0 )
+#endif
+
 #ifndef serialize_assert
 #include <assert.h>
 #define serialize_assert assert
@@ -2467,6 +2487,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_write_compressed_float_precomputed( serial
        single FMA and round ONCE, which diverges again. Match the C++
        serialize.h's serialize_compressed_float_precomputed_internal exactly. */
     scaled = normalized * (float) max_integer_value;
+    SERIALIZE_FLOAT_FORCE_ROUND( scaled );
     integer_value = (serialize_uint32_t) floor( (double) ( scaled + 0.5f ) );
 
     /* STANDARD.md: the integer clamp is normative (2026-08-23, schema#109).
@@ -2538,6 +2559,7 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_compressed_float_precomputed( seriali
        -ffp-contract=off for the compilers that fuse across statements. */
     normalized = (float) integer_value / (float) max_integer_value;
     scaled = normalized * delta;
+    SERIALIZE_FLOAT_FORCE_ROUND( scaled );
     decoded = scaled + min;
 
     /* The decode must be finite (STANDARD.md, compressed_float, format 2.0).
@@ -2910,7 +2932,7 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
         the loop that priced this function out of generated callers; the C++
         WriteBytes has the same byte loops and pays the same way, so this is
         not a place where mirroring the reference shape was the fast form —
-        both sides of the airport comparison were wrong here, and the wire
+        both sides of the C/C++ comparison were wrong here, and the wire
         bytes are identical either way.
     */
     if ( stream->scratch_bits != 0 )
@@ -3105,6 +3127,10 @@ SERIALIZE_INLINE int serialize_read_string( serialize_read_stream_t * stream, ch
         {
             return 0;
         }
+
+        /* terminated before the content checks, so a refused read still
+           leaves the caller's buffer a valid C string */
+        string[length] = '\0';
 
         /*
             Content refusals (ruling #8, adopted 2026-08-15). The reader

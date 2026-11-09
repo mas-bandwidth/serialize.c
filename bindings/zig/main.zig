@@ -21,7 +21,7 @@ pub fn main() !void {
 
     // ---- read back ----
     var r: c.serialize_read_stream_t = undefined;
-    c.serialize_read_stream_init(&r, &buffer, bytes);
+    c.serialize_read_stream_init(&r, &buffer, @intCast(bytes));
     var health: i32 = 0;
     var at_rest: c_int = 0;
     var x: f32 = 0;
@@ -37,7 +37,7 @@ pub fn main() !void {
 
     // ---- refusal: a truncated buffer must fail the read, not fake a value ----
     var t: c.serialize_read_stream_t = undefined;
-    c.serialize_read_stream_init(&t, &buffer, bytes - 4);
+    c.serialize_read_stream_init(&t, &buffer, @intCast(bytes - 4));
     _ = c.serialize_read_int(&t, &health, 0, 1000);
     _ = c.serialize_read_bool(&t, &at_rest);
     if (c.serialize_read_float(&t, &x) != 0 or c.serialize_read_error(&t) == 0)
