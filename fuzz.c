@@ -37,7 +37,7 @@
     fuzz.cpp case for case so the two harnesses explore the same interleavings.
     One adaptation: C has no native 128-bit arithmetic, so where the C++
     harness draws uniform 128-bit values, this one drives the wide lanes with
-    an exact endpoint, its negation, or a 64-bit draw -- the endpoints reach
+    either exact endpoint or a 64-bit draw -- the endpoints reach
     the high lane on every configuration, which is what the emulation needs
     proven.
 
@@ -124,6 +124,22 @@ static serialize_int128_t fuzz_int128_pow2( int k )
     return serialize_int128_make( (serialize_uint64_t) 1 << ( k - 64 ), 0 );
 }
 
+/* 2^k - 1 for k in [0,127]: the top of a span k + 1 bits wide. Its bitwise
+   complement, -2^k, is the bottom */
+static serialize_int128_t fuzz_int128_mask( int k )
+{
+    if ( k < 64 )
+    {
+        return serialize_int128_make( 0, ( (serialize_uint64_t) 1 << k ) - 1 );
+    }
+    return serialize_int128_make( ( (serialize_uint64_t) 1 << ( k - 64 ) ) - 1, ~ (serialize_uint64_t) 0 );
+}
+
+static serialize_int128_t fuzz_int128_not( serialize_int128_t v )
+{
+    return serialize_int128_make( ~ v.hi, ~ v.lo );
+}
+
 static serialize_int128_t fuzz_int128_neg( serialize_int128_t v )
 {
     serialize_uint64_t lo = (serialize_uint64_t) 0 - v.lo;
@@ -203,7 +219,7 @@ static int fuzz_utf8_valid( const char * s, size_t n )
    hostile passes run this, over the two allocation shapes.
    --------------------------------------------------------------------------- */
 
-static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t * ops, int num_ops )
+static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t * ops, int num_ops, fuzz_pool_t * pool )
 {
     serialize_uint8_t bytes[256];
     char string[256];
@@ -245,7 +261,8 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
                 serialize_int128_t wide;
                 serialize_int128_t wide_min;
                 serialize_int128_t wide_max;
-                serialize_int128_t bound128;
+                serialize_int128_t min128;
+                serialize_int128_t max128;
                 serialize_int128_t ranged128;
                 serialize_int128_t full128;
 
@@ -274,14 +291,16 @@ static void fuzz_read( serialize_read_stream_t * stream, const serialize_uint8_t
                 fuzz_check( serialize_int128_compare( wide, wide_min ) >= 0 );
                 fuzz_check( serialize_int128_compare( wide, wide_max ) <= 0 );
 
-                /* ranged 128 bit integers, the bound width walking every
-                   group structure: one group, two, three and four. hostile
-                   bytes must decode inside the bounds or fail the read --
-                   never clamp, never wrap. */
-                bound128 = fuzz_int128_pow2( 20 + ( param % 100 ) );
-                if ( !serialize_read_int128( stream, &ranged128, fuzz_int128_neg( bound128 ), bound128 ) ) return;
-                fuzz_check( serialize_int128_compare( ranged128, fuzz_int128_neg( bound128 ) ) >= 0 );
-                fuzz_check( serialize_int128_compare( ranged128, bound128 ) <= 0 );
+                /* ranged 128 bit integers, the bound width drawn from the
+                   pool across 1 to 128 bits, walking every group structure:
+                   one group, two, three and four. hostile bytes must decode
+                   inside the bounds or fail the read -- never clamp, never
+                   wrap. */
+                max128 = fuzz_int128_mask( fuzz_pool_byte( pool ) % 128 );
+                min128 = fuzz_int128_not( max128 );
+                if ( !serialize_read_int128( stream, &ranged128, min128, max128 ) ) return;
+                fuzz_check( serialize_int128_compare( ranged128, min128 ) >= 0 );
+                fuzz_check( serialize_int128_compare( ranged128, max128 ) <= 0 );
 
                 if ( !serialize_read_int128( stream, &full128,
                                              serialize_int128_make( 0x8000000000000000ULL, 0 ),
@@ -495,10 +514,12 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                 const serialize_uint32_t wide_fraction = ( wide_whole == 1152921504606846976LL ) ? 0 : ( fuzz_pool_uint32( pool ) & 0xFFFF );
                 const serialize_int128_t expected_wide = fuzz_int128_q16( wide_whole, wide_fraction );
 
-                /* ranged 128: endpoints or a 64-bit draw -- the endpoints
-                   exercise the full group structure at every width */
-                const int k = 20 + ( param % 100 );
-                const serialize_int128_t bound128 = fuzz_int128_pow2( k );
+                /* ranged 128 over [-2^k, 2^k - 1], k + 1 bits wide for k
+                   drawn in [0,127]: endpoints or a 64-bit draw -- the
+                   endpoints exercise the full group structure at every width */
+                const int k = fuzz_pool_byte( pool ) % 128;
+                const serialize_int128_t max128 = fuzz_int128_mask( k );
+                const serialize_int128_t min128 = fuzz_int128_not( max128 );
                 const int pick = fuzz_pool_byte( pool ) % 3;
                 serialize_int128_t expected128;
 
@@ -512,18 +533,18 @@ static void fuzz_round_trip( fuzz_mode_t mode,
 
                 if ( pick == 0 )
                 {
-                    expected128 = fuzz_int128_neg( bound128 );
+                    expected128 = min128;
                 }
                 else if ( pick == 1 )
                 {
-                    expected128 = bound128;
+                    expected128 = max128;
                 }
                 else
                 {
                     serialize_int64_t draw = (serialize_int64_t) fuzz_pool_uint64( pool );
                     if ( k < 63 )
                     {
-                        draw = (serialize_int64_t) ( (serialize_uint64_t) draw % ( ( (serialize_uint64_t) 1 << ( k + 1 ) ) + 1 ) ) - ( (serialize_int64_t) 1 << k );
+                        draw = (serialize_int64_t) ( (serialize_uint64_t) draw % ( (serialize_uint64_t) 1 << ( k + 1 ) ) ) - ( (serialize_int64_t) 1 << k );
                     }
                     expected128 = serialize_int128_from_int64( draw );
                 }
@@ -536,7 +557,7 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                     fuzz_check( serialize_write_fixed32( w, expected_fixed32, 16, 16, -1000, +1000 ) );
                     fuzz_check( serialize_write_fixed64( w, expected_fixed64, 48, 16, -100000000000LL, +100000000000LL ) );
                     fuzz_check( serialize_write_fixed128( w, expected_wide, 112, 16, -1152921504606846976LL, +1152921504606846976LL ) );
-                    fuzz_check( serialize_write_int128( w, expected128, fuzz_int128_neg( bound128 ), bound128 ) );
+                    fuzz_check( serialize_write_int128( w, expected128, min128, max128 ) );
                 }
                 else if ( mode == FUZZ_MEASURE )
                 {
@@ -546,7 +567,7 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                     fuzz_check( serialize_measure_fixed32( m, 16, 16, -1000, +1000 ) );
                     fuzz_check( serialize_measure_fixed64( m, 48, 16, -100000000000LL, +100000000000LL ) );
                     fuzz_check( serialize_measure_fixed128( m, 112, 16, -1152921504606846976LL, +1152921504606846976LL ) );
-                    fuzz_check( serialize_measure_int128( m, fuzz_int128_neg( bound128 ), bound128 ) );
+                    fuzz_check( serialize_measure_int128( m, min128, max128 ) );
                 }
                 else
                 {
@@ -562,7 +583,7 @@ static void fuzz_round_trip( fuzz_mode_t mode,
                     fuzz_check( fixed64 == expected_fixed64 );
                     fuzz_check( serialize_read_fixed128( r, &wide, 112, 16, -1152921504606846976LL, +1152921504606846976LL ) );
                     fuzz_check( serialize_int128_equal( wide, expected_wide ) );
-                    fuzz_check( serialize_read_int128( r, &ranged128, fuzz_int128_neg( bound128 ), bound128 ) );
+                    fuzz_check( serialize_read_int128( r, &ranged128, min128, max128 ) );
                     fuzz_check( serialize_int128_equal( ranged128, expected128 ) );
                 }
             }
@@ -879,6 +900,7 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
     {
         serialize_uint8_t * read_buffer = (serialize_uint8_t *) malloc( payload_bytes + 8 );
         serialize_read_stream_t stream;
+        fuzz_pool_t pool;
         if ( read_buffer == NULL )
         {
             return 0;
@@ -886,7 +908,8 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
         memset( read_buffer, 0, payload_bytes + 8 );
         memcpy( read_buffer, payload, payload_bytes );
         serialize_read_stream_init( &stream, read_buffer, (int) payload_bytes );
-        fuzz_read( &stream, ops, FUZZ_NUM_OPS );
+        fuzz_pool_init( &pool, payload, payload_bytes );
+        fuzz_read( &stream, ops, FUZZ_NUM_OPS, &pool );
         free( read_buffer );
     }
 
@@ -901,6 +924,7 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
         serialize_uint8_t * exact = (serialize_uint8_t *) malloc( payload_bytes );
         serialize_uint8_t * padded = (serialize_uint8_t *) malloc( payload_bytes + 8 );
         serialize_read_stream_t stream;
+        fuzz_pool_t pool;
         if ( exact == NULL || padded == NULL )
         {
             free( exact );
@@ -909,7 +933,8 @@ int LLVMFuzzerTestOneInput( const serialize_uint8_t * data, size_t size )
         }
         memcpy( exact, payload, payload_bytes );
         serialize_read_stream_init_padded( &stream, padded, (int) ( payload_bytes + 8 ), exact, (int) payload_bytes );
-        fuzz_read( &stream, ops, FUZZ_NUM_OPS );
+        fuzz_pool_init( &pool, payload, payload_bytes );
+        fuzz_read( &stream, ops, FUZZ_NUM_OPS, &pool );
         free( exact );
         free( padded );
     }
