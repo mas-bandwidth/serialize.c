@@ -1576,17 +1576,13 @@ int main( void )
             CHECK( serialize_read_error( &ze ) );
         }
 
-        /* a destination too small for the payload and its slack, in a
-           RELEASE build only.
+        /* a destination too small for the payload and its slack.
 
            The size is the caller's contract, but it is the one caller size
            the library is handed rather than left to trust, so the wrapper
            refuses it in every build: it copies nothing and hands back a
-           FAILED stream. In a DEBUG build the assert fires first and the
-           process dies -- test/assertdeath.c's read_padded_destination case
-           is that half -- so this can only run under NDEBUG, which is what
-           `make release-check` builds. */
-#ifdef NDEBUG
+           FAILED stream with value_out_of_range. This runs in checked
+           and NDEBUG builds alike. */
         {
             serialize_read_stream_t sm;
             serialize_uint8_t undersized[16];
@@ -1599,7 +1595,7 @@ int main( void )
 
             /* failed before the first read, and nothing was copied */
             CHECK( serialize_read_error( &sm ) );
-            CHECK( serialize_read_refusal( &sm ) == SERIALIZE_REFUSAL_PAST_END );     /* as the C++ InitializePadded reports it */
+            CHECK( serialize_read_refusal( &sm ) == SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
             for ( j = 0; j < (int) sizeof( undersized ); j++ )
             {
                 CHECK( undersized[j] == 0xFF );
@@ -1618,6 +1614,21 @@ int main( void )
             memset( undersized, 0xFF, sizeof( undersized ) );
             serialize_read_stream_init_padded( &sm, undersized, (int) sizeof( undersized ), exact, (int) sizeof( undersized ) - 7 );
             CHECK( serialize_read_error( &sm ) );
+            CHECK( serialize_read_refusal( &sm ) == SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+            CHECK( undersized[0] == 0xFF );
+
+            /* a destination below the 8 slack bytes is refused */
+            memset( undersized, 0xFF, sizeof( undersized ) );
+            serialize_read_stream_init_padded( &sm, undersized, 4, exact, 0 );
+            CHECK( serialize_read_error( &sm ) );
+            CHECK( serialize_read_refusal( &sm ) == SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+            CHECK( undersized[0] == 0xFF );
+
+            /* a negative byte count is refused */
+            memset( undersized, 0xFF, sizeof( undersized ) );
+            serialize_read_stream_init_padded( &sm, undersized, (int) sizeof( undersized ), exact, -1 );
+            CHECK( serialize_read_error( &sm ) );
+            CHECK( serialize_read_refusal( &sm ) == SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
             CHECK( undersized[0] == 0xFF );
 
             /* exactly bytes + 8 is accepted: the boundary is not off by one */
@@ -1630,7 +1641,6 @@ int main( void )
                 CHECK( undersized[ sizeof( undersized ) - 8 + (size_t) j ] == 0 );
             }
         }
-#endif /* NDEBUG */
     }
 
     /* ---- standard 2.1, IMPLEMENTING.md U2: the caller's refusal latches
