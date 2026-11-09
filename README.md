@@ -38,7 +38,7 @@ serialize_int64_t bytes = serialize_write_bytes_processed( &stream );
 
 ### Format 2.0
 
-The principle 2.0 adopts (Glenn Fiedler, 2026-10-22): **the wire carries only
+The principle 2.0 adopts (2026-10-22): **the wire carries only
 integers and bytes, and every value has exactly one encoding.** Every finite
 value 1.1 could carry keeps its exact bytes. What changed, and what it breaks:
 
