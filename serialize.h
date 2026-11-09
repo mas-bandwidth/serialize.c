@@ -352,7 +352,7 @@ typedef long long serialize_int64_t;
     LLVM's mid-pipeline as an opaque call, and the loop-unroll cost model
     prices it as one — the 16-wide bitpacker write group came out ~24% over
     the full-unroll budget and lost its unroll, measured C at 180% of C++
-    where the airport era had exact parity, and the same opacity sits in
+    where the two legs had exact parity, and the same opacity sits in
     every generated-C write spine. The C++ leg is never fortified (Darwin's
     fortify capture applies only to C), so the two legs were not being
     priced on the same IR: defeating the capture IS check-model parity.
@@ -364,9 +364,7 @@ typedef long long serialize_int64_t;
     there.
 
     Do not "simplify" this back to memcpy: that spelling re-arms the
-    fortify capture and re-loses the unroll. Receipts: the 2026-08-16
-    post-law investigation (r-candidate.txt and the per-SHA remark
-    ledgers).
+    fortify capture and re-loses the unroll.
 */
 #if defined(__clang__) || defined(__GNUC__)
 #define SERIALIZE_WORD_COPY( dst, src ) __builtin_memcpy( ( dst ), ( src ), 8 )
@@ -2910,7 +2908,7 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
         the loop that priced this function out of generated callers; the C++
         WriteBytes has the same byte loops and pays the same way, so this is
         not a place where mirroring the reference shape was the fast form —
-        both sides of the airport comparison were wrong here, and the wire
+        both sides of the C/C++ comparison were wrong here, and the wire
         bytes are identical either way.
     */
     if ( stream->scratch_bits != 0 )
