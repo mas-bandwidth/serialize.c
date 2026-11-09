@@ -12,9 +12,15 @@ A bitpacking serialization library for **C**. Wire compatible with the
 [Elixir](https://github.com/mas-bandwidth/serialize.elixir),
 [Go](https://github.com/mas-bandwidth/serialize.go),
 [Java](https://github.com/mas-bandwidth/serialize.java),
-[JavaScript](https://github.com/mas-bandwidth/serialize.js) and
-[Rust](https://github.com/mas-bandwidth/serialize.rs) ports — the same values
-produce the same bytes in all nine, so a stream written by one reads in any
+[JavaScript](https://github.com/mas-bandwidth/serialize.js),
+[Rust](https://github.com/mas-bandwidth/serialize.rs),
+[Lua](https://github.com/mas-bandwidth/serialize.lua),
+[Luau](https://github.com/mas-bandwidth/serialize.luau),
+[Squirrel](https://github.com/mas-bandwidth/serialize.nut),
+[Goose](https://github.com/mas-bandwidth/serialize.goose),
+[Lobster](https://github.com/mas-bandwidth/serialize.lobster) and
+[moo](https://github.com/mas-bandwidth/serialize.moo) ports — the same values
+produce the same bytes in all fifteen, so a stream written by one reads in any
 other. The wire is specified by [STANDARD.md](STANDARD.md), vendored here
 verbatim; this release implements **format version 2.0**.
 
@@ -366,7 +372,7 @@ CI additionally runs the golden wire test on a **big-endian** machine
 (s390x under qemu). That job earns its place: a round trip test cannot catch
 an endianness bug, because a packer writing the scratch word in the wrong byte
 order would be read back in the same wrong order and every round trip would
-pass while the bytes stayed incompatible with the other eight languages. Only a
+pass while the bytes stayed incompatible with the other fourteen languages. Only a
 pinned golden on a big-endian machine proves the byte order.
 
 The golden pins **two** sequences and the big-endian job runs both, each
