@@ -1,8 +1,9 @@
 /*
     serialize.c 2.1.1 — a bitpacking serializer for C
 
-    Wire compatible with the C++, C#, Go and Rust ports: the same schema
-    produces byte-identical output in all five. The format is specified in
+    Wire compatible with the C++, C#, Dart, Elixir, Go, Java, JavaScript, Rust,
+    Lua, Luau, Squirrel, Goose, Lobster and moo ports: the same schema produces
+    byte-identical output in all fifteen. The format is specified in
     STANDARD.md, which is kept identical across the family.
 
     WHAT IS DIFFERENT ABOUT THIS PORT
