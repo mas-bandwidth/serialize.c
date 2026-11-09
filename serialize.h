@@ -3106,6 +3106,10 @@ SERIALIZE_INLINE int serialize_read_string( serialize_read_stream_t * stream, ch
             return 0;
         }
 
+        /* terminated before the content checks, so a refused read still
+           leaves the caller's buffer a valid C string */
+        string[length] = '\0';
+
         /*
             Content refusals (ruling #8, adopted 2026-08-15). The reader
             REFUSES what a conforming writer cannot produce, in every build
