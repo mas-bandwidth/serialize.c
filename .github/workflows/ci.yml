@@ -104,7 +104,7 @@ jobs:
   # the cheapest big-endian machine there is.
   #
   # test/golden.c pins TWO sequences and this job runs both. The second is the
-  # 128-bit, fixed point and wide string surface -- a hand-rolled two-lane
+  # 128-bit and fixed point surface -- a hand-rolled two-lane
   # 64-bit emulation, and so the likeliest place in the library for a byte
   # order bug. It is also the part a round trip proves least about, which is
   # exactly why it has to be pinned and run here.
@@ -168,11 +168,9 @@ jobs:
           # v2.0.0 is the floor (format 2.0 removed wstring and added end, and
           # diff2_cpp.cpp's wide sequence carries an end and no wide string,
           # so against a 1.x header it neither compiles nor matches the pin).
-          # v2.1.3 is the latest release: v2.1.1's U3, U6, U7, U9 and U15
-          # rulings (write misuse traps and never latches, copy_string's byte
-          # rule), v2.1.2's reads refusing bad declarations and v2.1.3's clean
-          # build under the strict warning flags; the wire, and so this
-          # comparison, is unchanged since v2.1.0.
+          # SERIALIZE_TAG is the family pin described above the job; which
+          # release is newest is whatever the gh command there prints, not a
+          # fact kept in this file.
           SERIALIZE_TAG: v2.1.3
         run: git clone --quiet --depth 1 --branch "$SERIALIZE_TAG" https://github.com/mas-bandwidth/serialize.git ../serialize
       - name: Compare
@@ -194,10 +192,9 @@ jobs:
 
   # The untrusted read boundary, explored rather than enumerated. The fixed
   # suites prove the paths someone thought of; sixty seconds of libFuzzer per
-  # push is the smoke test for the paths nobody did — run against the unfixed
-  # NaN clamp, this harness finds the serialize.c:232 float-to-unsigned trap in
-  # under three minutes. The extended run lives in nightly-fuzz.yml. fuzz.c is
-  # the port of the C++ library's fuzz.cpp; this job mirrors its fuzz job.
+  # push is the smoke test for the paths nobody did. The extended run lives in
+  # nightly-fuzz.yml. fuzz.c is the port of the C++ library's fuzz.cpp; this
+  # job mirrors its fuzz job.
   fuzz:
     name: fuzz (libFuzzer)
     runs-on: ubuntu-24.04
