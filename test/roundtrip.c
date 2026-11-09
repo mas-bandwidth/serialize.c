@@ -814,7 +814,7 @@ int main( void )
 
     /* ---- the normative integer clamp after the floor ----
 
-            STANDARD.md, amended 2026-08-23 (schema#109; ruling: Glenn, live):
+            STANDARD.md, amended 2026-08-23:
             in [2^23, 2^24) the float32 ulp is 1, so scaled + 0.5f lands on a
             tie and round-to-even can push the quantized integer past
             max_integer_value. Both witnesses write max. Before the clamp the
