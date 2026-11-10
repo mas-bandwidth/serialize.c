@@ -7,12 +7,12 @@
 
 CC      ?= cc
 CSTD    ?= c99
-# -ffp-contract=off is load-bearing. STANDARD.md pins compressed_float to
-# float32 arithmetic with distinct roundings, and a compiler permitted to
-# contract a multiply and an add into one FMA rounds once instead -- the
-# writer's local guards the wire on standard-conforming compilers, but the
-# reader's reconstruction and any compiler that fuses across statements
-# (gcc's gnu modes default to -ffp-contract=fast) are only held by the flag.
+# STANDARD.md pins compressed_float to float32 arithmetic with distinct
+# roundings. The header pins each product to float32 before the following add
+# (SERIALIZE_FLOAT_FORCE_ROUND), so the wire does not depend on the
+# contraction setting; `make fp-fast` builds at -ffp-contract=fast and must
+# match. The default build still passes -ffp-contract=off, and
+# tools/check_fp_contract.sh requires it of every build in the tree.
 # WARNINGS is the family's strict set, as errors, on by default: a warning in
 # a build a consumer can run is a defect. CI legs that override CFLAGS spell
 # $(WARNINGS) inside their override, so there is one list and no leg drops it.

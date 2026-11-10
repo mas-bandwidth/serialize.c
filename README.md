@@ -86,6 +86,23 @@ decodes to an infinity now assert. The derive-per-call
 `serialize_copy_string` zeroes the rest of the destination, backs off to a
 whole character, and asserts `dest_size >= 1` (U15).
 
+**2.1.2** changes no byte of the format. API: `serialize_write_int`,
+`serialize_read_int`, `serialize_measure_int` and the three `int_relative` functions take their
+value, bounds and `previous` as `serialize_int64_t` (the read destination stays
+`serialize_int32_t *`), and `serialize_write_uint8` / `serialize_write_uint16`
+take `serialize_uint32_t`; the int32 domain is judged before narrowing, asserted
+on write and measure and refused as `value_out_of_range` on read. Refusals:
+`serialize_read_stream_init_padded` refuses bad sizes as `value_out_of_range`
+(was `past_end`) in every build, with no assertion; `serialize_read_bytes`
+refuses a `NULL` destination with a positive count as `value_out_of_range`.
+`serialize_write_bits` asserts on a write after a flush. A refused
+`serialize_read_string` leaves the buffer NUL-terminated, and an empty bytes
+block with a `NULL` pointer copies nothing on either side. Build: the
+compressed-float products are pinned to float32 in the source, so the wire does
+not depend on `-ffp-contract`; a target with `FLT_EVAL_METHOD != 0` (x87)
+is refused by `#error`; and the header checks its integer and floating-point
+type widths at compile time.
+
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it

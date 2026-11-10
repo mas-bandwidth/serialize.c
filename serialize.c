@@ -1,5 +1,5 @@
 /*
-    serialize.c 2.1.1 — a bitpacking serializer for C
+    serialize.c 2.1.2 — a bitpacking serializer for C
 
     See serialize.h for the API and STANDARD.md for the wire format.
 
