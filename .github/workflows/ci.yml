@@ -45,6 +45,14 @@ jobs:
       # did -- serialize.c 1.9.0 shipped a header that refused to compile that
       # way, and mas-bandwidth/schema's inline gate found it rather than CI.
       # The target carries its own negative control; see the Makefile.
+      #
+      # `make test` builds the compressed-float differential twice: at
+      # -ffp-contract=off (the wire gate) and again at -ffp-contract=fast
+      # (the cross-statement contraction leg, which relies on the in-source
+      # SERIALIZE_FLOAT_FORCE_ROUND barrier and runs on every compiler here).
+      # No leg uses the statement-local form -- `#pragma STDC FP_CONTRACT ON`
+      # or -ffp-contract=on -- because GCC before 14 implements neither
+      # reliably and would silently exercise a different mode.
       - name: Test
         if: runner.os != 'Windows'
         run: make test CSTD=${{ matrix.std }}
@@ -137,9 +145,11 @@ jobs:
       # frozen copy of the code it replaced -- so running it here is what
       # says the split is byte identical on a big-endian host and not merely
       # on the two little-endian ones. It also includes assertdeath
-      # (qemu-user forwards fork, waitpid and SIGABRT) and precomputed-fma
-      # (gcc 13 maps -ffp-contract=on to =fast, so that binary stands down
-      # with its printed reason until the cross toolchain reaches gcc 14).
+      # (qemu-user forwards fork, waitpid and SIGABRT) and precomputed-fma,
+      # the same differential at -ffp-contract=fast: the audited home's
+      # SERIALIZE_FLOAT_FORCE_ROUND barrier keeps the wire bytes and decoded
+      # patterns stable under cross-statement contraction, so that leg runs
+      # with teeth on every compiler here, GCC before 14 included.
       - name: Build and run every suite big-endian
         run: |
           make test golden CC=s390x-linux-gnu-gcc \
