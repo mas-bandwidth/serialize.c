@@ -158,8 +158,10 @@
 #ifndef SERIALIZE_H
 #define SERIALIZE_H
 
-#if defined(__clang__)
+#if defined(__clang__) && defined(__has_warning)
+#if __has_warning("-Wunsafe-buffer-usage")
 #pragma clang unsafe_buffer_usage begin
+#endif
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -3896,8 +3898,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_measure_fixed128( serialize_measure_stream
 }
 #endif
 
-#if defined(__clang__)
+#if defined(__clang__) && defined(__has_warning)
+#if __has_warning("-Wunsafe-buffer-usage")
 #pragma clang unsafe_buffer_usage end
+#endif
 #endif
 
 #endif /* SERIALIZE_H */
