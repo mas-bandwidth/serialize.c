@@ -4,7 +4,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* On clang and GCC the header's copies are spelled __builtin_memcpy, and a
+   copy with a NULL pointer is undefined even at length 0 -- but a sanitizer
+   only sees it on some toolchains. So for the header's own code, and only
+   there, each copy goes through this probe, which counts the NULL ones. */
+#if defined(__clang__) || defined(__GNUC__)
+static int null_copies = 0;
+static void * copy_probe( void * dst, const void * src, size_t bytes )
+{
+    if ( dst == NULL || src == NULL )
+    {
+        null_copies++;
+    }
+    if ( bytes > 0 )
+    {
+        memcpy( dst, src, bytes );
+    }
+    return dst;
+}
+#define SERIALIZE_TEST_COPY_PROBE 1
+#define __builtin_memcpy copy_probe
+#endif
+
 #include "../serialize.h"
+
+#ifdef SERIALIZE_TEST_COPY_PROBE
+#undef __builtin_memcpy
+#endif
 
 static int failed = 0;
 #define CHECK(c) do { if (!(c)) { printf("FAILED %s:%d: %s\n", __FILE__, __LINE__, #c); failed = 1; } } while (0)
@@ -824,6 +851,31 @@ int main( void )
         CHECK( strcmp( str, "the quick brown fox" ) == 0 );
         CHECK( serialize_read_int_relative( &r, 100, &rel ) ); CHECK( rel == 999999 );
         CHECK( !serialize_read_error( &r ) );
+    }
+
+    /* ---- an empty bytes block may come with no data pointer at all: a
+            NULL source or destination with bytes == 0 still aligns, and
+            copies nothing ---- */
+    {
+        serialize_uint32_t b3 = 0;
+        serialize_uint8_t u8 = 0;
+
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        serialize_write_bits( &w, 5, 3 );
+        CHECK( serialize_write_bytes( &w, NULL, 0 ) );
+        serialize_write_uint8( &w, 0xAB );
+        serialize_write_flush( &w );
+        CHECK( !serialize_write_error( &w ) );
+        CHECK( serialize_write_bytes_processed( &w ) == 2 );
+
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
+        CHECK( serialize_read_bits( &r, &b3, 3 ) );      CHECK( b3 == 5 );
+        CHECK( serialize_read_bytes( &r, NULL, 0 ) );
+        CHECK( serialize_read_uint8( &r, &u8 ) );        CHECK( u8 == 0xAB );
+        CHECK( !serialize_read_error( &r ) );
+#ifdef SERIALIZE_TEST_COPY_PROBE
+        CHECK( null_copies == 0 );
+#endif
     }
 
     /* ---- every int_relative tier, including the 4378..69914 one that
