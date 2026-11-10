@@ -106,6 +106,33 @@ static void violate_int_range( void )
     serialize_write_int( &w, 11, 0, 10 );               /* outside its declared range */
 }
 
+/* the int entry points take 64-bit value and bounds, and judge the int32
+   domain before narrowing: a value or a bound outside it is caller error */
+
+static void violate_write_int_value_out_of_int32( void )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_int( &w, 4294967301LL, 0, 100 );    /* value outside int32 */
+}
+
+static void violate_write_int_bounds_above_int32( void )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_int( &w, 0, 0, 2147483648LL );       /* max above int32 */
+}
+
+static void violate_write_int_bounds_below_int32( void )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_int( &w, 0, -2147483649LL, 0 );      /* min below int32 */
+}
+
 static void violate_int_relative_order( void )
 {
     serialize_uint8_t buffer[8];
@@ -123,6 +150,22 @@ static void violate_int_relative_previous_domain( void )
     serialize_write_stream_t w;
     serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
     serialize_write_int_relative( &w, -1, 1 );          /* previous outside the domain */
+}
+
+static void violate_write_int_relative_previous_above_domain( void )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_int_relative( &w, 2147483648LL, 2147483649LL );  /* previous above the domain */
+}
+
+static void violate_write_int_relative_current_above_domain( void )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_int_relative( &w, 0, 2147483648LL );             /* current above the domain */
 }
 
 static void violate_string_length( void )
@@ -155,6 +198,25 @@ static void violate_scratch_bits_after_flush( void )
     serialize_write_flush( &w );
     serialize_write_bits( &w, 0xCD, 8 );
     serialize_write_flush( &w );
+}
+
+/* the fixed-width writers take the value as uint32 and assert the field
+   width, so an out-of-range value is caught as caller error */
+
+static void violate_write_uint8_out_of_range( void )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_uint8( &w, 300 );                   /* above the 8-bit field */
+}
+
+static void violate_write_uint16_out_of_range( void )
+{
+    serialize_uint8_t buffer[8];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_uint16( &w, 70000 );                /* above the 16-bit field */
 }
 
 /* the measure stream carries the writer's contracts, as asserts, exactly
@@ -223,6 +285,20 @@ static void violate_measure_int_relative_previous_domain( void )
     serialize_measure_int_relative( &m, -1, 1 );        /* previous outside the domain */
 }
 
+static void violate_measure_int_relative_previous_above_domain( void )
+{
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_int_relative( &m, 2147483648LL, 2147483649LL );  /* previous above the domain */
+}
+
+static void violate_measure_int_relative_current_above_domain( void )
+{
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_int_relative( &m, 0, 2147483648LL );             /* current above the domain */
+}
+
 static void violate_measure_int128_bounds( void )
 {
     serialize_measure_stream_t m;
@@ -256,6 +332,13 @@ static void violate_measure_int_bounds( void )
     serialize_measure_stream_t m;
     serialize_measure_stream_init( &m );
     serialize_measure_int( &m, 3, 1 );                  /* min above max */
+}
+
+static void violate_measure_int_bounds_above_int32( void )
+{
+    serialize_measure_stream_t m;
+    serialize_measure_stream_init( &m );
+    serialize_measure_int( &m, 0, 2147483648LL );       /* max above int32 */
 }
 
 static void violate_measure_int64_bounds( void )
@@ -534,11 +617,18 @@ int main( void )
     must_abort( violate_capacity, "capacity", "stream->bits_written + bits <= stream->num_bits" );
     must_abort( violate_write_buffer_multiple_of_8, "write_buffer_multiple_of_8", "( bytes % 8 ) == 0" );
     must_abort( violate_int_range, "int_range", "value <= max" );
+    must_abort( violate_write_int_value_out_of_int32, "write_int_value_out_of_int32", "value <= max" );
+    must_abort( violate_write_int_bounds_above_int32, "write_int_bounds_above_int32", "max <= (serialize_int64_t) 0x7FFFFFFF" );
+    must_abort( violate_write_int_bounds_below_int32, "write_int_bounds_below_int32", "min >= (serialize_int64_t) -0x7FFFFFFF - 1" );
     must_abort( violate_int_relative_order, "int_relative_order", "current > previous" );
     must_abort( violate_int_relative_previous_domain, "int_relative_previous_domain", "previous >= 0" );
+    must_abort( violate_write_int_relative_previous_above_domain, "write_int_relative_previous_above_domain", "previous <= (serialize_int64_t) 0x7FFFFFFF" );
+    must_abort( violate_write_int_relative_current_above_domain, "write_int_relative_current_above_domain", "current <= (serialize_int64_t) 0x7FFFFFFF" );
     must_abort( violate_string_length, "string_length", "serialize_length_fits_buffer( string_length, buffer_size )" );
     must_abort( violate_bits_width, "bits_width", "value <= (serialize_uint32_t) ( ( 1UL << bits ) - 1 )" );
     must_abort( violate_scratch_bits_after_flush, "scratch_bits_after_flush", "stream->scratch_bits == stream->bits_written % 64" );
+    must_abort( violate_write_uint8_out_of_range, "write_uint8_out_of_range", "value <= (serialize_uint32_t) ( ( 1UL << bits ) - 1 )" );
+    must_abort( violate_write_uint16_out_of_range, "write_uint16_out_of_range", "value <= (serialize_uint32_t) ( ( 1UL << bits ) - 1 )" );
     must_abort( violate_measure_string_length, "measure_string_length", "serialize_length_fits_buffer( string_length, buffer_size )" );
     must_abort( violate_write_float_nan, "write_float_nan", "serialize_float_bits_are_finite( bits )" );
     must_abort( violate_write_float_signaling_nan, "write_float_signaling_nan", "serialize_float_bits_are_finite( bits )" );
@@ -549,9 +639,12 @@ int main( void )
     must_abort( violate_compressed_float_infinite_top, "compressed_float_infinite_top", "serialize_float_is_finite( min + delta )" );
     must_abort( violate_measure_int_relative_order, "measure_int_relative_order", "current > previous" );
     must_abort( violate_measure_int_relative_previous_domain, "measure_int_relative_previous_domain", "previous >= 0" );
+    must_abort( violate_measure_int_relative_previous_above_domain, "measure_int_relative_previous_above_domain", "previous <= (serialize_int64_t) 0x7FFFFFFF" );
+    must_abort( violate_measure_int_relative_current_above_domain, "measure_int_relative_current_above_domain", "current <= (serialize_int64_t) 0x7FFFFFFF" );
     must_abort( violate_measure_int128_bounds, "measure_int128_bounds", "serialize_int128_compare( min, max ) <= 0" );
     must_abort( violate_read_null_buffer, "read_null_buffer", "buffer" );
     must_abort( violate_measure_int_bounds, "measure_int_bounds", "min <= max" );
+    must_abort( violate_measure_int_bounds_above_int32, "measure_int_bounds_above_int32", "max <= (serialize_int64_t) 0x7FFFFFFF" );
     must_abort( violate_measure_int64_bounds, "measure_int64_bounds", "min <= max" );
     must_abort( violate_measure_bits_zero, "measure_bits_zero", "bits > 0" );
     must_abort( violate_measure_bits_wide, "measure_bits_wide", "bits <= 32" );
