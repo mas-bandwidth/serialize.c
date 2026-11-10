@@ -27,6 +27,13 @@ WARNINGS_c89 = -Wno-long-long
 WARNINGS ?= -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wcast-qual -Wformat=2 -Wundef -Wdouble-promotion -Werror $(WARNINGS_$(CSTD))
 CFLAGS  ?= -std=$(CSTD) $(WARNINGS) -O2 -ffp-contract=off
 LDLIBS  ?= -lm
+# x86-64 baseline -march has no FMA instruction. The fast build passes -mfma
+# there so that build actually runs the contracted arithmetic. Other targets
+# do not take the flag: their baseline already has it, or the flag is unknown.
+FP_FAST_ARCH :=
+ifneq (,$(findstring x86_64,$(shell $(CC) -dumpmachine)))
+FP_FAST_ARCH := -mfma
+endif
 
 # The C++ library, for the differential test. Override if it lives elsewhere.
 SERIALIZE_CPP ?= ../serialize
@@ -55,11 +62,11 @@ ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) 
 $(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden minus NOT_ON_MSVC (issue 37))
 endif
 
-.PHONY: all test release-check controls golden test-all-standards diff fuzz clean
+.PHONY: all test release-check controls golden test-all-standards diff fuzz clean fp-fast
 
 all: test
 
-test: release-check controls $(TEST_SUITES:%=build/%)
+test: release-check controls $(TEST_SUITES:%=build/%) fp-fast
 	@for suite in $(TEST_SUITES); do echo "./build/$$suite"; ./build/$$suite || exit 1; done
 
 # THE NEGATIVE CONTROLS (STANDARD.md, "The conformance corpus": a gate nobody
@@ -305,6 +312,23 @@ diff: build/diff_c build/diff_cpp build/diff2_c build/diff2_cpp build/diff3_c bu
 build/diff3_c: test/diff3_c.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/diff3_c.c serialize.c -o $@ $(LDLIBS)
+
+# conformance and diff3 again, at -ffp-contract=fast. diff3 is compared with
+# the same sources built from $(CFLAGS), whose contraction flag is off.
+fp-fast: build/conformance-fp-fast build/diff3_c build/diff3_c-fp-fast
+	./build/conformance-fp-fast
+	./build/diff3_c > build/out3_contract_off.txt
+	./build/diff3_c-fp-fast > build/out3_contract_fast.txt
+	diff -q build/out3_contract_off.txt build/out3_contract_fast.txt
+	@echo "fp-fast: conformance passed and diff3 matches the uncontracted build"
+
+build/conformance-fp-fast: test/conformance.c test/verbose.h test/corpus_root.h serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -ffp-contract=fast $(FP_FAST_ARCH) -I. test/conformance.c serialize.c -o $@ $(LDLIBS)
+
+build/diff3_c-fp-fast: test/diff3_c.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -ffp-contract=fast $(FP_FAST_ARCH) -I. test/diff3_c.c serialize.c -o $@ $(LDLIBS)
 
 build/diff3_cpp: test/diff3_cpp.cpp $(SERIALIZE_CPP)/serialize.h
 	@mkdir -p build

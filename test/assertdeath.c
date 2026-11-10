@@ -186,6 +186,20 @@ static void violate_bits_width( void )
                                                            so this assert is the whole guard */
 }
 
+/* a flush commits the scratch word and clears scratch_bits while bits_written
+   stays put, so the next write must find scratch_bits tracking the cursor:
+   scratch_bits == bits_written % 64 */
+static void violate_scratch_bits_after_flush( void )
+{
+    serialize_uint8_t buffer[16];
+    serialize_write_stream_t w;
+    serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+    serialize_write_bits( &w, 0xAB, 8 );
+    serialize_write_flush( &w );
+    serialize_write_bits( &w, 0xCD, 8 );
+    serialize_write_flush( &w );
+}
+
 /* the fixed-width writers take the value as uint32 and assert the field
    width, so an out-of-range value is caught as caller error */
 
@@ -612,6 +626,7 @@ int main( void )
     must_abort( violate_write_int_relative_current_above_domain, "write_int_relative_current_above_domain", "current <= (serialize_int64_t) 0x7FFFFFFF" );
     must_abort( violate_string_length, "string_length", "serialize_length_fits_buffer( string_length, buffer_size )" );
     must_abort( violate_bits_width, "bits_width", "value <= (serialize_uint32_t) ( ( 1UL << bits ) - 1 )" );
+    must_abort( violate_scratch_bits_after_flush, "scratch_bits_after_flush", "stream->scratch_bits == stream->bits_written % 64" );
     must_abort( violate_write_uint8_out_of_range, "write_uint8_out_of_range", "value <= (serialize_uint32_t) ( ( 1UL << bits ) - 1 )" );
     must_abort( violate_write_uint16_out_of_range, "write_uint16_out_of_range", "value <= (serialize_uint32_t) ( ( 1UL << bits ) - 1 )" );
     must_abort( violate_measure_string_length, "measure_string_length", "serialize_length_fits_buffer( string_length, buffer_size )" );
