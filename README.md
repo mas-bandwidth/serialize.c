@@ -110,6 +110,13 @@ a release tag rather than tracking `main`: a release states a format version,
 and two endpoints interoperate only when they carry the same one. The library
 version is `SERIALIZE_VERSION` after including the header.
 
+Supported targets are those that evaluate `float` arithmetic in `float`
+(`FLT_EVAL_METHOD == 0`): x86-64, arm64, 32-bit x86 with SSE math
+(`-msse2 -mfpmath=sse`), and big-endian machines, all built in CI. **x87
+floating point is not supported**: 32-bit x86 built for the x87 unit (GCC's
+`-m32` default) stops at an `#error` in the header, because it cannot produce
+the compressed-float roundings the wire pins.
+
 ## What is different about this port
 
 The C++ library expresses reading and writing **once**, as a single function
