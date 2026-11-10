@@ -103,10 +103,12 @@ git clone https://github.com/mas-bandwidth/serialize.c.git
 ```
 
 then copy `serialize.h` into your source tree, or point your include path at the
-clone. It needs `-lm` and nothing else. Pin a release tag rather than tracking
-`main`: a release states a format version, and two endpoints interoperate only
-when they carry the same one. The library version is `SERIALIZE_VERSION` after
-including the header.
+clone. It needs `-lm` and nothing else — no floating-point contraction flag is
+required, because the header pins the compressed-float products to float32
+itself, so the wire does not depend on the compiler's contraction setting. Pin
+a release tag rather than tracking `main`: a release states a format version,
+and two endpoints interoperate only when they carry the same one. The library
+version is `SERIALIZE_VERSION` after including the header.
 
 ## What is different about this port
 
@@ -133,11 +135,12 @@ make test-all-standards
 
 builds and runs the suite under `c89`, `c99`, `c11` and `c17`.
 
-In practice that means comments, declarations at the top of their block, no
-`bool`, and no assumption that `stdint.h` exists — there are fallback typedefs
-for a toolchain without it. 64-bit integers are required; C89 has no
-`long long`, but every C89 compiler that matters shipped one as an extension,
-and `serialize_int64_t` is the single hook if yours spells it differently.
+In practice that means comments use `/* */` delimiters, declarations at the
+top of their block, no `bool`, and no assumption that `stdint.h` exists —
+there are fallback typedefs for a toolchain without it. 64-bit integers are
+required; C89 has no `long long`, but every C89 compiler that matters shipped
+one as an extension, and `serialize_int64_t` is the single hook if yours
+spells it differently.
 
 Nothing about the standard you build against changes the bytes.
 
@@ -310,7 +313,9 @@ exactly what it would have without it.
 
 There is no build system to adopt: the library is header-only. Include
 `serialize.h` and you have all of it. It needs `-lm` for `ceil` and `floor`
-on the compressed-float path, and nothing else.
+on the compressed-float path, and nothing else — no floating-point contraction
+flag is required, because the header's barrier pins the intermediate products
+to float32, so the wire does not depend on the compiler's contraction setting.
 
 `serialize.c` still ships as an empty compatibility stub, so a build that
 compiles and links it keeps working unchanged — but linking it is optional,
