@@ -159,6 +159,25 @@ jobs:
           make fp-fast CC=s390x-linux-gnu-gcc \
             CFLAGS='-std=c99 $(WARNINGS) -O2 -ffp-contract=off -static'
 
+  # A 32-bit target: pointers and size_t are 32 bits while the stream's bit
+  # positions are 64, so every `data + ( bits >> 3 )` and every count handed
+  # to a copy narrows here and nowhere else. The flags ride in CC so every
+  # compile in the Makefile, release-check's included, is 32-bit. SSE math
+  # because the header refuses FLT_EVAL_METHOD != 0 (x87) at compile time.
+  i386:
+    name: 32-bit x86 (gcc -m32)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install 32-bit gcc support
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib
+
+      - name: Build and run every suite 32-bit
+        run: make test golden CC='gcc -m32 -msse2 -mfpmath=sse'
+
   # Byte-compares this library against the C++ one over the same sequence.
   # The port exists to be wire compatible; everything else is detail.
   #
