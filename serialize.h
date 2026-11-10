@@ -221,6 +221,21 @@ typedef long long serialize_int64_t;
 #endif
 
 /*
+    Compile-time widths. A negative array bound is the C89 static assertion,
+    and the typedefs stay at file scope so -Wunused-local-typedefs stays quiet.
+*/
+typedef char serialize_static_assert_int8_width[ ( sizeof( serialize_int8_t ) == 1 ) ? 1 : -1 ];
+typedef char serialize_static_assert_uint8_width[ ( sizeof( serialize_uint8_t ) == 1 ) ? 1 : -1 ];
+typedef char serialize_static_assert_int16_width[ ( sizeof( serialize_int16_t ) == 2 ) ? 1 : -1 ];
+typedef char serialize_static_assert_uint16_width[ ( sizeof( serialize_uint16_t ) == 2 ) ? 1 : -1 ];
+typedef char serialize_static_assert_int32_width[ ( sizeof( serialize_int32_t ) == 4 ) ? 1 : -1 ];
+typedef char serialize_static_assert_uint32_width[ ( sizeof( serialize_uint32_t ) == 4 ) ? 1 : -1 ];
+typedef char serialize_static_assert_int64_width[ ( sizeof( serialize_int64_t ) == 8 ) ? 1 : -1 ];
+typedef char serialize_static_assert_uint64_width[ ( sizeof( serialize_uint64_t ) == 8 ) ? 1 : -1 ];
+typedef char serialize_static_assert_float_width[ ( sizeof( float ) == 4 ) ? 1 : -1 ];
+typedef char serialize_static_assert_double_width[ ( sizeof( double ) == 8 ) ? 1 : -1 ];
+
+/*
     SERIALIZE_UNUSED — marks a definition the translation unit may not use.
     The hot path is defined in this header, and no consumer calls all of it.
 */
