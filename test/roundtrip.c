@@ -583,6 +583,155 @@ static int test_copy_string( void )
     return ok;
 }
 
+/*
+    IMPLEMENTING.md U15: serialize_write_bytes splits its write around the
+    64-bit scratch word -- a word store for the head, a straight copy for the
+    body, a reload of the tail word -- so it is swept across every starting
+    bit offset in a word. A prefix of 0..70 bits puts the payload's align at
+    every offset 0..63 and across a word boundary, and every byte length
+    0..40 runs the payload from inside one word to across several. Each
+    stream is compared byte for byte, through the last word the flush stores,
+    against the same fields written one bit at a time, and nothing past that
+    word is touched. The read half then decodes the prefix, the exact payload
+    and the trailing field, and writes nothing outside the payload's place.
+*/
+#define SWEEP_CAPACITY 64           /* bytes: 70 + 7 + 40 * 8 + 13 bits fits in 7 words */
+#define SWEEP_GUARD 32              /* bytes past the capacity no write may touch */
+#define SWEEP_SENTINEL 0xA5
+#define SWEEP_MAX_PREFIX 70
+#define SWEEP_MAX_LENGTH 40
+#define SWEEP_TRAILER 0x1ABCu
+#define SWEEP_TRAILER_BITS 13
+
+static serialize_uint32_t sweep_prefix_group( int group, int bits )
+{
+    serialize_uint32_t value = 0x9E3779B9u ^ ( (serialize_uint32_t) group * 0x85EBCA6Bu );
+    return bits == 32 ? value : value & ( ( 1u << bits ) - 1u );
+}
+
+static void sweep_write_one_bit_at_a_time( serialize_write_stream_t * stream, serialize_uint32_t value, int bits )
+{
+    int i;
+    for ( i = 0; i < bits; i++ )
+    {
+        (void) serialize_write_bits( stream, ( value >> i ) & 1u, 1 );
+    }
+}
+
+static int test_write_bytes_offset_sweep( void )
+{
+    serialize_uint8_t payload[SWEEP_MAX_LENGTH];
+    serialize_uint8_t out_buffer[SWEEP_CAPACITY + SWEEP_GUARD];
+    serialize_uint8_t ref_buffer[SWEEP_CAPACITY + SWEEP_GUARD];
+    serialize_uint8_t received[1 + SWEEP_MAX_LENGTH + 1];
+    serialize_write_stream_t w;
+    serialize_write_stream_t ref;
+    serialize_read_stream_t r;
+    int prefix;
+    int length;
+    int reported = 0;
+    int ok = 1;
+
+    for ( prefix = 0; prefix <= SWEEP_MAX_PREFIX; prefix++ )
+    {
+        for ( length = 0; length <= SWEEP_MAX_LENGTH; length++ )
+        {
+            serialize_int64_t stored;
+            serialize_uint32_t value;
+            int remaining;
+            int chunk = 0;
+            int group;
+            int i;
+            int case_ok = 1;
+
+            for ( i = 0; i < length; i++ )
+            {
+                payload[i] = (serialize_uint8_t) ( 0x5A ^ ( i * 37 + length ) );
+            }
+            memset( out_buffer, SWEEP_SENTINEL, sizeof( out_buffer ) );
+            memset( ref_buffer, SWEEP_SENTINEL, sizeof( ref_buffer ) );
+
+            /* the stream under test, and the same fields one bit at a time */
+            serialize_write_stream_init( &w, out_buffer, SWEEP_CAPACITY );
+            serialize_write_stream_init( &ref, ref_buffer, SWEEP_CAPACITY );
+            for ( remaining = prefix, group = 0; remaining > 0; remaining -= chunk, group++ )
+            {
+                chunk = remaining > 32 ? 32 : remaining;
+                if ( !serialize_write_bits( &w, sweep_prefix_group( group, chunk ), chunk ) ) case_ok = 0;
+                sweep_write_one_bit_at_a_time( &ref, sweep_prefix_group( group, chunk ), chunk );
+            }
+            if ( !serialize_write_bytes( &w, payload, length ) ) case_ok = 0;
+            while ( serialize_write_bits_processed( &ref ) % 8 != 0 )
+            {
+                sweep_write_one_bit_at_a_time( &ref, 0, 1 );
+            }
+            for ( i = 0; i < length; i++ )
+            {
+                sweep_write_one_bit_at_a_time( &ref, payload[i], 8 );
+            }
+            if ( !serialize_write_bits( &w, SWEEP_TRAILER, SWEEP_TRAILER_BITS ) ) case_ok = 0;
+            sweep_write_one_bit_at_a_time( &ref, SWEEP_TRAILER, SWEEP_TRAILER_BITS );
+            serialize_write_flush( &w );
+            serialize_write_flush( &ref );
+
+            if ( serialize_write_error( &w ) || serialize_write_error( &ref ) ) case_ok = 0;
+            if ( serialize_write_bits_processed( &w ) != serialize_write_bits_processed( &ref ) ) case_ok = 0;
+
+            /* every byte through the last stored word matches, and the bytes
+               past it are untouched */
+            stored = ( serialize_write_bits_processed( &ref ) + 63 ) / 64 * 8;
+            for ( i = 0; i < (int) sizeof( out_buffer ); i++ )
+            {
+                serialize_uint8_t expected = i < (int) stored ? ref_buffer[i] : (serialize_uint8_t) SWEEP_SENTINEL;
+                if ( out_buffer[i] != expected )
+                {
+                    if ( reported < 8 )
+                    {
+                        printf( "write_bytes sweep: prefix %d bits, length %d: byte %d expected 0x%02X actual 0x%02X\n",
+                                prefix, length, i, (unsigned) expected, (unsigned) out_buffer[i] );
+                        reported++;
+                    }
+                    case_ok = 0;
+                    break;
+                }
+            }
+
+            /* the read half: prefix, the exact payload into its place and
+               nowhere else, then the trailing field */
+            memset( received, SWEEP_SENTINEL, sizeof( received ) );
+            serialize_read_stream_init( &r, out_buffer, (int) serialize_write_bytes_processed( &w ) );
+            for ( remaining = prefix, group = 0; remaining > 0; remaining -= chunk, group++ )
+            {
+                chunk = remaining > 32 ? 32 : remaining;
+                value = 0;
+                if ( !serialize_read_bits( &r, &value, chunk ) || value != sweep_prefix_group( group, chunk ) ) case_ok = 0;
+            }
+            if ( !serialize_read_bytes( &r, received + 1, length ) ) case_ok = 0;
+            if ( memcmp( received + 1, payload, (size_t) length ) != 0 ) case_ok = 0;
+            if ( received[0] != SWEEP_SENTINEL ) case_ok = 0;
+            for ( i = 1 + length; i < (int) sizeof( received ); i++ )
+            {
+                if ( received[i] != SWEEP_SENTINEL ) case_ok = 0;
+            }
+            value = 0;
+            if ( !serialize_read_bits( &r, &value, SWEEP_TRAILER_BITS ) || value != SWEEP_TRAILER ) case_ok = 0;
+            if ( serialize_read_error( &r ) ) case_ok = 0;
+            if ( serialize_read_bits_processed( &r ) != serialize_write_bits_processed( &w ) ) case_ok = 0;
+
+            if ( !case_ok )
+            {
+                if ( reported < 8 )
+                {
+                    printf( "write_bytes sweep: prefix %d bits, length %d failed\n", prefix, length );
+                    reported++;
+                }
+                ok = 0;
+            }
+        }
+    }
+    return ok;
+}
+
 int main( void )
 {
     static serialize_uint8_t buffer[2048 + 8];      /* + 8: read buffer allocations extend 8 bytes past the data */
@@ -814,7 +963,7 @@ int main( void )
 
     /* ---- the normative integer clamp after the floor ----
 
-            STANDARD.md, amended 2026-08-23 (schema#109; ruling: Glenn, live):
+            STANDARD.md, amended 2026-08-23:
             in [2^23, 2^24) the float32 ulp is 1, so scaled + 0.5f lands on a
             tie and round-to-even can push the quantized integer past
             max_integer_value. Both witnesses write max. Before the clamp the
@@ -1328,6 +1477,23 @@ int main( void )
             CHECK( serialize_read_error( &r ) );
             CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_INVALID_UTF8 );   /* the first reason, not the echo */
         }
+
+        /* a refused string still leaves the caller's buffer NUL-terminated:
+           fifteen 0xFF bytes fill a 16-byte buffer pre-filled with 'X' */
+        {
+            unsigned char ff[15];
+            char name[16];
+            memset( ff, 0xFF, sizeof( ff ) );
+            memset( name, 'X', sizeof( name ) );
+            serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+            CHECK( serialize_write_int( &w, 15, 0, 15 ) );
+            CHECK( serialize_write_bytes( &w, ff, 15 ) );
+            serialize_write_flush( &w );
+            serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
+            CHECK( !serialize_read_string( &r, name, 16 ) );
+            CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_INVALID_UTF8 );
+            CHECK( name[15] == '\0' );
+        }
     }
 
     /* ---- valid string round trips through the PUBLIC writer are unchanged
@@ -1650,6 +1816,7 @@ int main( void )
     CHECK( test_uniform_read_rules() );
     CHECK( test_write_fail_changes_no_write() );
     CHECK( test_copy_string() );
+    CHECK( test_write_bytes_offset_sweep() );
 
     /* ---- format 2.0: every refusal names its reason, the reader refuses
             non-finite floats and a non-finite compressed decode, the
