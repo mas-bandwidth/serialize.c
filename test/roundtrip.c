@@ -309,6 +309,16 @@ static int test_uniform_read_rules( void )
     if ( serialize_read_int( &r, &i32, 5, 4 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
     serialize_read_stream_init( &r, data, 16 );
     if ( serialize_read_int( &r, &i32, 0x7FFFFFFF, -0x7FFFFFFF - 1 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+
+    /* U16: the int32 domain is [-2^31, 2^31 - 1]; a bound outside it is a bad
+       declaration, refused before any bits move. */
+    i32 = -77;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_int( &r, &i32, 0, 4294967296LL ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    i32 = -77;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_int( &r, &i32, -4294967297LL, 0 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+
     i64 = -77;
     serialize_read_stream_init( &r, data, 16 );
     if ( serialize_read_int64( &r, &i64, 1, -1 ) || i64 != -77 || !refused_out_of_range( &r ) ) ok = 0;
@@ -321,6 +331,10 @@ static int test_uniform_read_rules( void )
     i32 = -77;
     serialize_read_stream_init( &r, data, 16 );
     if ( serialize_read_int_relative( &r, -1, &i32 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
+    /* 2^31 itself is above the domain 0 to 2^31 - 1 */
+    i32 = -77;
+    serialize_read_stream_init( &r, data, 16 );
+    if ( serialize_read_int_relative( &r, 2147483648LL, &i32 ) || i32 != -77 || !refused_out_of_range( &r ) ) ok = 0;
 
     /* U16: precomputed compressed_float constants no declaration derives.
        [0,10] at 0.01 derives 1000, 10 bits, delta 10. */
