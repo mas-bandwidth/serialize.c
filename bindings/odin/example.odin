@@ -19,14 +19,14 @@ Read_Stream :: struct #align (8) {
 
 foreign serialize {
 	serialize_write_stream_init :: proc(stream: ^Write_Stream, buffer: rawptr, bytes: i32) ---
-	serialize_write_int :: proc(stream: ^Write_Stream, value: i32, min: i32, max: i32) -> i32 ---
+	serialize_write_int :: proc(stream: ^Write_Stream, value: i64, min: i64, max: i64) -> i32 ---
 	serialize_write_bool :: proc(stream: ^Write_Stream, value: i32) -> i32 ---
 	serialize_write_float :: proc(stream: ^Write_Stream, value: f32) -> i32 ---
 	serialize_write_flush :: proc(stream: ^Write_Stream) ---
 	serialize_write_bytes_processed :: proc(stream: ^Write_Stream) -> i64 ---
 
 	serialize_read_stream_init :: proc(stream: ^Read_Stream, buffer: rawptr, bytes: i32) ---
-	serialize_read_int :: proc(stream: ^Read_Stream, value: ^i32, min: i32, max: i32) -> i32 ---
+	serialize_read_int :: proc(stream: ^Read_Stream, value: ^i32, min: i64, max: i64) -> i32 ---
 	serialize_read_bool :: proc(stream: ^Read_Stream, value: ^i32) -> i32 ---
 	serialize_read_float :: proc(stream: ^Read_Stream, value: ^f32) -> i32 ---
 	serialize_read_end :: proc(stream: ^Read_Stream) -> i32 ---

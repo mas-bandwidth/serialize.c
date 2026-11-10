@@ -86,6 +86,23 @@ decodes to an infinity now assert. The derive-per-call
 `serialize_copy_string` zeroes the rest of the destination, backs off to a
 whole character, and asserts `dest_size >= 1` (U15).
 
+**2.1.2** changes no byte of the format. API: `serialize_write_int`,
+`serialize_read_int`, `serialize_measure_int` and the three `int_relative` functions take their
+value, bounds and `previous` as `serialize_int64_t` (the read destination stays
+`serialize_int32_t *`), and `serialize_write_uint8` / `serialize_write_uint16`
+take `serialize_uint32_t`; the int32 domain is judged before narrowing, asserted
+on write and measure and refused as `value_out_of_range` on read. Refusals:
+`serialize_read_stream_init_padded` refuses bad sizes as `value_out_of_range`
+(was `past_end`) in every build, with no assertion; `serialize_read_bytes`
+refuses a `NULL` destination with a positive count as `value_out_of_range`.
+`serialize_write_bits` asserts on a write after a flush. A refused
+`serialize_read_string` leaves the buffer NUL-terminated, and an empty bytes
+block with a `NULL` pointer copies nothing on either side. Build: the
+compressed-float products are pinned to float32 in the source, so the wire does
+not depend on `-ffp-contract`; a target with `FLT_EVAL_METHOD != 0` (x87)
+is refused by `#error`; and the header checks its integer and floating-point
+type widths at compile time.
+
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it
@@ -109,6 +126,13 @@ itself, so the wire does not depend on the compiler's contraction setting. Pin
 a release tag rather than tracking `main`: a release states a format version,
 and two endpoints interoperate only when they carry the same one. The library
 version is `SERIALIZE_VERSION` after including the header.
+
+Supported targets are those that evaluate `float` arithmetic in `float`
+(`FLT_EVAL_METHOD == 0`): x86-64, arm64, 32-bit x86 with SSE math
+(`-msse2 -mfpmath=sse`), and big-endian machines, all built in CI. **x87
+floating point is not supported**: 32-bit x86 built for the x87 unit (GCC's
+`-m32` default) stops at an `#error` in the header, because it cannot produce
+the compressed-float roundings the wire pins.
 
 ## What is different about this port
 
@@ -336,7 +360,8 @@ make test-all-standards    # c89, c99, c11, c17
 Every build in this repository passes `-ffp-contract=off` (MSVC passes
 `/fp:precise`), so the compressed-float wire's distinct roundings cannot be
 fused into one FMA; `test/precomputed.c` (and its `precomputed-fma` twin at
-`-ffp-contract=on`, which proves the suite catches contraction) verify it, and
+`-ffp-contract=fast`, where the header's float32 pinning keeps the roundings
+distinct) verify it, and
 `tools/check_fp_contract.sh` lists every compiler invocation and fails any
 that lacks the flag.
 

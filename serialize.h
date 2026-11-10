@@ -1,5 +1,5 @@
 /*
-    serialize.c 2.1.1 — a bitpacking serializer for C
+    serialize.c 2.1.2 — a bitpacking serializer for C
 
     Wire compatible with the C++, C#, Dart, Elixir, Go, Java, JavaScript, Rust,
     Lua, Luau, Squirrel, Goose, Lobster and moo ports: the same schema produces
@@ -174,8 +174,8 @@
 
 #define SERIALIZE_VERSION_MAJOR 2
 #define SERIALIZE_VERSION_MINOR 1
-#define SERIALIZE_VERSION_PATCH 1
-#define SERIALIZE_VERSION "2.1.1"
+#define SERIALIZE_VERSION_PATCH 2
+#define SERIALIZE_VERSION "2.1.2"
 
 /* ---------------------------------------------------------------------------
    configuration
@@ -2222,6 +2222,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_double( serialize_read_stream_t * SER
 SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERIALIZE_RESTRICT stream, serialize_uint8_t * SERIALIZE_RESTRICT data, int bytes )
 {
     if ( bytes < 0 )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
+    if ( data == NULL && bytes > 0 )
     {
         return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
