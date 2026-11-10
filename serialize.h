@@ -417,6 +417,19 @@ typedef char serialize_static_assert_double_width[ ( sizeof( double ) == 8 ) ? 1
     checked this way. See ERRORS at the top of this file.
 */
 /*
+    The compressed_float wire is float32 with the roundings STANDARD.md pins.
+    A target that evaluates float in a wider format (FLT_EVAL_METHOD != 0, the
+    x87 register stack of 32-bit x86) cannot produce those roundings from the
+    source expressions: casts and assignments need not remove the excess
+    precision, and the register-spelled barrier below has no SSE register to
+    land in. Refuse the configuration instead of emitting a wire that differs
+    from every other port.
+*/
+#if defined( __FLT_EVAL_METHOD__ ) && __FLT_EVAL_METHOD__ != 0
+#error "serialize.h requires FLT_EVAL_METHOD == 0: compressed_float's wire is float32 with distinct roundings"
+#endif
+
+/*
     SERIALIZE_FLOAT_FORCE_ROUND( x ) — rounds x to float32 before the next
     operation. The same macro as the C++ reference. An empty asm on the
     architectures whose register class is spelled here, and a volatile store
