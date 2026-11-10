@@ -2225,6 +2225,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERI
     {
         return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
     }
+    if ( data == NULL && bytes > 0 )
+    {
+        return serialize_read_fail( stream, SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+    }
 
     /* the align FIRST, and its padding verified, before the payload length is
        tested: set padding is nonzero_padding even when the payload would also

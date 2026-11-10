@@ -878,6 +878,23 @@ int main( void )
 #endif
     }
 
+    /* ---- a NULL destination with a positive count is a bad declaration,
+            refused on read as value_out_of_range before anything is copied,
+            as the C++ reference does ---- */
+    {
+        serialize_write_stream_init( &w, buffer, sizeof( buffer ) );
+        CHECK( serialize_write_uint32( &w, 0x12345678 ) );
+        serialize_write_flush( &w );
+        CHECK( !serialize_write_error( &w ) );
+
+        serialize_read_stream_init( &r, buffer, (int) serialize_write_bytes_processed( &w ) );
+        CHECK( !serialize_read_bytes( &r, NULL, 4 ) );
+        CHECK( serialize_read_refusal( &r ) == SERIALIZE_REFUSAL_VALUE_OUT_OF_RANGE );
+#ifdef SERIALIZE_TEST_COPY_PROBE
+        CHECK( null_copies == 0 );
+#endif
+    }
+
     /* ---- every int_relative tier, including the 4378..69914 one that
             STANDARD.md omitted ---- */
     {
