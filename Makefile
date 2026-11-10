@@ -62,9 +62,15 @@ ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) 
 $(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden minus NOT_ON_MSVC (issue 37))
 endif
 
-.PHONY: all test release-check controls golden test-all-standards diff fuzz clean fp-fast
+.PHONY: all test sanitize release-check controls golden test-all-standards diff fuzz clean fp-fast
 
 all: test
+
+# Rebuild every suite with ASan and UBSan; stale unsanitized binaries must not
+# satisfy this target. The flags match the CI sanitizers job.
+sanitize:
+	$(MAKE) clean
+	$(MAKE) test golden CFLAGS='-std=$(CSTD) $(WARNINGS) -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
 
 test: release-check controls $(TEST_SUITES:%=build/%) fp-fast
 	@for suite in $(TEST_SUITES); do echo "./build/$$suite"; ./build/$$suite || exit 1; done

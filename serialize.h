@@ -2225,7 +2225,10 @@ SERIALIZE_ALWAYS_INLINE int serialize_read_bytes( serialize_read_stream_t * SERI
        SERIALIZE_BULK_COPY, because a plain memcpy spelling here re-arms the
        fortify capture the word moves already dodge */
     serialize_assert( ( stream->bits_read % 8 ) == 0 );
-    SERIALIZE_BULK_COPY( data, stream->data + ( stream->bits_read >> 3 ), (size_t) bytes );
+    if ( bytes > 0 )
+    {
+        SERIALIZE_BULK_COPY( data, stream->data + ( stream->bits_read >> 3 ), (size_t) bytes );
+    }
     stream->bits_read += (serialize_int64_t) bytes * 8;
 
     return 1;
@@ -2981,7 +2984,10 @@ SERIALIZE_INLINE int serialize_write_bytes( serialize_write_stream_t * stream, c
     }
 
     /* the body: the whole payload, straight in at the byte cursor */
-    SERIALIZE_BULK_COPY( stream->data + (size_t) ( stream->bits_written >> 3 ), data, (size_t) bytes );
+    if ( bytes > 0 )
+    {
+        SERIALIZE_BULK_COPY( stream->data + (size_t) ( stream->bits_written >> 3 ), data, (size_t) bytes );
+    }
 
     stream->bits_written += (serialize_int64_t) bytes * 8;
     stream->word_index = (int) ( stream->bits_written / 64 );
