@@ -24,6 +24,11 @@ produce the same bytes in all fifteen, so a stream written by one reads in any
 other. The wire is specified by [STANDARD.md](STANDARD.md), vendored here
 verbatim; this release implements **format version 2.0**.
 
+If you would rather not write serialize functions by hand,
+[Schema](https://github.com/mas-bandwidth/schema) generates them for C and
+many other languages from one definition of your data. The packet code it
+generates for C uses this library as its runtime.
+
 ```c
 #include "serialize.h"
 
