@@ -7,12 +7,12 @@
 
 CC      ?= cc
 CSTD    ?= c99
-# -ffp-contract=off is load-bearing. STANDARD.md pins compressed_float to
-# float32 arithmetic with distinct roundings, and a compiler permitted to
-# contract a multiply and an add into one FMA rounds once instead -- the
-# writer's local guards the wire on standard-conforming compilers, but the
-# reader's reconstruction and any compiler that fuses across statements
-# (gcc's gnu modes default to -ffp-contract=fast) are only held by the flag.
+# STANDARD.md pins compressed_float to float32 arithmetic with distinct
+# roundings. The header pins each product to float32 before the following add
+# (SERIALIZE_FLOAT_FORCE_ROUND), so the wire does not depend on the
+# contraction setting; `make fp-fast` builds at -ffp-contract=fast and must
+# match. The default build still passes -ffp-contract=off, and
+# tools/check_fp_contract.sh requires it of every build in the tree.
 # WARNINGS is the family's strict set, as errors, on by default: a warning in
 # a build a consumer can run is a defect. CI legs that override CFLAGS spell
 # $(WARNINGS) inside their override, so there is one list and no leg drops it.
@@ -27,6 +27,13 @@ WARNINGS_c89 = -Wno-long-long
 WARNINGS ?= -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Wcast-qual -Wformat=2 -Wundef -Wdouble-promotion -Werror $(WARNINGS_$(CSTD))
 CFLAGS  ?= -std=$(CSTD) $(WARNINGS) -O2 -ffp-contract=off
 LDLIBS  ?= -lm
+# x86-64 baseline -march has no FMA instruction. The fast build passes -mfma
+# there so that build actually runs the contracted arithmetic. Other targets
+# do not take the flag: their baseline already has it, or the flag is unknown.
+FP_FAST_ARCH :=
+ifneq (,$(findstring x86_64,$(shell $(CC) -dumpmachine)))
+FP_FAST_ARCH := -mfma
+endif
 
 # The C++ library, for the differential test. Override if it lives elsewhere.
 SERIALIZE_CPP ?= ../serialize
@@ -45,7 +52,7 @@ SERIALIZE_CPP ?= ../serialize
 TEST_SUITES = roundtrip conformance corpus_root precomputed precomputed-fma assertdeath fuzz_replay
 
 # Not on MSVC, with reasons: assertdeath forks (POSIX); precomputed-fma is
-# precomputed rebuilt at -ffp-contract=on, and cl has no contraction flag
+# precomputed rebuilt at -ffp-contract=fast, and cl has no contraction flag
 # to vary.
 NOT_ON_MSVC = precomputed-fma assertdeath
 
@@ -55,11 +62,17 @@ ifneq ($(sort $(MSVC_SUITES)),$(sort $(filter-out $(NOT_ON_MSVC),$(TEST_SUITES) 
 $(error MSVC_SUITES is out of step: it must equal TEST_SUITES + golden minus NOT_ON_MSVC (issue 37))
 endif
 
-.PHONY: all test release-check controls golden test-all-standards diff fuzz clean
+.PHONY: all test sanitize release-check controls golden test-all-standards diff fuzz clean fp-fast
 
 all: test
 
-test: release-check controls $(TEST_SUITES:%=build/%)
+# Rebuild every suite with ASan and UBSan; stale unsanitized binaries must not
+# satisfy this target. The flags match the CI sanitizers job.
+sanitize:
+	$(MAKE) clean
+	$(MAKE) test golden CFLAGS='-std=$(CSTD) $(WARNINGS) -g -O1 -ffp-contract=off -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer'
+
+test: release-check controls $(TEST_SUITES:%=build/%) fp-fast
 	@for suite in $(TEST_SUITES); do echo "./build/$$suite"; ./build/$$suite || exit 1; done
 
 # THE NEGATIVE CONTROLS (STANDARD.md, "The conformance corpus": a gate nobody
@@ -240,48 +253,40 @@ build/precomputed: test/precomputed.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/precomputed.c serialize.c -o $@ $(LDLIBS)
 
-# The same differential a SECOND time, at -ffp-contract=on. This is not
-# belt and braces; it is the only build in which the property has teeth.
+# The same differential a SECOND time, at -ffp-contract=fast. This is the
+# build in which the property has teeth.
 #
-# The audited home's FMA discipline is a pair of stores through float locals
-# that keep the quantization's roundings distinct. Whether DELETING them is
-# visible depends entirely on the contraction setting, measured on this port
-# (clang 21 / arm64) by folding the reader's two roundings into one and
-# rebuilding:
+# The audited home pins each product to float32 with
+# SERIALIZE_FLOAT_FORCE_ROUND before the following add, and the frozen oracle
+# beside it does the same. That barrier -- not the contraction flag -- is what
+# keeps the split's two roundings distinct, so contraction may be permitted
+# without moving the wire or the decoded value. Measured on this port
+# (clang 21 / arm64) by folding the reader's two roundings into one expression
+# in serialize.h, which also removes the barrier:
 #
 #   -ffp-contract=off    the falsified build PASSES -- contraction is
-#                        forbidden in the frozen oracle too, so the fused
-#                        spelling and the stored one compute the same thing
-#   -ffp-contract=on     the falsified build is RED on the decoded bit
-#                        patterns -- the compiler fuses one form and not
-#                        the other, which is the divergence being guarded
-#   -ffp-contract=fast   the falsified build PASSES -- `fast` fuses ACROSS
-#                        statements, so the frozen oracle fuses as well and
-#                        the two forms stop being distinguishable
+#                        forbidden everywhere, so no spelling fuses
+#   -ffp-contract=on     the falsified build is RED -- the single expression
+#                        contracts within its statement
+#   -ffp-contract=fast   the falsified build is RED -- the barrier is gone,
+#                        so it contracts across statements as well
 #
-# The mode that looks strictest is the one with no teeth, and the mode this
-# repo pins for the wire is the other one with no teeth. Same result the C++
-# reference reached (mas-bandwidth/schema#82, comment 5364784769). So the
-# default build above stays at -ffp-contract=off, because that is what the
-# wire requires, and this build adds back the discrimination it costs.
+# The default build above stays at -ffp-contract=off because that is what the
+# wire requires, and this build adds back the discrimination it costs. The
+# pinned decode bit-pattern checks run here unconditionally.
 #
-# -ffp-contract=on comes AFTER $(CFLAGS) so it wins over the =off in there,
+# -ffp-contract=fast comes AFTER $(CFLAGS) so it wins over the =off in there,
 # including when CI overrides CFLAGS wholesale (the sanitizers job does).
-# Nothing new is required of the compiler: the default CFLAGS already spell
-# -ffp-contract, so any compiler that can build the suite at all can build
-# this. The binary reports whether contraction is actually LIVE on the
-# target -- x86-64 without FMA cannot fuse however the flag is set -- so a
-# green log never claims a discipline it did not exercise.
-#
-# And it detects the one compiler trap here: GCC before 14 mapped
-# -ffp-contract=on onto =fast, so on gcc 13 asking for statement-local
-# contraction gets cross-statement contraction, which is the unsupported
-# mode. SERIALIZE_TEST_FP_CONTRACT_REQUESTED_ON tells the binary this build
-# asked for =on, and it stands down with a printed reason instead of failing
-# for a toolchain quirk that is not a defect in the library.
+# Nothing new is required of the compiler: every compiler accepts =fast,
+# including GCC before 14, which neither supports `#pragma STDC FP_CONTRACT
+# ON` nor maps =on to statement-local contraction. No leg asks for that
+# statement-local form, so no build quietly exercises a different mode. The
+# binary still reports whether contraction is actually LIVE on the target --
+# x86-64 without FMA cannot fuse however the flag is set -- so a green log
+# never claims a discipline it did not exercise.
 build/precomputed-fma: test/precomputed.c serialize.c serialize.h
 	@mkdir -p build
-	$(CC) $(CFLAGS) -ffp-contract=on -DSERIALIZE_TEST_FP_CONTRACT='"-ffp-contract=on"' -DSERIALIZE_TEST_FP_CONTRACT_REQUESTED_ON=1 -I. test/precomputed.c serialize.c -o $@ $(LDLIBS)
+	$(CC) $(CFLAGS) -ffp-contract=fast -DSERIALIZE_TEST_FP_CONTRACT='"-ffp-contract=fast"' -I. test/precomputed.c serialize.c -o $@ $(LDLIBS)
 
 # The writer contracts, proven to FIRE: with the write path checkless in a
 # release build (issue #52), the debug asserts are the whole enforcement,
@@ -341,6 +346,23 @@ diff: build/diff_c build/diff_cpp build/diff2_c build/diff2_cpp build/diff3_c bu
 build/diff3_c: test/diff3_c.c serialize.c serialize.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -I. test/diff3_c.c serialize.c -o $@ $(LDLIBS)
+
+# conformance and diff3 again, at -ffp-contract=fast. diff3 is compared with
+# the same sources built from $(CFLAGS), whose contraction flag is off.
+fp-fast: build/conformance-fp-fast build/diff3_c build/diff3_c-fp-fast
+	./build/conformance-fp-fast
+	./build/diff3_c > build/out3_contract_off.txt
+	./build/diff3_c-fp-fast > build/out3_contract_fast.txt
+	diff -q build/out3_contract_off.txt build/out3_contract_fast.txt
+	@echo "fp-fast: conformance passed and diff3 matches the uncontracted build"
+
+build/conformance-fp-fast: test/conformance.c test/verbose.h test/corpus_root.h serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -ffp-contract=fast $(FP_FAST_ARCH) -I. test/conformance.c serialize.c -o $@ $(LDLIBS)
+
+build/diff3_c-fp-fast: test/diff3_c.c serialize.c serialize.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -ffp-contract=fast $(FP_FAST_ARCH) -I. test/diff3_c.c serialize.c -o $@ $(LDLIBS)
 
 build/diff3_cpp: test/diff3_cpp.cpp $(SERIALIZE_CPP)/serialize.h
 	@mkdir -p build

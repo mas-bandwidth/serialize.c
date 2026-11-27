@@ -1,6 +1,6 @@
 # bindings
 
-Working, tested examples calling serialize.c from Zig and from Odin.
+Working examples calling serialize.c from Zig and from Odin.
 
 These are examples, not ports, and the distinction is deliberate: there is no
 native Zig or Odin port of serialize, because both languages import C as a

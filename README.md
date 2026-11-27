@@ -12,11 +12,22 @@ A bitpacking serialization library for **C**. Wire compatible with the
 [Elixir](https://github.com/mas-bandwidth/serialize.elixir),
 [Go](https://github.com/mas-bandwidth/serialize.go),
 [Java](https://github.com/mas-bandwidth/serialize.java),
-[JavaScript](https://github.com/mas-bandwidth/serialize.js) and
-[Rust](https://github.com/mas-bandwidth/serialize.rs) ports — the same values
-produce the same bytes in all nine, so a stream written by one reads in any
+[JavaScript](https://github.com/mas-bandwidth/serialize.js),
+[Rust](https://github.com/mas-bandwidth/serialize.rs),
+[Lua](https://github.com/mas-bandwidth/serialize.lua),
+[Luau](https://github.com/mas-bandwidth/serialize.luau),
+[Squirrel](https://github.com/mas-bandwidth/serialize.nut),
+[Goose](https://github.com/mas-bandwidth/serialize.goose),
+[Lobster](https://github.com/mas-bandwidth/serialize.lobster) and
+[moo](https://github.com/mas-bandwidth/serialize.moo) ports — the same values
+produce the same bytes in all fifteen, so a stream written by one reads in any
 other. The wire is specified by [STANDARD.md](STANDARD.md), vendored here
 verbatim; this release implements **format version 2.0**.
+
+If you would rather not write serialize functions by hand,
+[Schema](https://github.com/mas-bandwidth/schema) generates them for C and
+many other languages from one definition of your data. The packet code it
+generates for C uses this library as its runtime.
 
 ```c
 #include "serialize.h"
@@ -38,7 +49,7 @@ serialize_int64_t bytes = serialize_write_bytes_processed( &stream );
 
 ### Format 2.0
 
-The principle 2.0 adopts (Glenn Fiedler, 2026-10-22): **the wire carries only
+The principle 2.0 adopts (2026-10-22): **the wire carries only
 integers and bytes, and every value has exactly one encoding.** Every finite
 value 1.1 could carry keeps its exact bytes. What changed, and what it breaks:
 
@@ -80,6 +91,23 @@ decodes to an infinity now assert. The derive-per-call
 `serialize_copy_string` zeroes the rest of the destination, backs off to a
 whole character, and asserts `dest_size >= 1` (U15).
 
+**2.1.2** changes no byte of the format. API: `serialize_write_int`,
+`serialize_read_int`, `serialize_measure_int` and the three `int_relative` functions take their
+value, bounds and `previous` as `serialize_int64_t` (the read destination stays
+`serialize_int32_t *`), and `serialize_write_uint8` / `serialize_write_uint16`
+take `serialize_uint32_t`; the int32 domain is judged before narrowing, asserted
+on write and measure and refused as `value_out_of_range` on read. Refusals:
+`serialize_read_stream_init_padded` refuses bad sizes as `value_out_of_range`
+(was `past_end`) in every build, with no assertion; `serialize_read_bytes`
+refuses a `NULL` destination with a positive count as `value_out_of_range`.
+`serialize_write_bits` asserts on a write after a flush. A refused
+`serialize_read_string` leaves the buffer NUL-terminated, and an empty bytes
+block with a `NULL` pointer copies nothing on either side. Build: the
+compressed-float products are pinned to float32 in the source, so the wire does
+not depend on `-ffp-contract`; a target with `FLT_EVAL_METHOD != 0` (x87)
+is refused by `#error`; and the header checks its integer and floating-point
+type widths at compile time.
+
 If this library helps you, **[please support it](https://www.patreon.com/MasBandwidth/membership)**
 
 ## Getting it
@@ -97,10 +125,19 @@ git clone https://github.com/mas-bandwidth/serialize.c.git
 ```
 
 then copy `serialize.h` into your source tree, or point your include path at the
-clone. It needs `-lm` and nothing else. Pin a release tag rather than tracking
-`main`: a release states a format version, and two endpoints interoperate only
-when they carry the same one. The library version is `SERIALIZE_VERSION` after
-including the header.
+clone. It needs `-lm` and nothing else — no floating-point contraction flag is
+required, because the header pins the compressed-float products to float32
+itself, so the wire does not depend on the compiler's contraction setting. Pin
+a release tag rather than tracking `main`: a release states a format version,
+and two endpoints interoperate only when they carry the same one. The library
+version is `SERIALIZE_VERSION` after including the header.
+
+Supported targets are those that evaluate `float` arithmetic in `float`
+(`FLT_EVAL_METHOD == 0`): x86-64, arm64, 32-bit x86 with SSE math
+(`-msse2 -mfpmath=sse`), and big-endian machines, all built in CI. **x87
+floating point is not supported**: 32-bit x86 built for the x87 unit (GCC's
+`-m32` default) stops at an `#error` in the header, because it cannot produce
+the compressed-float roundings the wire pins.
 
 ## What is different about this port
 
@@ -127,11 +164,12 @@ make test-all-standards
 
 builds and runs the suite under `c89`, `c99`, `c11` and `c17`.
 
-In practice that means comments, declarations at the top of their block, no
-`bool`, and no assumption that `stdint.h` exists — there are fallback typedefs
-for a toolchain without it. 64-bit integers are required; C89 has no
-`long long`, but every C89 compiler that matters shipped one as an extension,
-and `serialize_int64_t` is the single hook if yours spells it differently.
+In practice that means comments use `/* */` delimiters, declarations at the
+top of their block, no `bool`, and no assumption that `stdint.h` exists —
+there are fallback typedefs for a toolchain without it. 64-bit integers are
+required; C89 has no `long long`, but every C89 compiler that matters shipped
+one as an extension, and `serialize_int64_t` is the single hook if yours
+spells it differently.
 
 Nothing about the standard you build against changes the bytes.
 
@@ -230,11 +268,11 @@ terminality costs the read path nothing.
 **A stream can start failed.** `serialize_read_stream_init_padded` refuses a
 destination that cannot hold `bytes + 8` — in every build, not just a debug
 one — by copying nothing and latching the stream, so a caller who got the
-size wrong decodes nothing instead of over-reading; its reason is `past_end`,
-as the C++ `InitializePadded` reports it. It is the one caller size
-here that is a runtime refusal rather than an assert alone, because it is the
-one the library is actually given: see [Reading a packet you did not
-allocate](#reading-a-packet-you-did-not-allocate).
+size wrong decodes nothing instead of over-reading; its reason is
+`value_out_of_range`, as the C++ `InitializePadded` reports it. It is the
+one caller size here that is a runtime refusal rather than an assert alone,
+because it is the one the library is actually given: see
+[Reading a packet you did not allocate](#reading-a-packet-you-did-not-allocate).
 
 **Writes are trusted and always return 1 in a release build.** Under `NDEBUG`
 the write path performs no validation at all — no per-field checks and no
@@ -304,7 +342,9 @@ exactly what it would have without it.
 
 There is no build system to adopt: the library is header-only. Include
 `serialize.h` and you have all of it. It needs `-lm` for `ceil` and `floor`
-on the compressed-float path, and nothing else.
+on the compressed-float path, and nothing else — no floating-point contraction
+flag is required, because the header's barrier pins the intermediate products
+to float32, so the wire does not depend on the compiler's contraction setting.
 
 `serialize.c` still ships as an empty compatibility stub, so a build that
 compiles and links it keeps working unchanged — but linking it is optional,
@@ -325,7 +365,8 @@ make test-all-standards    # c89, c99, c11, c17
 Every build in this repository passes `-ffp-contract=off` (MSVC passes
 `/fp:precise`), so the compressed-float wire's distinct roundings cannot be
 fused into one FMA; `test/precomputed.c` (and its `precomputed-fma` twin at
-`-ffp-contract=on`, which proves the suite catches contraction) verify it, and
+`-ffp-contract=fast`, where the header's float32 pinning keeps the roundings
+distinct) verify it, and
 `tools/check_fp_contract.sh` lists every compiler invocation and fails any
 that lacks the flag.
 
@@ -366,7 +407,7 @@ CI additionally runs the golden wire test on a **big-endian** machine
 (s390x under qemu). That job earns its place: a round trip test cannot catch
 an endianness bug, because a packer writing the scratch word in the wrong byte
 order would be read back in the same wrong order and every round trip would
-pass while the bytes stayed incompatible with the other eight languages. Only a
+pass while the bytes stayed incompatible with the other fourteen languages. Only a
 pinned golden on a big-endian machine proves the byte order.
 
 The golden pins **two** sequences and the big-endian job runs both, each
@@ -452,9 +493,9 @@ other size contract here it is **refused in every build** rather than
 asserted and trusted. Nothing is copied, and the stream comes back in its
 **failed state** — the same latch a refused read leaves — so
 `serialize_read_error` is set from the start, the first read fails and writes
-nothing, and the processed counters are meaningless. A debug build asserts as
-well, so the mistake is loud where you can still fix it; a release build turns
-it into a refusal instead of a copy past the end of your destination.
+nothing, and the processed counters are meaningless. Its reason is
+`value_out_of_range`. Every build turns it into a refusal instead of a copy
+past the end of your destination.
 
 This is the one caller size the library can act on: `destination_bytes` is a
 parameter, where every other allocation arrives as a bare pointer with
@@ -479,7 +520,11 @@ the language can target C:
   field, not a misuse, and costs zero bits — the writer emits nothing, the
   reader takes the value from `min` and consumes nothing, and a measure adds
   nothing. (`compressed_float` is not a ranged operation and does require
-  `min < max`: a zero span has no quantization to define.)
+  `min < max`: a zero span has no quantization to define.) `int` takes its
+  value and bounds as `serialize_int64_t`, so a 64-bit caller can hand them
+  over whole, and judges the int32 domain `[-2^31, 2^31 - 1]` before
+  narrowing: a value or bound outside it is caller error on write and measure,
+  and is refused as `value_out_of_range` on read.
 - `uint128`, always 128 bits
 - **fixed point** (`serialize_write_fixed32` / `64` / `128`) — the Q-format
   path, exact by construction, which is what makes lockstep simulation and
@@ -488,9 +533,10 @@ the language can target C:
 - bytes and string (UTF-8; format 2.0 removed the wide string)
 - `end`, which a packet reader reads after the last field
 - `int_relative`, all seven tiers, over the domain `0` to `2^31 - 1`. Both
-  `previous` and `current` live in it. `previous` is your own state and never
-  arrives off the wire, so one outside the domain is caller error, asserted on
-  write and refused as `value_out_of_range` on read;
+  `previous` and `current` live in it, are taken as `serialize_int64_t`, and
+  are judged against the domain before they are narrowed. `previous` is your
+  own state and never arrives off the wire, so one outside the domain is
+  caller error, asserted on write and refused as `value_out_of_range` on read;
   `current` is reconstructed in a width that cannot wrap and then refused
   unless it lands in the domain and above `previous` — in **every** tier,
   including the absolute one, whose 32 raw bits are read unsigned. There is no
@@ -554,7 +600,7 @@ destination size, which is refused rather than trusted.
 
 There is no native Zig or Odin port, deliberately: both languages import C as
 a first-class act, and a header-only C89 library is exactly the C they import
-best. [bindings/](bindings) holds working, tested examples of each — Zig
+best. [bindings/](bindings) holds working examples of each — Zig
 through `@cImport`, Odin through a `foreign` block — round trip with its end,
 and truncated read refusal.
 

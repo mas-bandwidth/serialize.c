@@ -72,7 +72,12 @@ static unsigned long check_count = 0;
    library's own marker for a definition a translation unit may not use: it
    is referenced only from serialize_assert, so under NDEBUG it goes unused,
    and clang exempts an unused static inline from warning only in a header.
-   DO NOT EDIT.
+
+   The bodies are otherwise frozen. The two amendments they carry are marked
+   inline and mirror the audited home: the integer clamp after the floor
+   (schema#109) and the SERIALIZE_FLOAT_FORCE_ROUND barrier after each
+   product, which lets this oracle run in the same -ffp-contract=fast build
+   as the live code without the compiler fusing the split's two roundings.
    --------------------------------------------------------------------------- */
 
 SERIALIZE_INLINE SERIALIZE_UNUSED int frozen_float_is_finite( float value )
@@ -124,9 +129,16 @@ SERIALIZE_INLINE int frozen_write_compressed_float( serialize_write_stream_t * s
     }
 
     scaled = normalized * (float) max_integer_value;
+    /* One of the two amendments the frozen oracle carries: the audited home
+       pins the product to float32 before the add with
+       SERIALIZE_FLOAT_FORCE_ROUND, and the differential's second build runs
+       at -ffp-contract=fast, where the oracle would otherwise fuse the
+       multiply into the following add and move the wire. No arithmetic
+       changes. */
+    SERIALIZE_FLOAT_FORCE_ROUND( scaled );
     integer_value = (serialize_uint32_t) floor( (double) ( scaled + 0.5f ) );
     /* STANDARD.md: the integer clamp is normative (2026-08-23, schema#109) --
-       same clamp as the audited home in serialize.h, same reason. The one
+       same clamp as the audited home in serialize.h, same reason. The other
        amendment the frozen oracle carries, exactly as the C++ reference
        amended its own frozen reference (serialize PR #88). */
     if ( integer_value > max_integer_value )
@@ -168,6 +180,7 @@ SERIALIZE_INLINE int frozen_read_compressed_float( serialize_read_stream_t * str
 
     normalized = (float) integer_value / (float) max_integer_value;
     scaled = normalized * delta;
+    SERIALIZE_FLOAT_FORCE_ROUND( scaled );
     *value = scaled + min;
 
     return 1;
@@ -238,19 +251,23 @@ static float float_ulp_down( float value )
    removing them is VISIBLE depends on the build.
 
    Measured on this port, clang 21 / arm64, folding the reader's two
-   roundings into one expression in serialize.h:
+   roundings into one expression in serialize.h (which also removes the
+   force-round barrier):
 
-       -ffp-contract=off   the falsified build PASSES  -- no teeth
-       -ffp-contract=on    the falsified build is RED  -- teeth
-       -ffp-contract=fast  the falsified build PASSES  -- no teeth
+       -ffp-contract=off   the falsified build PASSES  -- contraction is
+                           forbidden everywhere, so no spelling fuses
+       -ffp-contract=on    the falsified build is RED  -- the single
+                           expression contracts within its statement
+       -ffp-contract=fast  the falsified build is RED  -- the barrier is
+                           gone, so it contracts across statements
 
-   which is the C confirmation of the C++ reference's finding
-   (mas-bandwidth/schema#82, comment 5364784769): the discriminating build is
-   the compiler's DEFAULT contraction, not the most aggressive one, because
-   `fast` fuses the frozen oracle too and the two forms stop being
-   distinguishable. This repo pins -ffp-contract=off for the wire (see the
-   Makefile), which is correct for the wire and toothless for this property,
-   so `make test` builds this suite a SECOND time at -ffp-contract=on.
+   This repo pins -ffp-contract=off for the wire (see the Makefile), which is
+   correct for the wire and toothless for this property, so `make test`
+   builds this suite a SECOND time, at -ffp-contract=fast. That build is
+   meaningful because the audited home pins each product to float32 with
+   SERIALIZE_FLOAT_FORCE_ROUND before the add: the barrier, not the flag,
+   keeps the split's two roundings distinct, and removing it turns the
+   pinned decode patterns and this differential red.
 
    That covers the compiler. These two sentinels cover the rest, and they do
    it on EVERY host and every flag: they are the same one-rounding
@@ -299,7 +316,7 @@ static float sentinel_read_value_one_rounding( serialize_uint32_t integer_value,
 }
 
 /* ---------------------------------------------------------------------------
-   Does THIS build actually fuse? -ffp-contract=on only has teeth where the
+   Does THIS build actually fuse? -ffp-contract=fast only has teeth where the
    target has an FMA instruction: on x86-64 without -mfma the compiler cannot
    contract even when permitted, and the flag then buys nothing. Rather than
    let a build claim a discipline it is not exercising, measure it and say so.
@@ -340,18 +357,18 @@ static int fp_contraction_is_live( void )
 }
 
 /* Does this build contract ACROSS a statement boundary? That is the `fast`
-   behaviour, and it is not a stricter version of `on` -- it is a different
-   thing, in which the frozen oracle fuses too, every spelling of the
-   arithmetic becomes indistinguishable, and STANDARD.md's requirement of
-   distinct roundings simply does not hold. The library therefore does not
-   support such a build: this repo pins -ffp-contract=off for exactly that
-   reason, and a build at =fast fails the pinned decoded patterns below.
+   behaviour, and the split's second build asks for it deliberately: the
+   audited home pins each product to float32 with SERIALIZE_FLOAT_FORCE_ROUND
+   before the following add, so `fast` can no longer fuse the two roundings
+   of the compressed float, and the pinned wire bytes and decoded patterns
+   hold. The probe is reported, never used to stand down -- a build that
+   fuses across statements is exercising the barrier, which is the point.
 
-   It has to be DETECTED rather than assumed from the flag, because GCC
-   before 14 mapped -ffp-contract=on onto fast. On such a compiler, asking
-   for `on` gets `fast`, and the pinned patterns would fail with a message
-   about a bit pattern instead of the truth, which is that the build is
-   unsupported. So the patterns are skipped and the reason is printed.
+   It is DETECTED rather than assumed from the flag because GCC before 14
+   mapped -ffp-contract=on onto fast and does not implement
+   `#pragma STDC FP_CONTRACT ON`. That is why no leg asks for statement-local
+   contraction: the second build asks for `fast` directly, which every
+   compiler supports.
 
    The discriminator is a plain local store against a volatile one. ISO C
    requires the plain store to round to float32; only a compiler contracting
@@ -691,25 +708,16 @@ static void test_precomputed_conformance( void )
         memcpy( &bits_a, &a, 4 );
         memcpy( &bits_b, &b, 4 );
         memcpy( &bits_c, &c, 4 );
-        /* the decoded patterns are pinned only where the build keeps the
-           roundings distinct. A build that contracts across statements
-           reconstructs one of these one ulp away by design, and the honest
-           report is that the build is unsupported -- not a bit pattern
-           mismatch that reads like a port bug. The wire bytes above are
-           pinned unconditionally: they do not move under contraction. */
-        if ( fp_contraction_crosses_statements() )
-        {
-            if ( serialize_test_verbose() )
-            {
-                printf( "precomputed differential: SKIPPING the pinned decoded patterns -- this build contracts ACROSS statements (-ffp-contract=fast, or a GCC before 14 mapping =on onto =fast), which STANDARD.md's compressed float does not admit\n" );
-            }
-        }
-        else
-        {
-            CHECK( bits_a == 0x00000000UL );
-            CHECK( bits_b == 0xC2C7BD71UL );
-            CHECK( bits_c == 0xC2055C2AUL );
-        }
+        /* the decoded patterns are pinned unconditionally. The audited home
+           pins each product to float32 with SERIALIZE_FLOAT_FORCE_ROUND
+           before the following add, so a build that contracts across
+           statements cannot reconstruct one of these one ulp away. The wire
+           bytes above are pinned for the same reason: without that barrier a
+           -ffp-contract=fast build fuses the writer's multiply into its
+           +0.5f and moves them. */
+        CHECK( bits_a == 0x00000000UL );
+        CHECK( bits_b == 0xC2C7BD71UL );
+        CHECK( bits_c == 0xC2055C2AUL );
     }
 }
 
@@ -930,24 +938,11 @@ static void test_precomputed_differential( void )
 
 int main( void )
 {
-#ifdef SERIALIZE_TEST_FP_CONTRACT_REQUESTED_ON
-    /* The Makefile's second build asked for STATEMENT-LOCAL contraction. GCC
-       before 14 mapped -ffp-contract=on onto =fast and gives cross-statement
-       contraction instead, which is a different and unsupported thing. That
-       is a fact about the toolchain, not a defect in the library, so this
-       build stands down rather than reporting a failure it did not find.
-       The -ffp-contract=off run is still the gate on such a compiler, and
-       the negative controls below carry the discrimination there. */
-    if ( fp_contraction_crosses_statements() )
-    {
-        if ( serialize_test_verbose() )
-        {
-            printf( "precomputed differential: asked for -ffp-contract=on and this compiler produced CROSS-STATEMENT contraction (GCC before 14 maps =on onto =fast), so the discriminating build is not available on this toolchain -- standing down\n" );
-        }
-        printf( "OK (skipped)\n" );
-        return 0;
-    }
-#endif
+    /* Every build runs every check. The Makefile's second build asks for
+       -ffp-contract=fast, not statement-local =on, so there is no GCC-before-14
+       toolchain trap to stand down from: =fast is available on every compiler,
+       and SERIALIZE_FLOAT_FORCE_ROUND in the audited home is what keeps the
+       compressed float's two roundings distinct under it. */
 
     /* which build this is, and whether its contraction setting is buying
        anything on this target. Reported, never asserted: a host without an
@@ -958,7 +953,7 @@ int main( void )
         printf( "precomputed differential: built with %s; fp contraction is %s in this build\n",
                 SERIALIZE_TEST_FP_CONTRACT,
                 !fp_contraction_is_live()             ? "not available -- this target does not fuse, so the float stores are compiled but not exercised"
-                : fp_contraction_crosses_statements() ? "LIVE but crossing statements -- a =fast build, in which no spelling of this arithmetic is distinguishable from another"
+                : fp_contraction_crosses_statements() ? "LIVE and crossing statements -- the =fast build, where the audited home's barrier keeps the two roundings distinct"
                                                       : "LIVE and statement-local -- the audited home's float stores are under test" );
     }
 
